@@ -1,0 +1,9 @@
+{:paths ["."]
+ :deps
+ {com.xtdb/xtdb-core      {:mvn/version "1.24.4"}
+  com.xtdb/xtdb-rocksdb   {:mvn/version "1.24.4"}
+  org.clojure/clojure     {:mvn/version "1.12.0"}}
+ :aliases
+ {:node {:jvm-opts ["--add-opens=java.base/java.nio=ALL-UNNAMED"
+                    "-Dio.netty.tryReflectionSetAccessible=true"
+                    "-Xmx1g" "-XX:MaxDirectMemorySize=1g"]}}}

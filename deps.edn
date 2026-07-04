@@ -1,0 +1,14 @@
+{:paths ["."]
+ :deps
+ {com.xtdb/xtdb-core {:mvn/version "2.0.0"}
+  com.xtdb/xtdb-api  {:mvn/version "2.0.0"}}
+ ;; XTDB 2 is Arrow-based; modern JDKs need java.nio opened to Arrow.
+ ;; Run everything via -M:node (throwaway in-process node, E-futon1b-foothold).
+ :aliases
+ ;; Heap + direct-memory caps: these dev JVMs coexist with the 3-4 GB serving
+ ;; JVM on a shared box; uncapped defaults (1/4 RAM heap EACH) built the
+ ;; memory pressure implicated in the 2026-07-04 serving-JVM deaths. The
+ ;; slice workloads (~1.4k docs) need nowhere near 1 GB.
+ {:node {:jvm-opts ["--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
+                    "-Dio.netty.tryReflectionSetAccessible=true"
+                    "-Xmx1g" "-XX:MaxDirectMemorySize=1g"]}}}
