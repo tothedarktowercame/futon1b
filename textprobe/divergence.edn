@@ -1,0 +1,26 @@
+{:file "textprobe/history-versions.edn",
+ :bands
+ {:evidence-sample
+  {:docs 473,
+   :multi-version 0,
+   :text-changed 0,
+   :posting-inflation 1.0,
+   :ever>current 0,
+   :ratio {:p50 1.0, :p90 1.0, :p99 1.0, :max 1.0},
+   :empty-current 0},
+  :stable-sample
+  {:docs 984,
+   :multi-version 779,
+   :text-changed 51,
+   :posting-inflation 1.0292350170537599,
+   :ever>current 45,
+   :ratio {:p50 1.0, :p90 1.0, :p99 3.75, :max 6.4},
+   :empty-current 0},
+  :updated
+  {:docs 6713,
+   :multi-version 1,
+   :text-changed 0,
+   :posting-inflation 1.0,
+   :ever>current 0,
+   :ratio {:p50 1.0, :p90 1.0, :p99 1.0, :max 1.0},
+   :empty-current 0}}}

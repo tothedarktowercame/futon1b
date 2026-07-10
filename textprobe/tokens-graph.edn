@@ -1,0 +1,55 @@
+{:file "migration-export/graph-snapshot.edn",
+ :index-fields
+ {:vocab 16572,
+  :postings 787918,
+  :docs-per-token {:p50 4, :p90 67, :p99 768, :max 15997},
+  :stop-word-share 0.1280805870661668,
+  :hot-terms
+  [["scope" 15997]
+   ["mission" 15812]
+   ["tree" 14815]
+   ["the" 13223]
+   ["and" 9928]
+   ["exotype" 7339]
+   ["iiching" 7001]
+   ["in" 6682]
+   ["is" 6613]
+   ["to" 6433]
+   ["for" 6168]
+   ["pattern" 5080]
+   ["from" 4970]
+   ["evidence" 4590]
+   ["lift" 4539]
+   ["not" 4096]
+   ["params" 3842]
+   ["registry" 3740]
+   ["of" 3737]
+   ["as" 3698]
+   ["program" 3667]
+   ["context" 3584]
+   ["futon5" 3576]
+   ["or" 3452]
+   ["if" 3449]
+   ["that" 3207]
+   ["on" 3154]
+   ["because" 3010]
+   ["with" 2988]
+   ["next" 2863]
+   ["this" 2788]
+   ["however" 2713]
+   ["then" 2637]
+   ["steps" 2603]
+   ["explicit" 2540]
+   ["encoding" 2519]
+   ["conclusion" 2460]
+   ["by" 2453]
+   ["mapping" 2385]
+   ["an" 2341]],
+  :docs 44620},
+ :hud-fields
+ {:vocab 0,
+  :postings 0,
+  :docs-per-token {:p50 nil, :p90 nil, :p99 nil, :max nil},
+  :stop-word-share nil,
+  :hot-terms [],
+  :docs 0}}

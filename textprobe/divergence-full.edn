@@ -1,0 +1,18 @@
+{:file "textprobe/history-versions-full.edn",
+ :bands
+ {:entity-full
+  {:docs 41037,
+   :multi-version 26601,
+   :text-changed 1861,
+   :posting-inflation 1.028378427797485,
+   :ever>current 1631,
+   :ratio {:p50 1.0, :p90 1.0, :p99 3.8, :max 90.5},
+   :empty-current 0},
+  :evidence-full
+  {:docs 90770,
+   :multi-version 58,
+   :text-changed 0,
+   :posting-inflation 1.0,
+   :ever>current 0,
+   :ratio {:p50 1.0, :p90 1.0, :p99 1.0, :max 1.0},
+   :empty-current 0}}}
