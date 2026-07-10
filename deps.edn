@@ -1,7 +1,7 @@
 {:paths ["."]
  :deps
- {com.xtdb/xtdb-core {:mvn/version "2.0.0"}
-  com.xtdb/xtdb-api  {:mvn/version "2.0.0"}}
+ {com.xtdb/xtdb-core {:mvn/version "2.1.0"}
+  com.xtdb/xtdb-api  {:mvn/version "2.1.0"}}
  ;; XTDB 2 is Arrow-based; modern JDKs need java.nio opened to Arrow.
  ;; Run everything via -M:node (throwaway in-process node, E-futon1b-foothold).
  :aliases

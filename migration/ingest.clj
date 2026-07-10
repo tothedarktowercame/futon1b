@@ -170,7 +170,39 @@
                outcome (try
                          (doseq [[table pairs] by-table]
                            (ingest-batch! node table (map second pairs)))
-                         :ok
+                         ;; VERIFIED PUT (2026-07-10): XTDB 2.0.0 batch puts
+                         ;; can drop rows SILENTLY — observed ~13/200 evidence
+                         ;; docs per batch absent after a no-error execute-tx,
+                         ;; while the same doc lands fine alone. Point-query
+                         ;; every id; re-put misses per-doc (rescue ladder),
+                         ;; and only then call the batch :ok.
+                         (let [absent (for [[table doc] batch
+                                            :let [id (:xt/id doc)]
+                                            :when (empty?
+                                                   (xt/q node
+                                                         (list '-> (list 'from table '[xt/id])
+                                                               (list 'where (list '= 'xt/id id)))))]
+                                        [table doc])]
+                           (if (empty? absent)
+                             :ok
+                             (let [repaired
+                                   (reduce (fn [acc [table doc]]
+                                             (let [r (put-doc-with-rescue! node table doc shape-log)
+                                                   present? (seq (xt/q node
+                                                                       (list '-> (list 'from table '[xt/id])
+                                                                             (list 'where (list '= 'xt/id (:xt/id doc))))))]
+                                               (if present?
+                                                 (update acc :repaired inc)
+                                                 (update acc :lost conj {:id (:xt/id doc) :r r}))))
+                                           {:repaired 0 :lost []}
+                                           absent)]
+                               (println (format "    batch %d: %d silently-dropped, %d repaired, %d LOST"
+                                                batch-num (count absent) (:repaired repaired)
+                                                (count (:lost repaired))))
+                               (if (empty? (:lost repaired))
+                                 :ok
+                                 {:error "verified-put: docs lost after repair"
+                                  :lost (:lost repaired)}))))
                          (catch Exception e
                            {:error (.getMessage e)
                             :sample-id (:xt/id (second (first batch)))}))

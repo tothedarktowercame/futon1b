@@ -19,7 +19,7 @@
   (doseq [it (take 3 (:items result))]
     (println "   " (pr-str it))))
 
-(with-open [node (zm/open-store "migration-store")]
+(with-open [node (zm/open-store "migration-store-21")]
 
   ;; E1: recall by tag (ANY-of; :invoke/:dev carry ~26.5k memories each).
   (show "E1 memory_search {:tags [:invoke-start] :limit 5}"
@@ -37,12 +37,10 @@
   (show "E4 memory_search {:since \"2026-07-09\" :limit 5}"
         (zm/memory-search node {:since "2026-07-09" :limit 5}))
 
-  ;; E5: KNOWN GAP, kept visible — sessionless evidence (e.g. mission-sync
-  ;; records, author "mission-control/sync") carries no :evidence/session-id,
-  ;; so the session-scoped export never saw it. 0 items here is the honest
-  ;; reading until the quiet-window evidence id-drain leg runs (see
-  ;; E-futon1a-to-futon1b-migration-pipeline.md, 2026-07-10 update).
-  (show "E5 memory_search {:tags [:mission :sync]} — sessionless gap, expect 0"
+  ;; E5: sessionless evidence (mission-sync records, author
+  ;; "mission-control/sync") — invisible to the original session-scoped
+  ;; export (F5), captured by the evidence snapshot scope 2026-07-10.
+  (show "E5 memory_search {:tags [:mission :sync]} — sessionless recall"
         (zm/memory-search node {:tags [:mission :sync] :limit 5}))
 
   ;; E6: parity spot-check — same docs via live futon1a HTTP.

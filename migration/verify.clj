@@ -20,6 +20,7 @@
 ;;      --store-dir <dir> [--base-url URL] [--sample N]
 (ns migration.verify
   (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [migration.export :as ex]
             [migration.transform :as xf]
             [migration.ingest :as ingest]
@@ -61,6 +62,16 @@
 (def ^:private canonical-key-cmpr
   (fn [a b] (compare (stable-str a) (stable-str b))))
 
+(defn- fold-key
+  "XTDB 2 case-folds struct field names (SQL column normalization): a nested
+  map key :G is stored and returned as :g (verified live on the
+  e-portfolio-* evidence bodies, 2026-07-10). Key CASE is therefore not a
+  preserved property of the store; canonicalize folds both sides to match."
+  [k]
+  (if (keyword? k)
+    (keyword (namespace k) (clojure.string/lower-case (name k)))
+    k))
+
 (defn canonicalize
   "Canonicalize a value into a form with deterministic pr-str."
   [v]
@@ -71,7 +82,7 @@
     ;; element positions matter.
     (map? v)
     (into (sorted-map-by canonical-key-cmpr)
-          (keep (fn [[k vv]] (when (some? vv) [k (canonicalize vv)])))
+          (keep (fn [[k vv]] (when (some? vv) [(fold-key k) (canonicalize vv)])))
           v)
 
     (set? v)
@@ -199,11 +210,21 @@
         dest (fetch-doc node table id (keys src))]
     (if-not dest
       {:id id :missing? true}
-      (let [bad (vec (for [[k v] src
+      ;; Keys with a slash INSIDE the name segment (e.g.
+      ;; :futon1a/backfill/orig-type) cannot be projected as XTQL columns —
+      ;; they are UNVERIFIABLE by this layer, not mismatched. Reported
+      ;; separately, never failed.
+      (let [projectable? (fn [k] (not (str/includes? (name k) "/")))
+            bad (vec (for [[k v] src
                            :when (and (some? v)
+                                      (projectable? k)
                                       (not= (stable-str v) (stable-str (get dest k))))]
-                       k))]
-        (when (seq bad) {:id id :keys bad})))))
+                       k))
+            unproj (vec (for [[k v] src :when (and (some? v) (not (projectable? k)))] k))]
+        (cond
+          (seq bad) {:id id :keys bad}
+          (seq unproj) {:id id :unverifiable unproj :ok? true}
+          :else nil)))))
 
 (defn checksum-sample
   "Stride-sample n docs from source-docs, compare each against the node.
@@ -218,7 +239,8 @@
                           (compare-doc node table tx (rescue-stage-of (:xt/id tx)))))
                       sample)]
     {:sampled (min n (count (range 0 total stride)))
-     :mismatched (vec results)}))
+     :mismatched (vec (remove :ok? results))
+     :unverifiable (vec (filter :ok? results))}))
 
 ;; ---------------------------------------------------------------------------
 ;; Layer 3: sampled census parity (hyperedges only, when present).
