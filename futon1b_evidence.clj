@@ -12,7 +12,7 @@
   (:require [clojure.string :as str]
             [migration.transform :as xf]
             [migration.ingest :as ingest]
-            [xtdb.api :as xt]))
+            [futon1b-xt :as fxt]))
 
 ;; ---------------------------------------------------------------------------
 ;; Payload → doc.
@@ -77,11 +77,11 @@
 ;; ---------------------------------------------------------------------------
 
 (defn fetch-by-id [node id]
-  (first (xt/q node (list '-> '(from :evidence [*])
+  (first (fxt/safe-q node (list '-> '(from :evidence [*])
                           (list 'where (list '= 'xt/id id))))))
 
 (defn- exists? [node id]
-  (seq (xt/q node (list '-> '(from :evidence [xt/id])
+  (seq (fxt/safe-q node (list '-> '(from :evidence [xt/id])
                         (list 'where (list '= 'xt/id id))))))
 
 (defn- public-doc [doc]
@@ -130,9 +130,9 @@
                   author (conj (list '= 'evidence/author author))
                   session-id (conj (list '= 'evidence/session-id session-id)))]
     (if (seq clauses)
-      (xt/q node (list '-> '(from :evidence [*])
+      (fxt/safe-q node (list '-> '(from :evidence [*])
                        (cons 'where clauses)))
-      (xt/q node '(from :evidence [*])))))
+      (fxt/safe-q node '(from :evidence [*])))))
 
 (defn- name-of [x]
   (cond (keyword? x) (name x)
@@ -212,7 +212,7 @@
         author (http-params "author")
         limit (some-> (http-params "limit")
                       (as-> s (try (Long/parseLong s) (catch Exception _ nil))))
-        docs (cond->> (xt/q node '(from :evidence [*]))
+        docs (cond->> (fxt/safe-q node '(from :evidence [*]))
                author (filter #(= author (:evidence/author %)))
                since (filter #(>= (compare (str (:evidence/at %)) since) 0)))
         sessioned (filter :evidence/session-id docs)
