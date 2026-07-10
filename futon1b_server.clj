@@ -19,14 +19,20 @@
 ;;        back and escalated through the rescue ladder if absent.
 ;;   GET  /api/alpha/memory/search    → §12.3 envelope via zai-memory-1b;
 ;;        params: type author since tags (comma-sep) limit.
+;;   POST /api/alpha/evidence + GET /{id} /{id}/chain /count /sessions and
+;;        GET /api/alpha/evidence?… — API-CONTRACT.md §3 (A1, operational
+;;        switchover). Writes gated by penholder (futon1b-gates, A2).
 ;;
 ;; Run: cd /home/joe/code/futon1b && \
 ;;      clojure -M:node -m futon1b-server --store-dir migration-store --port 7073
+;;      (lucy: --port 7074 — nginx owns :7073 there)
 (ns futon1b-server
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [migration.transform :as xf]
             [migration.ingest :as ingest]
+            [futon1b-gates :as gates]
+            [futon1b-evidence :as ev]
             [zai-memory-1b :as zm]
             [xtdb.api :as xt])
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
@@ -140,7 +146,17 @@
       (try
         (route-fn ex)
         (catch Exception e
-          (respond! ex 500 (pr-str {:ok false :error (.getMessage e)})))))))
+          ;; Layered gate errors keep futon1a's envelope + status mapping
+          ;; (API-CONTRACT §0); anything else is the generic 500.
+          (let [[status body] (gates/error->response e)]
+            (respond! ex status (pr-str body))))))))
+
+(defn- penholder!
+  "Resolve (body → x-penholder header → default) and authorize (L3)."
+  [^HttpExchange ex payload]
+  (gates/authorize!
+   (gates/resolve-penholder payload
+                            (.getFirst (.getRequestHeaders ex) "x-penholder"))))
 
 (def ^:private tables
   [:hyperedges :entities :evidence :relations :type-catalog :docs :misc])
@@ -155,9 +171,49 @@
 (defn- hyperedge-route [^HttpExchange ex]
   (if (= "POST" (.getRequestMethod ex))
     (let [payload (edn/read-string (read-body ex))
+          _ (penholder! ex payload)
           res (upsert-hyperedge! @!node payload)]
       (respond! ex (if (:ok res) 200 500) (pr-str res)))
     (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
+
+(defn- evidence-route
+  "Dispatch everything under /api/alpha/evidence (API-CONTRACT §3).
+  Subpath routing mirrors futon1a's match order: sessions and count
+  before the generic {id} prefix; {id}/chain by suffix."
+  [^HttpExchange ex]
+  (let [method (.getRequestMethod ex)
+        path (.getPath (.getRequestURI ex))
+        tail (subs path (min (count "/api/alpha/evidence") (count path)))
+        tail (if (str/starts-with? tail "/") (subs tail 1) tail)]
+    (cond
+      (and (= method "POST") (str/blank? tail))
+      (let [payload (edn/read-string (read-body ex))
+            _ (penholder! ex payload)
+            [status body] (ev/write-evidence! @!node payload)]
+        (respond! ex status (pr-str body)))
+
+      (not= method "GET")
+      (respond! ex 405 (pr-str {:ok false :error "GET/POST only"}))
+
+      (str/blank? tail)
+      (respond! ex 200 (pr-str (ev/query-evidence @!node (query-params ex))))
+
+      (= tail "count")
+      (respond! ex 200 (pr-str (ev/count-evidence @!node (query-params ex))))
+
+      (= tail "sessions")
+      (respond! ex 200 (pr-str (ev/sessions @!node (query-params ex))))
+
+      (str/ends-with? tail "/chain")
+      (let [id (subs tail 0 (- (count tail) (count "/chain")))]
+        (respond! ex 200 (pr-str (ev/chain @!node id))))
+
+      :else
+      (if-let [doc (ev/fetch-by-id @!node tail)]
+        (if (:evidence/id doc)
+          (respond! ex 200 (pr-str (dissoc doc :xt/id)))
+          (respond! ex 404 (pr-str {:error "not found" :evidence/id tail})))
+        (respond! ex 404 (pr-str {:error "not found" :evidence/id tail}))))))
 
 (defn- memory-search-route [^HttpExchange ex]
   (let [p (query-params ex)
@@ -169,11 +225,13 @@
                (p "limit")  (assoc :limit (Long/parseLong (p "limit"))))]
     (respond! ex 200 (pr-str (zm/memory-search @!node opts)))))
 
-(defn start-server! [{:keys [store-dir port]}]
-  (reset! !node (zm/open-store store-dir))
+(defn start-server! [{:keys [store-dir port node]}]
+  (gates/seed-mission-contract!)
+  (reset! !node (or node (zm/open-store store-dir)))
   (let [server (HttpServer/create (InetSocketAddress. (int port)) 0)]
     (.createContext server "/health" (handler health))
     (.createContext server "/api/alpha/hyperedge" (handler hyperedge-route))
+    (.createContext server "/api/alpha/evidence" (handler evidence-route))
     (.createContext server "/api/alpha/memory/search" (handler memory-search-route))
     (.setExecutor server (java.util.concurrent.Executors/newFixedThreadPool 4))
     (.start server)
