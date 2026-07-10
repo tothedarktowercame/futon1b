@@ -33,7 +33,9 @@
             [migration.ingest :as ingest]
             [futon1b-gates :as gates]
             [futon1b-evidence :as ev]
+            [futon1b-graph :as graph]
             [zai-memory-1b :as zm]
+            [futon1b-xt :as fxt]
             [xtdb.api :as xt])
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
            [java.net InetSocketAddress URLDecoder]
@@ -81,12 +83,11 @@
       (:props payload) (assoc :hx/props (:props payload)))))
 
 (defn fetch-current [node id]
-  (first (xt/q node (list '-> '(from :hyperedges [*])
-                          (list 'where (list '= 'xt/id id))))))
+  (fxt/q1 node (list '-> '(from :hyperedges [*])
+                     (list 'where (list '= 'xt/id id)))))
 
 (defn- present? [node id]
-  (seq (xt/q node (list '-> '(from :hyperedges [xt/id])
-                        (list 'where (list '= 'xt/id id))))))
+  (fxt/present? node :hyperedges id))
 
 (defn upsert-hyperedge!
   "Transform + no-op guard + VERIFIED put. Returns response map."
@@ -100,7 +101,7 @@
           {:ok true :hx/id id :retracted? true})
       ;; No-op guard: compare against stored (project the doc's own keys —
       ;; [*] binds nothing in XTDB 2.0.0).
-      (let [stored (first (xt/q node
+      (let [stored (first (fxt/safe-q node
                                 (list '-> (list 'from :hyperedges
                                                 (into ['xt/id]
                                                       (comp (remove #{:xt/id})
@@ -158,6 +159,17 @@
    (gates/resolve-penholder payload
                             (.getFirst (.getRequestHeaders ex) "x-penholder"))))
 
+(defn- uri-tail
+  "Path remainder after prefix, leading slash stripped, URL-decoded."
+  [^HttpExchange ex prefix]
+  (let [path (.getPath (.getRequestURI ex))
+        tail (subs path (min (count prefix) (count path)))]
+    (URLDecoder/decode (if (str/starts-with? tail "/") (subs tail 1) tail)
+                       "UTF-8")))
+
+(defn- parse-limit [p]
+  (some-> (p "limit") (as-> s (try (Long/parseLong s) (catch Exception _ nil)))))
+
 (def ^:private tables
   [:hyperedges :entities :evidence :relations :type-catalog :docs :misc])
 
@@ -165,16 +177,26 @@
   (let [node @!node
         counts (into {}
                      (for [t tables]
-                       [t (count (xt/q node (list 'from t ['xt/id])))]))]
+                       [t (count (fxt/safe-q node (list 'from t ['xt/id])))]))]
     (respond! ex 200 (pr-str {:ok true :tables counts}))))
 
 (defn- hyperedge-route [^HttpExchange ex]
-  (if (= "POST" (.getRequestMethod ex))
-    (let [payload (edn/read-string (read-body ex))
-          _ (penholder! ex payload)
-          res (upsert-hyperedge! @!node payload)]
-      (respond! ex (if (:ok res) 200 500) (pr-str res)))
-    (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
+  (let [method (.getRequestMethod ex)
+        tail (uri-tail ex "/api/alpha/hyperedge")]
+    (cond
+      (and (= method "POST") (str/blank? tail))
+      (let [payload (edn/read-string (read-body ex))
+            _ (penholder! ex payload)
+            res (upsert-hyperedge! @!node payload)]
+        (respond! ex (if (:ok res) 200 500) (pr-str res)))
+
+      (and (= method "GET") (not (str/blank? tail)))
+      (if-let [doc (graph/hyperedge-by-id @!node tail)]
+        (respond! ex 200 (pr-str doc))
+        (respond! ex 404 (pr-str {:error "not found" :hx/id tail})))
+
+      :else
+      (respond! ex 405 (pr-str {:ok false :error "POST (write) or GET /{id}"})))))
 
 (defn- evidence-route
   "Dispatch everything under /api/alpha/evidence (API-CONTRACT §3).
@@ -215,6 +237,79 @@
           (respond! ex 404 (pr-str {:error "not found" :evidence/id tail})))
         (respond! ex 404 (pr-str {:error "not found" :evidence/id tail}))))))
 
+(defn- entity-route [^HttpExchange ex]
+  (let [method (.getRequestMethod ex)
+        tail (uri-tail ex "/api/alpha/entity")
+        p (query-params ex)]
+    (cond
+      (and (= method "POST") (str/blank? tail))
+      (let [payload (edn/read-string (read-body ex))
+            _ (penholder! ex payload)
+            res (graph/write-entity! @!node payload)]
+        (respond! ex 200 (pr-str res)))
+
+      (not= method "GET")
+      (respond! ex 405 (pr-str {:ok false :error "GET/POST only"}))
+
+      (str/blank? tail)
+      (let [[status body] (graph/entity-by-external
+                           @!node {:source (p "source") :external-id (p "external-id")})]
+        (respond! ex status (pr-str body)))
+
+      :else
+      (if-let [doc (graph/fetch-entity @!node tail)]
+        (respond! ex 200 (pr-str {:profile "default"
+                                  :entity (graph/public-entity doc)}))
+        (respond! ex 404 (pr-str {:error "Entity not found"
+                                  :profile "default" :entity-id tail}))))))
+
+(defn- entities-latest-route [^HttpExchange ex]
+  (let [p (query-params ex)]
+    (when-not (p "type")
+      (throw (gates/layered-error 4 :missing-required {:required ["type"]})))
+    (respond! ex 200 (pr-str (graph/entities-latest
+                              @!node {:type (p "type") :limit (parse-limit p)})))))
+
+(defn- relation-route [^HttpExchange ex]
+  (if (= "POST" (.getRequestMethod ex))
+    (let [payload (edn/read-string (read-body ex))
+          _ (penholder! ex payload)
+          res (graph/write-relation! @!node payload)]
+      (respond! ex 200 (pr-str res)))
+    (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
+
+(defn- hyperedges-route [^HttpExchange ex]
+  (let [p (query-params ex)]
+    (if (or (p "type") (p "end"))
+      (respond! ex 200 (pr-str (graph/hyperedges-query
+                                @!node {:type (p "type") :end (p "end")
+                                        :limit (parse-limit p)
+                                        :repo (p "repo")
+                                        :source-file (p "source-file")})))
+      (respond! ex 400 (pr-str {:error "type or end parameter required"})))))
+
+(defn- census-route [^HttpExchange ex]
+  (let [p (query-params ex)]
+    (if (or (p "type") (p "entity-type"))
+      (respond! ex 200 (pr-str (graph/census @!node {:type (p "type")
+                                                     :entity-type (p "entity-type")})))
+      (respond! ex 400
+                (pr-str {:error "census requires ?type=<hx-type> or ?entity-type=<type>"})))))
+
+(defn- types-route [^HttpExchange ex]
+  (let [method (.getRequestMethod ex)
+        tail (uri-tail ex "/api/alpha/types")]
+    (cond
+      (and (= method "GET") (str/blank? tail))
+      (respond! ex 200 (pr-str (graph/list-types @!node)))
+
+      (and (= method "POST") (#{"parent" "merge"} tail))
+      (let [payload (edn/read-string (read-body ex))]
+        (respond! ex 200 (pr-str (graph/types-mutate! @!node (keyword tail) payload))))
+
+      :else
+      (respond! ex 404 (pr-str {:error {:reason :not-found :path (str "/types/" tail)}})))))
+
 (defn- memory-search-route [^HttpExchange ex]
   (let [p (query-params ex)
         opts (cond-> {}
@@ -230,8 +325,17 @@
   (reset! !node (or node (zm/open-store store-dir)))
   (let [server (HttpServer/create (InetSocketAddress. (int port)) 0)]
     (.createContext server "/health" (handler health))
+    ;; NB JDK HttpServer matches contexts by raw string prefix — the longer
+    ;; /api/alpha/hyperedges context must be registered so it wins over
+    ;; /api/alpha/hyperedge for the plural query route (same for entities).
     (.createContext server "/api/alpha/hyperedge" (handler hyperedge-route))
+    (.createContext server "/api/alpha/hyperedges" (handler hyperedges-route))
     (.createContext server "/api/alpha/evidence" (handler evidence-route))
+    (.createContext server "/api/alpha/entity" (handler entity-route))
+    (.createContext server "/api/alpha/entities/latest" (handler entities-latest-route))
+    (.createContext server "/api/alpha/relation" (handler relation-route))
+    (.createContext server "/api/alpha/census" (handler census-route))
+    (.createContext server "/api/alpha/types" (handler types-route))
     (.createContext server "/api/alpha/memory/search" (handler memory-search-route))
     (.setExecutor server (java.util.concurrent.Executors/newFixedThreadPool 4))
     (.start server)

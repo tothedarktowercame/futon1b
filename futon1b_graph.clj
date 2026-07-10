@@ -1,0 +1,335 @@
+;; futon1b-graph — the A3/A4/A5 slices of E-futon1b-operational-switchover:
+;; entities + relations (writes with the full gate stack), hyperedge reads,
+;; census, and the type registry, per API-CONTRACT.md §4-§8.
+;;
+;; Deviations (deliberate, mirrored in API-CONTRACT/README):
+;; - success envelopes carry :rescue instead of :tx-id/:path/id (no proof
+;;   paths in v1);
+;; - relation public :type = :relation/type (futon1a derives it from
+;;   provenance :note; no live-path caller reads it);
+;; - hyperedge :hx/type is NOT auto-registered as a type doc — matching
+;;   futon1a's actual types-from-doc source (entity/relation/intent only),
+;;   not the folklore;
+;; - entities/latest guards its limit parse (futon1a 500s on a bad value).
+(ns futon1b-graph
+  (:require [clojure.string :as str]
+            [futon1b-gates :as gates]
+            [migration.transform :as xf]
+            [migration.ingest :as ingest]
+            [futon1b-xt :as fxt]))
+
+;; ---------------------------------------------------------------------------
+;; Shared write plumbing: transform + rescue ladder + verified read-back.
+;; ---------------------------------------------------------------------------
+
+(defonce !shape-log (xf/make-shape-log))
+
+
+(defn put-verified!
+  "Transform, put through the rescue ladder, verify by read-back.
+  Returns the rescue stage keyword (:ok/:rescued-1/:rescued-2) or throws
+  the L0-shaped error (503) if the doc is absent after all stages."
+  [node table doc]
+  (let [xdoc (xf/transform-doc doc)
+        res (ingest/put-doc-with-rescue! node table xdoc !shape-log)]
+    (if (fxt/present? node table (:xt/id xdoc))
+      (if (keyword? res) res :ok)
+      (throw (gates/layered-error 0 :postcommit-missing-entities
+                                  {:xt/id (:xt/id xdoc) :table table})))))
+
+;; ---------------------------------------------------------------------------
+;; Type registry (A5) — futon1a.model.type-registry ported.
+;; ---------------------------------------------------------------------------
+
+(defn- type-id->xt-id [kind type-id]
+  (str "type|" (name kind) "|" (if (keyword? type-id) (str type-id) (str type-id))))
+
+(defn- infer-parent [type-id]
+  (when (keyword? type-id)
+    (when-let [ns' (namespace type-id)]
+      (keyword ns'))))
+
+(defn type-doc [{:keys [type-id kind parent aliases]}]
+  {:xt/id (type-id->xt-id kind type-id)
+   :type/id type-id
+   :type/kind kind
+   :type/parent (or parent (infer-parent type-id))
+   :type/aliases (vec (distinct (filter keyword? (or aliases []))))})
+
+(defn register-types!
+  "Idempotent type registration for the types a write introduces (futon1a
+  tx-ops-for-docs, minus the every-write re-put: we skip types already
+  present so live writes don't accrete identical doc versions)."
+  [node kind-type-pairs]
+  (doseq [{:keys [kind type-id]} kind-type-pairs
+          :when (keyword? type-id)
+          td [(type-doc {:type-id type-id :kind kind})
+              (when-let [p (infer-parent type-id)]
+                (type-doc {:type-id p :kind kind}))]
+          :when (and td (not (fxt/present? node :type-catalog (:xt/id td))))]
+    (put-verified! node :type-catalog td)))
+
+(defn list-types [node]
+  (let [docs (filter :type/kind (fxt/safe-q node '(from :type-catalog [*])))]
+    ;; NB unlike the other reads, /types keeps :xt/id (contract §8: pulled [*]).
+    {:types (->> docs
+                 (sort-by (fn [m] (str (name (:type/kind m)) "|" (str (:type/id m)))))
+                 vec)}))
+
+(defn- normalize-type [t]
+  (cond (keyword? t) t
+        (and (string? t) (str/starts-with? t ":")) (keyword (subs t 1))
+        (string? t) (keyword t)
+        :else nil))
+
+(defn types-mutate!
+  "POST /types/parent and /types/merge (body-only penholder — contract §8).
+  op = :parent | :merge."
+  [node op payload]
+  (gates/authorize! (some-> (:penholder payload) str str/trim not-empty))
+  (let [type-id (normalize-type (:type/id payload))
+        kind (normalize-type (:type/kind payload))]
+    (when-not (and type-id kind)
+      (throw (gates/layered-error 4 :missing-required
+                                  {:required [:type/id :type/kind]})))
+    (when (and (= op :merge) (not (sequential? (:type/aliases payload))))
+      (throw (gates/layered-error 4 :invalid-type-aliases
+                                  {:got (:type/aliases payload)})))
+    (let [existing (fxt/q1 node (list '-> '(from :type-catalog [*])
+                                  (list 'where (list '= 'xt/id
+                                                     (type-id->xt-id kind type-id)))))
+          base (or existing (type-doc {:type-id type-id :kind kind}))
+          doc (case op
+                :parent (assoc base :type/parent (normalize-type (:type/parent payload)))
+                :merge (assoc base :type/aliases
+                              (vec (distinct (map normalize-type (:type/aliases payload))))))]
+      {:ok true :rescue (put-verified! node :type-catalog doc)})))
+
+;; ---------------------------------------------------------------------------
+;; Entities (A3) — §5. Ensure-by-name minting + full gate stack.
+;; ---------------------------------------------------------------------------
+
+(defn- entities-by-name [node name']
+  (fxt/safe-q node (list '-> '(from :entities [*])
+                   (list 'where (list '= 'entity/name name')))))
+
+(defn fetch-entity
+  "futon1a f1g/fetch-entity: :xt/id → :entity/name → :entity/external-id,
+  deterministic smallest-id pick on duplicates."
+  [node id]
+  (or (fxt/q1 node (list '-> '(from :entities [*])
+                     (list 'where (list '= 'xt/id id))))
+      (->> (entities-by-name node id)
+           (sort-by #(str (:entity/id %)))
+           first)
+      (->> (fxt/safe-q node (list '-> '(from :entities [*])
+                            (list 'where (list '= 'entity/external-id id))))
+           (sort-by #(str (:entity/id %)))
+           first)))
+
+(defn public-entity
+  "futon1a normalize-entity: the compat public shape."
+  [doc]
+  (cond-> {:id (or (:entity/id doc) (:xt/id doc))
+           :name (:entity/name doc)
+           :type (:entity/type doc)
+           :external-id (:entity/external-id doc)
+           :source (:entity/source doc)}
+    (:entity/props doc) (assoc :props (:entity/props doc))
+    (:media/sha256 doc) (assoc :media/sha256 (:media/sha256 doc))))
+
+(defn entity-by-external
+  "GET /api/alpha/entity?source=…&external-id=… (contract §5): both params
+  required (L4 400); multiple matches → L1 409 :external-id-ambiguous."
+  [node {:keys [source external-id]}]
+  (when (or (str/blank? (str source)) (str/blank? (str external-id)))
+    (throw (gates/layered-error 4 :missing-required
+                                {:required [:source :external-id]})))
+  (let [matches (fxt/safe-q node (list '-> '(from :entities [*])
+                                 (list 'where
+                                       (list '= 'entity/source source)
+                                       (list '= 'entity/external-id external-id))))]
+    (cond
+      (empty? matches)
+      [404 {:error {:reason :not-found
+                    :identity {:source source :external-id external-id}}}]
+      (> (count matches) 1)
+      (throw (gates/layered-error 1 :external-id-ambiguous
+                                  {:candidates (mapv :entity/id matches)}))
+      :else [200 {:entity (first matches)}])))
+
+(defn- ensure-entity-id
+  "Ensure semantics (futon1_write.clj:34-60): requested :id → existing by
+  :entity/name (prefer matching type, then smallest id) → fresh UUID."
+  [node {:keys [id name' type]}]
+  (or id
+      (let [candidates (entities-by-name node name')
+            preferred (or (seq (filter #(= type (:entity/type %)) candidates))
+                          (seq candidates))]
+        (some->> preferred (sort-by #(str (:entity/id %))) first :entity/id))
+      (str (random-uuid))))
+
+(defn write-entity!
+  "POST /api/alpha/entity — the route where every gate fires (contract §5)."
+  [node payload]
+  (let [name' (:name payload)
+        type (normalize-type (:type payload))]
+    (when (or (str/blank? (str name')) (nil? type))
+      (throw (gates/layered-error 4 :missing-required
+                                  {:required [:name :type]
+                                   :got (select-keys payload [:name :type])})))
+    (let [id (ensure-entity-id node {:id (:id payload) :name' name' :type type})
+          doc (cond-> {:xt/id id :entity/id id :entity/name name' :entity/type type}
+                (:external-id payload) (assoc :entity/external-id (:external-id payload))
+                (:source payload) (assoc :entity/source (:source payload))
+                (map? (:props payload)) (assoc :entity/props (:props payload)))
+          gate-res (gates/gate-entity-id! doc)   ; L4 canonical-id (may throw 400)
+          rescue (put-verified! node :entities doc)]
+      (register-types! node [{:kind :entity :type-id type}])
+      (cond-> {:profile "default"
+               :entity (public-entity doc)
+               :rescue rescue}
+        (:queued? gate-res) (assoc :queued? true)))))
+
+(defn entities-latest
+  "GET /api/alpha/entities/latest — generic branch + the pattern/library
+  sigil special-case (contract §5)."
+  [node {:keys [type limit]}]
+  (let [t (normalize-type type)
+        n (long (max 1 (or limit 1)))
+        all (fxt/safe-q node (list '-> '(from :entities [*])
+                             (list 'where (list '= 'entity/type t))))
+        sigiled (if (= t :pattern/library)
+                  (let [sigil-src-ids
+                        (->> (fxt/safe-q node '(-> (from :relations [relation/type relation/src])
+                                             (where (= relation/type :pattern/has-sigil))))
+                             (map :relation/src) set)]
+                    (filter #(contains? sigil-src-ids (:entity/id %)) all))
+                  all)
+        docs (->> sigiled
+                  (group-by :entity/name)
+                  (map (fn [[_ ds]] (first (sort-by #(str (:entity/id %)) ds))))
+                  (sort-by #(str (:entity/name %)))
+                  (take n)
+                  (mapv public-entity))]
+    {:profile "default"
+     :type (if t (subs (str t) 1) (str type))
+     :entities docs}))
+
+;; ---------------------------------------------------------------------------
+;; Relations (A3) — §6. Stable rel| ids, both key spellings.
+;; ---------------------------------------------------------------------------
+
+(defn- uuid-shaped? [s]
+  (and (string? s)
+       (re-matches #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" s)))
+
+(defn- resolve-rel-endpoint
+  "src/dst: entity name | :entity/id | raw UUID string | map with
+  :id/:entity/id/:name (futon1_write.clj:110-122). Unresolvable → the
+  contract's raw-500 wart."
+  [node x]
+  (or (cond
+        (map? x) (or (some->> (or (:id x) (:entity/id x)) (str))
+                     (some->> (:name x) (resolve-rel-endpoint node)))
+        (string? x)
+        (or (when (fxt/present? node :entities x) x)
+            (some->> (entities-by-name node x)
+                     (sort-by #(str (:entity/id %))) first :entity/id)
+            (when (uuid-shaped? x) x))
+        :else nil)
+      (throw (ex-info "relation requires resolvable src/dst and type" {:got x}))))
+
+(defn- stable-relation-id [src-id type-kw dst-id prov]
+  (str "rel|" src-id "|" (if (keyword? type-kw) (subs (str type-kw) 1) (str type-kw))
+       "|" dst-id "|" (str (or (:note prov) "")) "|" (str (or (:order prov) ""))))
+
+(defn write-relation!
+  "POST /api/alpha/relation (contract §6)."
+  [node payload]
+  (let [type (normalize-type (:type payload))
+        src (:src payload)
+        dst (:dst payload)]
+    (when (or (nil? type) (nil? src) (nil? dst))
+      (throw (gates/layered-error 4 :missing-required
+                                  {:required [:type :src :dst]})))
+    (let [prov (or (:provenance payload)
+                   (when (map? (:props payload))
+                     {:note (:label (:props payload)) :props (:props payload)}))
+          src-id (resolve-rel-endpoint node src)
+          dst-id (resolve-rel-endpoint node dst)
+          rel-id (or (:id payload) (stable-relation-id src-id type dst-id prov))
+          doc (cond-> {:xt/id rel-id :relation/id rel-id :relation/type type
+                       :relation/src src-id :relation/dst dst-id
+                       :relation/from src-id :relation/to dst-id}
+                prov (assoc :relation/provenance prov))
+          rescue (put-verified! node :relations doc)]
+      (register-types! node [{:kind :relation :type-id type}])
+      {:profile "default"
+       :relation {:id rel-id :type type :relation/type type
+                  :src-id src-id :dst-id dst-id :provenance prov}
+       :rescue rescue})))
+
+;; ---------------------------------------------------------------------------
+;; Hyperedge reads (A4) — §4.
+;; ---------------------------------------------------------------------------
+
+(defn hyperedge-by-id
+  "GET /api/alpha/hyperedge/{id} (id = URL-decoded URI tail)."
+  [node id]
+  (when-let [doc (fxt/q1 node (list '-> '(from :hyperedges [*])
+                                (list 'where (list '= 'xt/id id))))]
+    (when (:hx/id doc) (dissoc doc :xt/id))))
+
+(defn hyperedges-query
+  "GET /api/alpha/hyperedges?type=…|end=… (+limit, +repo/source-file with
+  type). :count is the true type total when unfiltered even if limit
+  truncates; returned-count otherwise (contract §4)."
+  [node {:keys [type end limit repo source-file]}]
+  (cond
+    type
+    (let [t (normalize-type type)
+          docs (fxt/safe-q node (list '-> '(from :hyperedges [*])
+                                (list 'where (list '= 'hx/type t))))
+          total (count docs)
+          prop-get (fn [d k kw-col]
+                     (or (get d kw-col)
+                         (get-in d [:hx/props (keyword k)])
+                         (get-in d [:hx/props k])))
+          filtered (cond->> docs
+                     repo (filter #(= repo (str (prop-get % "repo" :prop/repo))))
+                     source-file (filter #(= source-file
+                                             (str (prop-get % "source-file" :prop/source-file)))))
+          sorted (sort-by #(str (:xt/id %)) filtered)
+          limited (if (and (int? limit) (pos? limit)) (take limit sorted) sorted)
+          out (mapv #(dissoc % :xt/id) limited)]
+      {:hyperedges out
+       :count (if (or repo source-file) (count out) total)})
+
+    end
+    (let [end-id (if (uuid-shaped? end)
+                   (or (some-> (fetch-entity node end) :entity/name) end)
+                   end)
+          targets (set [end end-id])
+          docs (->> (fxt/safe-q node '(from :hyperedges [*]))
+                    (filter #(some targets (:hx/endpoints %))))
+          sorted (sort-by :hx/id docs)
+          limited (if (and (int? limit) (pos? limit)) (take limit sorted) sorted)
+          out (mapv #(dissoc % :xt/id) limited)]
+      {:hyperedges out :count (count out)})))
+
+;; ---------------------------------------------------------------------------
+;; Census (A5) — §7. Bound-type count, no doc materialization.
+;; ---------------------------------------------------------------------------
+
+(defn census [node {:keys [type entity-type]}]
+  (cond
+    type
+    {:type type :kind :hyperedge
+     :count (count (fxt/safe-q node (list '-> '(from :hyperedges [xt/id hx/type])
+                                    (list 'where (list '= 'hx/type (normalize-type type))))))}
+    entity-type
+    {:type entity-type :kind :entity
+     :count (count (fxt/safe-q node (list '-> '(from :entities [xt/id entity/type])
+                                    (list 'where (list '= 'entity/type
+                                                       (normalize-type entity-type))))))}))
