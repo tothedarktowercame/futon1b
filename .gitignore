@@ -1,2 +1,5 @@
 migration-store/
 migration-export/
+migration-export/
+migration-store*/
+.cpcache/
