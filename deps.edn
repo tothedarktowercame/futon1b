@@ -9,6 +9,11 @@
  ;; JVM on a shared box; uncapped defaults (1/4 RAM heap EACH) built the
  ;; memory pressure implicated in the 2026-07-04 serving-JVM deaths. The
  ;; slice workloads (~1.4k docs) need nowhere near 1 GB.
+ ;; preferIPv4Stack: XTDB 2.1.0 submits txs over an internal pgwire loopback
+ ;; connection to "localhost"; the node binds 127.0.0.1 (IPv4-mapped) while
+ ;; dual-stack boxes (lucy) resolve localhost to ::1 first — every xt/q and
+ ;; execute-tx then dies with ConnectException. Verified 2026-07-10.
  {:node {:jvm-opts ["--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
                     "-Dio.netty.tryReflectionSetAccessible=true"
+                    "-Djava.net.preferIPv4Stack=true"
                     "-Xmx1g" "-XX:MaxDirectMemorySize=1g"]}}}
