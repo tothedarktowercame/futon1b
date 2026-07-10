@@ -123,12 +123,13 @@
 
 (defn- fetch-filtered
   "All evidence docs, with type/claim-type/author/session-id pushed down."
-  [node {:keys [type claim-type author session-id]}]
+  [node {:keys [type claim-type author session-id fork-of]}]
   (let [clauses (cond-> []
                   type (conj (list '= 'evidence/type type))
                   claim-type (conj (list '= 'evidence/claim-type claim-type))
                   author (conj (list '= 'evidence/author author))
-                  session-id (conj (list '= 'evidence/session-id session-id)))]
+                  session-id (conj (list '= 'evidence/session-id session-id))
+                  fork-of (conj (list '= 'evidence/fork-of fork-of)))]
     (if (seq clauses)
       (fxt/safe-q node (list '-> '(from :evidence [*])
                        (cons 'where clauses)))
@@ -170,6 +171,7 @@
     (p "claim-type") (assoc :claim-type (normalize-type (p "claim-type")))
     (p "author") (assoc :author (p "author"))
     (p "session-id") (assoc :session-id (p "session-id"))
+    (p "fork-of") (assoc :fork-of (p "fork-of"))
     (p "subject-type") (assoc :subject-type (normalize-type (p "subject-type")))
     (p "subject-id") (assoc :subject-id (p "subject-id"))
     (p "since") (assoc :since (p "since"))
