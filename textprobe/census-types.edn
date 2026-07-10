@@ -1,0 +1,9 @@
+{:file "migration-export/type-catalog.edn",
+ :docs 207,
+ :doc-types {:untyped 207},
+ :fields
+ [{:strings 207,
+   :chars 5615,
+   :max-chars 47,
+   :path [:xt/id],
+   :docs 207}]}

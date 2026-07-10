@@ -1,0 +1,1388 @@
+{:file "migration-export/evidence.edn",
+ :docs 90583,
+ :doc-types
+ {:coordination 90126,
+  :forum-post 294,
+  :arse-qa 138,
+  :reflection 21,
+  :pattern-outcome 2,
+  :pattern-selection 2},
+ :fields
+ [{:strings 7950,
+   :chars 18599390,
+   :max-chars 2403,
+   :path [:evidence/body :args * :minibuffer :buffer :visible :text],
+   :docs 7950}
+  {:strings 12350,
+   :chars 18507394,
+   :max-chars 608019,
+   :path [:evidence/body :text],
+   :docs 12350}
+  {:strings 8850,
+   :chars 14490090,
+   :max-chars 2403,
+   :path [:evidence/body :args * :buffer :visible :text],
+   :docs 8850}
+  {:strings 90583,
+   :chars 3298894,
+   :max-chars 89,
+   :path [:xt/id],
+   :docs 90583}
+  {:strings 90583,
+   :chars 3298894,
+   :max-chars 89,
+   :path [:evidence/id],
+   :docs 90583}
+  {:strings 90583,
+   :chars 2717079,
+   :max-chars 30,
+   :path [:evidence/at],
+   :docs 90583}
+  {:strings 8766,
+   :chars 2499493,
+   :max-chars 300,
+   :path [:evidence/body "result-preview"],
+   :docs 8766}
+  {:strings 56379,
+   :chars 1870190,
+   :max-chars 91,
+   :path [:evidence/session-id],
+   :docs 56379}
+  {:strings 92388,
+   :chars 1778550,
+   :max-chars 25,
+   :path [:evidence/body :structure-summary :blocked-pairs * *],
+   :docs 7726}
+  {:strings 9176,
+   :chars 1726902,
+   :max-chars 200,
+   :path [:evidence/body "prompt-preview"],
+   :docs 9176}
+  {:strings 921,
+   :chars 1716963,
+   :max-chars 2403,
+   :path
+   [:evidence/body
+    :args
+    *
+    :minibuffer
+    :results
+    *
+    :buffer
+    :visible
+    :text],
+   :docs 921}
+  {:strings 90583,
+   :chars 1461416,
+   :max-chars 54,
+   :path [:evidence/subject :ref/id],
+   :docs 90583}
+  {:strings 31320,
+   :chars 1158840,
+   :max-chars 37,
+   :path [:evidence/body :run :run-id],
+   :docs 31320}
+  {:strings 90583,
+   :chars 1131927,
+   :max-chars 54,
+   :path [:evidence/author],
+   :docs 90583}
+  {:strings 26532,
+   :chars 935915,
+   :max-chars 105,
+   :path [:evidence/body "results" * :title],
+   :docs 8844}
+  {:strings 8848,
+   :chars 912494,
+   :max-chars 107,
+   :path [:evidence/body :args * :buffer-surface],
+   :docs 8848}
+  {:strings 8844,
+   :chars 883705,
+   :max-chars 100,
+   :path [:evidence/body "query"],
+   :docs 8844}
+  {:strings 27170,
+   :chars 815013,
+   :max-chars 30,
+   :path [:evidence/body "at"],
+   :docs 27170}
+  {:strings 38468,
+   :chars 768550,
+   :max-chars 25,
+   :path [:evidence/body :structure-summary :critical-path * :mission],
+   :docs 7726}
+  {:strings 7029,
+   :chars 750787,
+   :max-chars 107,
+   :path [:evidence/body :args * :minibuffer :sexp],
+   :docs 7029}
+  {:strings 26532,
+   :chars 712691,
+   :max-chars 75,
+   :path [:evidence/body "results" * :id],
+   :docs 8844}
+  {:strings 16276,
+   :chars 617526,
+   :max-chars 40,
+   :path [:evidence/in-reply-to],
+   :docs 16276}
+  {:strings 1138,
+   :chars 434922,
+   :max-chars 494,
+   :path [:evidence/body :invariant],
+   :docs 1138}
+  {:strings 27170,
+   :chars 397517,
+   :max-chars 17,
+   :path [:evidence/body "event"],
+   :docs 27170}
+  {:strings 8848,
+   :chars 345001,
+   :max-chars 41,
+   :path [:evidence/body :args * :debug :selected-window],
+   :docs 8848}
+  {:strings 8848,
+   :chars 309680,
+   :max-chars 35,
+   :path [:evidence/body :args * :debug :session-id],
+   :docs 8848}
+  {:strings 751,
+   :chars 285383,
+   :max-chars 494,
+   :path [:evidence/body :detail :invariant],
+   :docs 751}
+  {:strings 7743,
+   :chars 232266,
+   :max-chars 30,
+   :path [:evidence/body :at],
+   :docs 7743}
+  {:strings 9405,
+   :chars 225720,
+   :max-chars 24,
+   :path [:evidence/body :args * :minibuffer :results * :started-at],
+   :docs 921}
+  {:strings 20143,
+   :chars 223955,
+   :max-chars 24,
+   :path [:evidence/body :event],
+   :docs 20143}
+  {:strings 13135,
+   :chars 217438,
+   :max-chars 17,
+   :path [:evidence/body :transport],
+   :docs 13135}
+  {:strings 27170,
+   :chars 217284,
+   :max-chars 12,
+   :path [:evidence/body "agent-id"],
+   :docs 27170}
+  {:strings 8848,
+   :chars 212352,
+   :max-chars 24,
+   :path [:evidence/body :args * :debug :current-time],
+   :docs 8848}
+  {:strings 20916,
+   :chars 209160,
+   :max-chars 10,
+   :path [:evidence/body "results" * :retrieval-method],
+   :docs 6972}
+  {:strings 7950,
+   :chars 190800,
+   :max-chars 24,
+   :path [:evidence/body :args * :minibuffer :at],
+   :docs 7950}
+  {:strings 8850,
+   :chars 189769,
+   :max-chars 23,
+   :path [:evidence/body :args * :buffer :name],
+   :docs 8850}
+  {:strings 20916,
+   :chars 146412,
+   :max-chars 7,
+   :path [:evidence/body "results" * :retrieval-source],
+   :docs 6972}
+  {:strings 1041,
+   :chars 142987,
+   :max-chars 1279,
+   :path [:evidence/body :mission/raw-status],
+   :docs 1041}
+  {:strings 7950,
+   :chars 140609,
+   :max-chars 18,
+   :path [:evidence/body :args * :minibuffer :buffer :major-mode],
+   :docs 7950}
+  {:strings 9405,
+   :chars 140142,
+   :max-chars 29,
+   :path [:evidence/body :args * :minibuffer :results * :label],
+   :docs 921}
+  {:strings 951,
+   :chars 139653,
+   :max-chars 524,
+   :path [:evidence/body :state :family-records * :summary],
+   :docs 76}
+  {:strings 8850,
+   :chars 137928,
+   :max-chars 26,
+   :path [:evidence/body :args * :buffer :major-mode],
+   :docs 8850}
+  {:strings 5358,
+   :chars 117516,
+   :max-chars 68,
+   :path [:evidence/body :clocked-target],
+   :docs 5358}
+  {:strings 7950,
+   :chars 110523,
+   :max-chars 22,
+   :path [:evidence/body :args * :minibuffer :buffer :name],
+   :docs 7950}
+  {:strings 6968,
+   :chars 109493,
+   :max-chars 36,
+   :path [:evidence/body :message],
+   :docs 6968}
+  {:strings 6770,
+   :chars 108384,
+   :max-chars 34,
+   :path [:evidence/body :turn-id],
+   :docs 6770}
+  {:strings 1511,
+   :chars 106453,
+   :max-chars 216,
+   :path [:evidence/body :commits * :subject],
+   :docs 924}
+  {:strings 9405,
+   :chars 98829,
+   :max-chars 13,
+   :path [:evidence/body :args * :minibuffer :results * :op],
+   :docs 921}
+  {:strings 7950,
+   :chars 97005,
+   :max-chars 18,
+   :path [:evidence/body :args * :minibuffer :request-id],
+   :docs 7950}
+  {:strings 6968,
+   :chars 90584,
+   :max-chars 13,
+   :path [:evidence/body :process-id],
+   :docs 6968}
+  {:strings 1554,
+   :chars 88336,
+   :max-chars 83,
+   :path [:evidence/body "auto-clock-witness" :file],
+   :docs 1554}
+  {:strings 190,
+   :chars 87814,
+   :max-chars 500,
+   :path [:evidence/body :response],
+   :docs 190}
+  {:strings 4357,
+   :chars 86683,
+   :max-chars 43,
+   :path [:evidence/body :mission-id],
+   :docs 4357}
+  {:strings 4357,
+   :chars 86683,
+   :max-chars 43,
+   :path [:evidence/body :clocked-mission],
+   :docs 4357}
+  {:strings 1282,
+   :chars 82048,
+   :max-chars 64,
+   :path [:evidence/body :mission/content-sha],
+   :docs 1282}
+  {:strings 1109,
+   :chars 79638,
+   :max-chars 127,
+   :path [:evidence/body :state :family-records * :question],
+   :docs 76}
+  {:strings 1282,
+   :chars 77920,
+   :max-chars 176,
+   :path [:evidence/body :mission/path],
+   :docs 1282}
+  {:strings 11917,
+   :chars 76893,
+   :max-chars 9,
+   :path [:evidence/body :role],
+   :docs 11917}
+  {:strings 7950,
+   :chars 72471,
+   :max-chars 10,
+   :path [:evidence/body :args * :minibuffer :command],
+   :docs 7950}
+  {:strings 1308,
+   :chars 71201,
+   :max-chars 171,
+   :path [:evidence/body :details :last-subtask :path],
+   :docs 1308}
+  {:strings 6968,
+   :chars 69480,
+   :max-chars 11,
+   :path [:evidence/body :kind],
+   :docs 6968}
+  {:strings 1511,
+   :chars 60754,
+   :max-chars 41,
+   :path [:evidence/body :commits * :sha],
+   :docs 924}
+  {:strings 1281,
+   :chars 60334,
+   :max-chars 101,
+   :path [:evidence/body :mission/title],
+   :docs 1281}
+  {:strings 8848,
+   :chars 53088,
+   :max-chars 6,
+   :path [:evidence/body :args * :debug :editor-id],
+   :docs 8848}
+  {:strings 8848,
+   :chars 53088,
+   :max-chars 6,
+   :path [:evidence/body :args * :editor-id],
+   :docs 8848}
+  {:strings 7029,
+   :chars 49441,
+   :max-chars 24,
+   :path [:evidence/body :args * :minibuffer :result],
+   :docs 7029}
+  {:strings 21,
+   :chars 48702,
+   :max-chars 5123,
+   :path [:evidence/body :trigger-text],
+   :docs 21}
+  {:strings 1187,
+   :chars 47480,
+   :max-chars 40,
+   :path [:evidence/body :state :repo-records * :HEAD-sha],
+   :docs 71}
+  {:strings 2121,
+   :chars 45120,
+   :max-chars 23,
+   :path [:evidence/body :args * :minibuffer :results * :buffer],
+   :docs 921}
+  {:strings 7029,
+   :chars 42174,
+   :max-chars 6,
+   :path [:evidence/body :args * :minibuffer :value-type],
+   :docs 7029}
+  {:strings 6968,
+   :chars 41810,
+   :max-chars 8,
+   :path [:evidence/body :severity],
+   :docs 6968}
+  {:strings 1344,
+   :chars 40317,
+   :max-chars 30,
+   :path [:evidence/body :details :started-at],
+   :docs 1344}
+  {:strings 1306,
+   :chars 39180,
+   :max-chars 30,
+   :path [:evidence/body :details :last-progress-at],
+   :docs 1306}
+  {:strings 1511,
+   :chars 37775,
+   :max-chars 25,
+   :path [:evidence/body :commits * :committed-at],
+   :docs 924}
+  {:strings 190,
+   :chars 36866,
+   :max-chars 200,
+   :path [:evidence/body :prompt],
+   :docs 190}
+  {:strings 1511,
+   :chars 32295,
+   :max-chars 22,
+   :path [:evidence/body :commits * :repo-path],
+   :docs 924}
+  {:strings 1621,
+   :chars 32040,
+   :max-chars 41,
+   :path [:evidence/body "auto-clock-witness" :new-target],
+   :docs 1621}
+  {:strings 1621,
+   :chars 30799,
+   :max-chars 19,
+   :path [:evidence/body "auto-clock-witness" :rule],
+   :docs 1621}
+  {:strings 1187,
+   :chars 27221,
+   :max-chars 36,
+   :path [:evidence/body :state :repo-records * :repo],
+   :docs 71}
+  {:strings 1621,
+   :chars 24248,
+   :max-chars 15,
+   :path [:evidence/body "auto-clock-witness" :source],
+   :docs 1621}
+  {:strings 1282,
+   :chars 24042,
+   :max-chars 54,
+   :path [:evidence/body :mission/id],
+   :docs 1282}
+  {:strings 325,
+   :chars 23770,
+   :max-chars 96,
+   :path
+   [:evidence/body
+    :detail
+    :violations
+    *
+    :missing-status-recent
+    *
+    :path],
+   :docs 38}
+  {:strings 1621,
+   :chars 22870,
+   :max-chars 26,
+   :path [:evidence/body "auto-clock-witness" :old-target],
+   :docs 1621}
+  {:strings 921,
+   :chars 22104,
+   :max-chars 24,
+   :path [:evidence/body :args * :minibuffer :started-at],
+   :docs 921}
+  {:strings 729,
+   :chars 21867,
+   :max-chars 30,
+   :path [:evidence/body :state :family-records * :registered-at],
+   :docs 72}
+  {:strings 1511,
+   :chars 21154,
+   :max-chars 14,
+   :path [:evidence/body :commits * :author],
+   :docs 924}
+  {:strings 8848,
+   :chars 19492,
+   :max-chars 4,
+   :path [:evidence/body :args * :minibuffer :status],
+   :docs 8848}
+  {:strings 921,
+   :chars 19020,
+   :max-chars 22,
+   :path [:evidence/body :args * :minibuffer :results * :buffer :name],
+   :docs 921}
+  {:strings 1006,
+   :chars 18745,
+   :max-chars 28,
+   :path [:evidence/body :clocked-excursion],
+   :docs 1006}
+  {:strings 1006,
+   :chars 18745,
+   :max-chars 28,
+   :path [:evidence/body :excursion-id],
+   :docs 1006}
+  {:strings 931,
+   :chars 16338,
+   :max-chars 22,
+   :path [:evidence/body "clocked-mission"],
+   :docs 931}
+  {:strings 931,
+   :chars 16338,
+   :max-chars 22,
+   :path [:evidence/body "mission-id"],
+   :docs 931}
+  {:strings 921,
+   :chars 15517,
+   :max-chars 19,
+   :path [:evidence/body :args * :minibuffer :name],
+   :docs 921}
+  {:strings 1187,
+   :chars 15402,
+   :max-chars 45,
+   :path [:evidence/body :state :repo-records * :branch],
+   :docs 71}
+  {:strings 1368,
+   :chars 14197,
+   :max-chars 14,
+   :path [:evidence/body :details :last-subtask :repo],
+   :docs 1368}
+  {:strings 921,
+   :chars 14115,
+   :max-chars 16,
+   :path
+   [:evidence/body :args * :minibuffer :results * :buffer :major-mode],
+   :docs 921}
+  {:strings 630,
+   :chars 13580,
+   :max-chars 22,
+   :path [:evidence/body :detail :per-repo * :repo],
+   :docs 70}
+  {:strings 509,
+   :chars 13168,
+   :max-chars 41,
+   :path [:evidence/body "clocked-excursion"],
+   :docs 509}
+  {:strings 807,
+   :chars 12853,
+   :max-chars 142,
+   :path [:evidence/body :mission/date],
+   :docs 807}
+  {:strings 2038,
+   :chars 11757,
+   :max-chars 11,
+   :path [:evidence/body :args * :minibuffer :results * :word],
+   :docs 300}
+  {:strings 272,
+   :chars 11408,
+   :max-chars 42,
+   :path [:evidence/body :detail :obsolete-artifacts * :superseded-by],
+   :docs 67}
+  {:strings 497,
+   :chars 10582,
+   :max-chars 36,
+   :path [:evidence/body :campaign-id],
+   :docs 497}
+  {:strings 497,
+   :chars 10582,
+   :max-chars 36,
+   :path [:evidence/body :clocked-campaign],
+   :docs 497}
+  {:strings 1511,
+   :chars 9630,
+   :max-chars 7,
+   :path [:evidence/body :commits * :repo],
+   :docs 924}
+  {:strings 383,
+   :chars 8776,
+   :max-chars 202,
+   :path [:evidence/body "error"],
+   :docs 383}
+  {:strings 290,
+   :chars 8697,
+   :max-chars 30,
+   :path [:evidence/body :emitted-at],
+   :docs 290}
+  {:strings 1282,
+   :chars 8235,
+   :max-chars 7,
+   :path [:evidence/body :mission/repo],
+   :docs 1282}
+  {:strings 214,
+   :chars 6420,
+   :max-chars 30,
+   :path [:evidence/body :state :captured-at],
+   :docs 214}
+  {:strings 142,
+   :chars 6018,
+   :max-chars 55,
+   :path
+   [:evidence/body :detail :violations * :records * :relative-path],
+   :docs 3}
+  {:strings 91,
+   :chars 4925,
+   :max-chars 96,
+   :path [:evidence/body :title],
+   :docs 91}
+  {:strings 76,
+   :chars 4332,
+   :max-chars 57,
+   :path [:evidence/body :state :source],
+   :docs 76}
+  {:strings 181,
+   :chars 3910,
+   :max-chars 22,
+   :path [:evidence/body :detail :violations * :repo],
+   :docs 62}
+  {:strings 49,
+   :chars 3646,
+   :max-chars 96,
+   :path [:evidence/body :detail :violations * :violation? * :path],
+   :docs 24}
+  {:strings 39,
+   :chars 3315,
+   :max-chars 85,
+   :path [:evidence/body :path/file],
+   :docs 39}
+  {:strings 71,
+   :chars 3124,
+   :max-chars 44,
+   :path [:evidence/body :state :reason],
+   :docs 71}
+  {:strings 269,
+   :chars 2788,
+   :max-chars 19,
+   :path [:evidence/body :source],
+   :docs 269}
+  {:strings 272,
+   :chars 2720,
+   :max-chars 10,
+   :path [:evidence/body :detail :obsolete-artifacts * :target-date],
+   :docs 67}
+  {:strings 181,
+   :chars 2534,
+   :max-chars 14,
+   :path [:evidence/body "clocked-campaign"],
+   :docs 181}
+  {:strings 1,
+   :chars 2403,
+   :max-chars 2403,
+   :path
+   [:evidence/body :fruit :minibuffer-surface :buffer :visible :text],
+   :docs 1}
+  {:strings 76,
+   :chars 2277,
+   :max-chars 30,
+   :path [:evidence/body :state :read-at],
+   :docs 76}
+  {:strings 140,
+   :chars 2170,
+   :max-chars 21,
+   :path [:evidence/body :detail :globs *],
+   :docs 70}
+  {:strings 294,
+   :chars 2132,
+   :max-chars 8,
+   :path [:evidence/body :direction],
+   :docs 294}
+  {:strings 70,
+   :chars 2100,
+   :max-chars 30,
+   :path [:evidence/body :timestamp],
+   :docs 70}
+  {:strings 8,
+   :chars 2064,
+   :max-chars 258,
+   :path
+   [:evidence/body
+    :detail
+    :violations
+    *
+    :missing-status-recent
+    *
+    :fix],
+   :docs 4}
+  {:strings 64,
+   :chars 2033,
+   :max-chars 55,
+   :path [:evidence/body :detail :violations * :identity],
+   :docs 3}
+  {:strings 1,
+   :chars 1986,
+   :max-chars 1986,
+   :path
+   [:evidence/body :fruit :buffer-surface :buffer :visible :text],
+   :docs 1}
+  {:strings 1,
+   :chars 1986,
+   :max-chars 1986,
+   :path
+   [:evidence/body :fruit :latest-context :buffer :visible :text],
+   :docs 1}
+  {:strings 7,
+   :chars 1908,
+   :max-chars 511,
+   :path [:evidence/body :resolution],
+   :docs 7}
+  {:strings 79,
+   :chars 1896,
+   :max-chars 24,
+   :path [:evidence/body :args * :debug :last-transition :at],
+   :docs 79}
+  {:strings 294,
+   :chars 1764,
+   :max-chars 6,
+   :path [:evidence/body :channel],
+   :docs 294}
+  {:strings 79,
+   :chars 1738,
+   :max-chars 22,
+   :path [:evidence/body :args * :debug :last-transition :command],
+   :docs 79}
+  {:strings 287,
+   :chars 1699,
+   :max-chars 13,
+   :path [:evidence/body :mode],
+   :docs 287}
+  {:strings 79,
+   :chars 1659,
+   :max-chars 21,
+   :path [:evidence/body :args * :debug :last-transition :to-buffer],
+   :docs 79}
+  {:strings 79,
+   :chars 1659,
+   :max-chars 21,
+   :path [:evidence/body :args * :debug :last-transition :from-buffer],
+   :docs 79}
+  {:strings 39,
+   :chars 1599,
+   :max-chars 41,
+   :path [:evidence/body :path/id],
+   :docs 39}
+  {:strings 42,
+   :chars 1596,
+   :max-chars 38,
+   :path [:evidence/body :source-turn],
+   :docs 42}
+  {:strings 33,
+   :chars 1501,
+   :max-chars 92,
+   :path [:evidence/body :mission/blocked-by],
+   :docs 33}
+  {:strings 190,
+   :chars 1465,
+   :max-chars 9,
+   :path [:evidence/body :agent-id],
+   :docs 190}
+  {:strings 36,
+   :chars 1357,
+   :max-chars 43,
+   :path [:evidence/body :session-ref],
+   :docs 36}
+  {:strings 55,
+   :chars 1300,
+   :max-chars 24,
+   :path [:evidence/body :auto-clock-witness :source],
+   :docs 55}
+  {:strings 21,
+   :chars 1281,
+   :max-chars 61,
+   :path [:evidence/body :classical-bound],
+   :docs 21}
+  {:strings 55,
+   :chars 1261,
+   :max-chars 24,
+   :path [:evidence/body :auto-clock-witness :rule],
+   :docs 55}
+  {:strings 6,
+   :chars 1249,
+   :max-chars 362,
+   :path [:evidence/body :expected-outcome],
+   :docs 6}
+  {:strings 55,
+   :chars 1122,
+   :max-chars 68,
+   :path [:evidence/body :auto-clock-witness :new-target],
+   :docs 55}
+  {:strings 4,
+   :chars 1032,
+   :max-chars 258,
+   :path [:evidence/body :detail :how-to-fix],
+   :docs 4}
+  {:strings 2,
+   :chars 1025,
+   :max-chars 530,
+   :path [:evidence/body :actions],
+   :docs 2}
+  {:strings 160,
+   :chars 1013,
+   :max-chars 12,
+   :path [:evidence/body :witness :matched-terms *],
+   :docs 8}
+  {:strings 54,
+   :chars 1011,
+   :max-chars 43,
+   :path [:evidence/body :auto-clock-witness :tokens *],
+   :docs 51}
+  {:strings 39,
+   :chars 988,
+   :max-chars 35,
+   :path
+   [:evidence/body :detail :violations * :unclassified-old * :name],
+   :docs 9}
+  {:strings 39,
+   :chars 988,
+   :max-chars 35,
+   :path [:evidence/body :detail :violations * :violation? * :name],
+   :docs 9}
+  {:strings 142,
+   :chars 912,
+   :max-chars 7,
+   :path [:evidence/body :detail :violations * :records * :repo],
+   :docs 3}
+  {:strings 30,
+   :chars 900,
+   :max-chars 30,
+   :path [:evidence/body :details :last-active],
+   :docs 30}
+  {:strings 294,
+   :chars 882,
+   :max-chars 3,
+   :path [:evidence/body :via],
+   :docs 294}
+  {:strings 2,
+   :chars 850,
+   :max-chars 525,
+   :path [:evidence/body :rationale],
+   :docs 2}
+  {:strings 1,
+   :chars 749,
+   :max-chars 749,
+   :path
+   [:evidence/body
+    :fruit
+    :latest-context
+    :minibuffer
+    :buffer
+    :visible
+    :text],
+   :docs 1}
+  {:strings 1,
+   :chars 749,
+   :max-chars 749,
+   :path
+   [:evidence/body
+    :fruit
+    :latest-context
+    :minibuffer
+    :results
+    *
+    :buffer
+    :visible
+    :text],
+   :docs 1}
+  {:strings 2,
+   :chars 670,
+   :max-chars 437,
+   :path [:evidence/body :notes],
+   :docs 2}
+  {:strings 55,
+   :chars 642,
+   :max-chars 32,
+   :path [:evidence/body :auto-clock-witness :old-target],
+   :docs 55}
+  {:strings 8,
+   :chars 577,
+   :max-chars 74,
+   :path [:evidence/body :witness :file],
+   :docs 8}
+  {:strings 21,
+   :chars 555,
+   :max-chars 29,
+   :path
+   [:evidence/body
+    :fruit
+    :latest-context
+    :minibuffer
+    :results
+    *
+    :label],
+   :docs 1}
+  {:strings 21,
+   :chars 504,
+   :max-chars 24,
+   :path
+   [:evidence/body
+    :fruit
+    :latest-context
+    :minibuffer
+    :results
+    *
+    :started-at],
+   :docs 1}
+  {:strings 2,
+   :chars 495,
+   :max-chars 267,
+   :path [:evidence/body :expected],
+   :docs 2}
+  {:strings 79,
+   :chars 474,
+   :max-chars 6,
+   :path [:evidence/body :args * :debug :last-transition :kind],
+   :docs 79}
+  {:strings 31,
+   :chars 467,
+   :max-chars 30,
+   :path [:evidence/tags *],
+   :docs 8}
+  {:strings 27,
+   :chars 446,
+   :max-chars 22,
+   :path [:evidence/body :cwd],
+   :docs 27}
+  {:strings 16,
+   :chars 442,
+   :max-chars 33,
+   :path [:evidence/body :target :mission-id],
+   :docs 16}
+  {:strings 15,
+   :chars 435,
+   :max-chars 29,
+   :path [:evidence/body :enacted],
+   :docs 15}
+  {:strings 2,
+   :chars 338,
+   :max-chars 177,
+   :path [:evidence/body :actual],
+   :docs 2}
+  {:strings 12,
+   :chars 300,
+   :max-chars 30,
+   :path [:evidence/body :opened-at],
+   :docs 12}
+  {:strings 14,
+   :chars 294,
+   :max-chars 33,
+   :path [:evidence/body :witness :tokens *],
+   :docs 13}
+  {:strings 6,
+   :chars 292,
+   :max-chars 68,
+   :path [:evidence/body :candidates *],
+   :docs 2}
+  {:strings 11,
+   :chars 279,
+   :max-chars 30,
+   :path [:evidence/body :track-id],
+   :docs 11}
+  {:strings 13,
+   :chars 259,
+   :max-chars 21,
+   :path [:evidence/body :trigger],
+   :docs 13}
+  {:strings 8,
+   :chars 258,
+   :max-chars 33,
+   :path [:evidence/body :witness :new-target],
+   :docs 8}
+  {:strings 21,
+   :chars 245,
+   :max-chars 13,
+   :path [:evidence/body :event-type],
+   :docs 21}
+  {:strings 4,
+   :chars 244,
+   :max-chars 61,
+   :path [:evidence/body :auto-clock-witness :file],
+   :docs 4}
+  {:strings 16,
+   :chars 240,
+   :max-chars 15,
+   :path [:evidence/body :target],
+   :docs 16}
+  {:strings 16,
+   :chars 240,
+   :max-chars 15,
+   :path [:evidence/body :decision],
+   :docs 16}
+  {:strings 21,
+   :chars 228,
+   :max-chars 13,
+   :path
+   [:evidence/body :fruit :latest-context :minibuffer :results * :op],
+   :docs 1}
+  {:strings 21,
+   :chars 224,
+   :max-chars 15,
+   :path [:evidence/body :witness :rule],
+   :docs 21}
+  {:strings 9,
+   :chars 214,
+   :max-chars 33,
+   :path [:evidence/body :witness :new-target :mission-id],
+   :docs 9}
+  {:strings 7,
+   :chars 188,
+   :max-chars 30,
+   :path [:evidence/body :closed-at],
+   :docs 7}
+  {:strings 21,
+   :chars 180,
+   :max-chars 11,
+   :path [:evidence/body :marker],
+   :docs 21}
+  {:strings 2,
+   :chars 171,
+   :max-chars 94,
+   :path [:evidence/body :query],
+   :docs 2}
+  {:strings 21,
+   :chars 168,
+   :max-chars 8,
+   :path [:evidence/body :resolution-kind],
+   :docs 21}
+  {:strings 1,
+   :chars 163,
+   :max-chars 163,
+   :path [:evidence/body :fruit :buffer-surface :visible-preview],
+   :docs 1}
+  {:strings 4,
+   :chars 132,
+   :max-chars 33,
+   :path [:evidence/body :agenda :claim],
+   :docs 4}
+  {:strings 4,
+   :chars 132,
+   :max-chars 33,
+   :path [:evidence/body :run :claim],
+   :docs 4}
+  {:strings 12,
+   :chars 120,
+   :max-chars 10,
+   :path [:evidence/body :target-date],
+   :docs 12}
+  {:strings 2,
+   :chars 120,
+   :max-chars 107,
+   :path [:evidence/body :args * :sexp],
+   :docs 2}
+  {:strings 6,
+   :chars 110,
+   :max-chars 30,
+   :path [:evidence/body :target :excursion-id],
+   :docs 6}
+  {:strings 5,
+   :chars 109,
+   :max-chars 23,
+   :path
+   [:evidence/body
+    :fruit
+    :latest-context
+    :minibuffer
+    :results
+    *
+    :buffer],
+   :docs 1}
+  {:strings 1,
+   :chars 107,
+   :max-chars 107,
+   :path [:evidence/body :fruit :minibuffer-surface :sexp],
+   :docs 1}
+  {:strings 5,
+   :chars 105,
+   :max-chars 21,
+   :path [:evidence/body :details :last-subtask :root],
+   :docs 5}
+  {:strings 1,
+   :chars 89,
+   :max-chars 89,
+   :path [:evidence/body :fruit :latest-context :buffer-surface],
+   :docs 1}
+  {:strings 2,
+   :chars 88,
+   :max-chars 49,
+   :path [:evidence/body :selected],
+   :docs 2}
+  {:strings 5,
+   :chars 80,
+   :max-chars 16,
+   :path [:evidence/body :witness :new-target :excursion-id],
+   :docs 5}
+  {:strings 8,
+   :chars 56,
+   :max-chars 7,
+   :path [:evidence/subject :ref/type],
+   :docs 8}
+  {:strings 4,
+   :chars 56,
+   :max-chars 14,
+   :path [:evidence/body :agenda :id],
+   :docs 4}
+  {:strings 4,
+   :chars 56,
+   :max-chars 14,
+   :path [:evidence/body :run :agenda-id],
+   :docs 4}
+  {:strings 2,
+   :chars 48,
+   :max-chars 24,
+   :path [:evidence/body :args * :at],
+   :docs 2}
+  {:strings 1,
+   :chars 48,
+   :max-chars 48,
+   :path [:evidence/body :msg/id],
+   :docs 1}
+  {:strings 3,
+   :chars 47,
+   :max-chars 18,
+   :path [:evidence/body :reason],
+   :docs 3}
+  {:strings 8,
+   :chars 41,
+   :max-chars 11,
+   :path
+   [:evidence/body
+    :fruit
+    :latest-context
+    :minibuffer
+    :results
+    *
+    :word],
+   :docs 1}
+  {:strings 1,
+   :chars 41,
+   :max-chars 41,
+   :path [:evidence/body :session-id],
+   :docs 1}
+  {:strings 1,
+   :chars 38,
+   :max-chars 38,
+   :path [:evidence/body :fruit :summary],
+   :docs 1}
+  {:strings 4,
+   :chars 36,
+   :max-chars 9,
+   :path [:evidence/body :observation-source],
+   :docs 4}
+  {:strings 4,
+   :chars 36,
+   :max-chars 9,
+   :path [:evidence/body :run :observation-source],
+   :docs 4}
+  {:strings 1,
+   :chars 35,
+   :max-chars 35,
+   :path [:evidence/body :fruit :editor-id],
+   :docs 1}
+  {:strings 1,
+   :chars 35,
+   :max-chars 35,
+   :path [:evidence/body :fruit :latest-context :debug :session-id],
+   :docs 1}
+  {:strings 1,
+   :chars 35,
+   :max-chars 35,
+   :path [:evidence/body :fruit :buffer-surface :editor-id],
+   :docs 1}
+  {:strings 1,
+   :chars 35,
+   :max-chars 35,
+   :path [:evidence/body :fruit :buffer-surface :debug :session-id],
+   :docs 1}
+  {:strings 2,
+   :chars 31,
+   :max-chars 24,
+   :path [:evidence/body :args * :result],
+   :docs 2}
+  {:strings 1,
+   :chars 25,
+   :max-chars 25,
+   :path
+   [:evidence/body :fruit :latest-context :debug :selected-window],
+   :docs 1}
+  {:strings 1,
+   :chars 25,
+   :max-chars 25,
+   :path
+   [:evidence/body :fruit :buffer-surface :debug :selected-window],
+   :docs 1}
+  {:strings 1,
+   :chars 24,
+   :max-chars 24,
+   :path [:evidence/body :mission],
+   :docs 1}
+  {:strings 1,
+   :chars 24,
+   :max-chars 24,
+   :path [:evidence/body :fruit :latest-context :debug :current-time],
+   :docs 1}
+  {:strings 1,
+   :chars 24,
+   :max-chars 24,
+   :path [:evidence/body :fruit :minibuffer-surface :at],
+   :docs 1}
+  {:strings 1,
+   :chars 24,
+   :max-chars 24,
+   :path [:evidence/body :fruit :latest-context :minibuffer :at],
+   :docs 1}
+  {:strings 1,
+   :chars 24,
+   :max-chars 24,
+   :path
+   [:evidence/body :fruit :latest-context :minibuffer :started-at],
+   :docs 1}
+  {:strings 1,
+   :chars 24,
+   :max-chars 24,
+   :path [:evidence/body :fruit :buffer-surface :debug :current-time],
+   :docs 1}
+  {:strings 2,
+   :chars 23,
+   :max-chars 12,
+   :path [:evidence/body :args * :request-id],
+   :docs 2}
+  {:strings 1,
+   :chars 22,
+   :max-chars 22,
+   :path
+   [:evidence/body :fruit :latest-context :minibuffer :buffer :name],
+   :docs 1}
+  {:strings 1,
+   :chars 22,
+   :max-chars 22,
+   :path
+   [:evidence/body
+    :fruit
+    :latest-context
+    :minibuffer
+    :results
+    *
+    :buffer
+    :name],
+   :docs 1}
+  {:strings 1,
+   :chars 18,
+   :max-chars 18,
+   :path
+   [:evidence/body :fruit :minibuffer-surface :buffer :major-mode],
+   :docs 1}
+  {:strings 1,
+   :chars 18,
+   :max-chars 18,
+   :path
+   [:evidence/body :fruit :latest-context :minibuffer :request-id],
+   :docs 1}
+  {:strings 1,
+   :chars 18,
+   :max-chars 18,
+   :path [:evidence/body :fruit :latest-context :minibuffer :name],
+   :docs 1}
+  {:strings 2,
+   :chars 18,
+   :max-chars 9,
+   :path [:evidence/body :args * :command],
+   :docs 2}
+  {:strings 1,
+   :chars 16,
+   :max-chars 16,
+   :path
+   [:evidence/body
+    :fruit
+    :latest-context
+    :minibuffer
+    :buffer
+    :major-mode],
+   :docs 1}
+  {:strings 1,
+   :chars 16,
+   :max-chars 16,
+   :path
+   [:evidence/body
+    :fruit
+    :latest-context
+    :minibuffer
+    :results
+    *
+    :buffer
+    :major-mode],
+   :docs 1}
+  {:strings 2,
+   :chars 14,
+   :max-chars 7,
+   :path [:evidence/body :outcome],
+   :docs 2}
+  {:strings 1,
+   :chars 13,
+   :max-chars 13,
+   :path [:evidence/body :fruit :minibuffer-surface :buffer :name],
+   :docs 1}
+  {:strings 2,
+   :chars 12,
+   :max-chars 6,
+   :path [:evidence/body :args * :value-type],
+   :docs 2}
+  {:strings 1,
+   :chars 12,
+   :max-chars 12,
+   :path [:evidence/body :fruit :minibuffer-surface :request-id],
+   :docs 1}
+  {:strings 1,
+   :chars 10,
+   :max-chars 10,
+   :path [:evidence/body :fruit :buffer-surface :buffer :major-mode],
+   :docs 1}
+  {:strings 1,
+   :chars 10,
+   :max-chars 10,
+   :path [:evidence/body :fruit :latest-context :buffer :major-mode],
+   :docs 1}
+  {:strings 1,
+   :chars 10,
+   :max-chars 10,
+   :path [:evidence/body :fruit :latest-context :minibuffer :command],
+   :docs 1}
+  {:strings 2,
+   :chars 10,
+   :max-chars 5,
+   :path [:evidence/body :sigil],
+   :docs 2}
+  {:strings 1,
+   :chars 9,
+   :max-chars 9,
+   :path [:evidence/body :fruit :minibuffer-surface :command],
+   :docs 1}
+  {:strings 1,
+   :chars 9,
+   :max-chars 9,
+   :path [:evidence/body :closed-by],
+   :docs 1}
+  {:strings 2,
+   :chars 8,
+   :max-chars 4,
+   :path [:evidence/body :confidence],
+   :docs 2}
+  {:strings 1,
+   :chars 7,
+   :max-chars 7,
+   :path [:evidence/body :fruit :latest-context :buffer :name],
+   :docs 1}
+  {:strings 1,
+   :chars 7,
+   :max-chars 7,
+   :path [:evidence/body :fruit :last-buffer],
+   :docs 1}
+  {:strings 1,
+   :chars 7,
+   :max-chars 7,
+   :path [:evidence/body :fruit :minibuffer-surface :result],
+   :docs 1}
+  {:strings 1,
+   :chars 7,
+   :max-chars 7,
+   :path [:evidence/body :fruit :buffer-surface :buffer :name],
+   :docs 1}
+  {:strings 1,
+   :chars 6,
+   :max-chars 6,
+   :path [:evidence/body :fruit :buffer-surface :mode],
+   :docs 1}
+  {:strings 1,
+   :chars 6,
+   :max-chars 6,
+   :path [:evidence/body :fruit :buffer-surface :debug :editor-id],
+   :docs 1}
+  {:strings 1,
+   :chars 6,
+   :max-chars 6,
+   :path [:evidence/body :fruit :minibuffer-surface :value-type],
+   :docs 1}
+  {:strings 2,
+   :chars 6,
+   :max-chars 3,
+   :path [:evidence/body :prediction-error],
+   :docs 2}
+  {:strings 1,
+   :chars 6,
+   :max-chars 6,
+   :path [:evidence/body :fruit :latest-context :editor-id],
+   :docs 1}
+  {:strings 1,
+   :chars 6,
+   :max-chars 6,
+   :path [:evidence/body :fruit :latest-context :debug :editor-id],
+   :docs 1}
+  {:strings 2,
+   :chars 4,
+   :max-chars 2,
+   :path [:evidence/body :args * :status],
+   :docs 2}
+  {:strings 1,
+   :chars 2,
+   :max-chars 2,
+   :path [:evidence/body :fruit :minibuffer-surface :status],
+   :docs 1}
+  {:strings 1,
+   :chars 2,
+   :max-chars 2,
+   :path [:evidence/body :fruit :latest-context :minibuffer :status],
+   :docs 1}
+  {:strings 39,
+   :chars 0,
+   :max-chars 0,
+   :path
+   [:evidence/body :detail :violations * :violation? * :description],
+   :docs 9}]}
