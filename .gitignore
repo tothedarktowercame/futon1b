@@ -3,3 +3,4 @@ migration-export/
 migration-export/
 migration-store*/
 .cpcache/
+textprobe/history-versions-full.edn
