@@ -176,13 +176,31 @@ simply rejected, not half-applied). Open question: a watchdog that
 restarts on the unhealthy marker, or a modest `-Xmx` bump once Phase E
 frees the second JVM's budget.
 
-**Recurred same day** (~40min after the restart, uncaught OOM in a
-coroutine thread; queries limping at 20-60s): 1g heap is genuinely
-under-sized for serving this store. Unit now runs
-`-J-Xmx1536m -J-XX:MaxDirectMemorySize=768m` (CLI `-J` opts land after
-alias jvm-opts, so they win; both OOMs were heap, not direct — net
-ceiling +256m on the box). Healthy on restart. If it recurs at 1.5g,
-stop bumping and treat it as Phase E pressure + add the health watchdog.
+**Recurred same day — diagnosis sharpened (Joe pushed back, rightly).**
+Incident 1 was airtight heap OOM (`Java heap space`, ingestion stopped;
+systemd exit accounting: **2.4G memory peak, 1.1G swap peak** on a
+1g-heap JVM). Incident 2: an `OutOfMemoryError` WAS logged (13:44:37,
+kind unstated, kotlinx DefaultExecutor) but the user-visible slowness
+started ~5min earlier — futon3c's 30s client timeouts at 13:39 were the
+run-up, not a dead server: GC grinding near the 1g ceiling (one core
+pegged) compounded by box swap pressure (that JVM: **1.9G peak, 511M
+swap peak**), each GC cycle paging swapped heap back from disk. The
+logged OOM was the end of that spiral, not the start.
+
+Unit now runs `-J-Xmx1536m -J-XX:MaxDirectMemorySize=768m
+-J-XX:+ExitOnOutOfMemoryError
+-J-Xlog:gc:file=…/gc.log:time,uptime:filecount=2,filesize=10m`
+(CLI `-J` opts land after alias jvm-opts, so they win).
+**ExitOnOutOfMemoryError closes the zombie mode from incident 1** — the
+process now dies on OOM so systemd `Restart=on-failure` actually fires;
+the GC log makes the next incident diagnosable in one look (calm at
+boot: ~330M used of 559M committed, 12-37ms pauses). If it recurs at
+1.5g, stop bumping — treat as Phase E pressure + box-swap problem.
+
+**Replay-census caveat:** for ~2min after a restart, `/health` reports
+counts from the partially-replayed log (saw 322k hyperedges vs the true
+328k) — do not read a low census right after boot as data loss; wait
+for replay and re-check (newest-entry GETs are the better probe).
 
 ### Layered error envelope
 
