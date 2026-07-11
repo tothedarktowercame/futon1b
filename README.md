@@ -133,6 +133,18 @@ reachability, stronger than the in-process backends get), and
 futon1a absent. Lucy caveat: something already holds :6667 there — sort
 the futon3c IRC port before a full `make dev`.
 
+### The watchers speak JSON (found live, Phase C Gate 2, 2026-07-11)
+
+futon3c's commit_ingest/file_ingest POST `application/json` with string
+keys ("hx/type"); futon1a keywordizes JSON server-side so both formats
+hit one code path. The v1 EDN-only server 500ed every watcher write —
+**silently**, because the watchers post `:throw false` and only log
+statuses they parse. The server is now Content-Type-aware both ways
+(cheshire; nested keys keywordized like futon1a; JSON responses when
+Accept/Content-Type asks). `test_json.clj` locks the watcher payload
+shape. Lesson: "who actually calls this" beats "what the contract says
+clients could do" — enumerate callers before triaging format support.
+
 ### Layered error envelope
 
 Gate failures return futon1a's envelope
