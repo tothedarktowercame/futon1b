@@ -197,6 +197,19 @@ the GC log makes the next incident diagnosable in one look (calm at
 boot: ~330M used of 559M committed, 12-37ms pauses). If it recurs at
 1.5g, stop bumping — treat as Phase E pressure + box-swap problem.
 
+**FTS full-build heap pressure (2026-07-11 evening):** the initial index
+build's page scans (compound-keyset order-by over the whole evidence
+table, ~94 pages) heat XTDB's caches over ALL rows repeatedly; by ~70%
+through, the live set filled the 1536m heap — GC log showed the spiral
+plainly (398 Full GCs, 1535M→1535M(1536M), 2.7s pauses; ExitOnOOM never
+fired because allocation kept "succeeding" by a hair). Per the
+stop-bumping rule: no bigger heap. Remedy = the checkpoint ratchet —
+restart with a fresh heap and the build resumes from (at, id), needing
+only the tail; repeat if needed, progress is monotone. This is a
+ONE-TIME-per-box cost (steady state is the append path); a proper fix
+(streaming id+at pass, or cache budget tuning for build mode) only pays
+if boxes multiply. GC log at futon1b/gc.log is the diagnostic of record.
+
 **Replay-census caveat:** for ~2min after a restart, `/health` reports
 counts from the partially-replayed log (saw 322k hyperedges vs the true
 328k) — do not read a low census right after boot as data loss; wait
