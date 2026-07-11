@@ -1,4 +1,0 @@
---add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED
--Dio.netty.tryReflectionSetAccessible=true
--Xmx1g
--XX:MaxDirectMemorySize=1g

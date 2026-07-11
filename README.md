@@ -36,6 +36,16 @@ in-memory node; 26/26 as of `d171150`). Gates for any Clojure change:
 | `FUTON1B_ALLOWED_PENHOLDERS` | `api,joe` | L3 write allow-list |
 | `FUTON1B_COMPAT_PENHOLDER` | (unset) | fallback penholder when neither body `:penholder` nor `x-penholder` header is present; unset ⇒ such writes 403 |
 
+futon3c-side (consumers of this server):
+
+| Var | Default | Meaning |
+|---|---|---|
+| `FUTON3C_EVIDENCE_BACKEND` | (unset) | `futon1b` selects the HTTP/EDN evidence backend (wins over direct-xtdb) |
+| `FUTON1B_URL` | `http://localhost:7074` | where the backend + watcher dual-write find this server |
+| `FUTON1B_PENHOLDER` | falls back to `FUTON1A_PENHOLDER`, then `api` | `x-penholder` the backend sends |
+| `FUTON1A_PORT` | `7071` | **`0` disables embedded futon1a entirely** (B3 gate) |
+| `FUTON1A_URL` | `http://localhost:7071` | where the stack's substrate HTTP clients point — set to this server for cutover |
+
 ## Findings (hard-won; read before touching the stack)
 
 ### XTDB 2.1.0 needs `-Djava.net.preferIPv4Stack=true` (2026-07-10)
@@ -90,6 +100,38 @@ All POST routes are L3-gated. The futon3c operational writers already send
 `x-penholder` (from `FUTON1A_PENHOLDER`). The **dormant watcher dual-write
 hook does not** — if it is ever revived against this server, set
 `FUTON1B_COMPAT_PENHOLDER=api` or add the header at the hook.
+
+### http-kit hands bodies back as streams (2026-07-10)
+
+The futon3c backend must pass `:as :text` on every http-kit request (and
+defensively slurp): without it, response bodies arrive as
+`org.httpkit.BytesInputStream` and `edn/read-string` dies with a
+ClassCastException that *looks* like a server-side problem.
+
+### Protocol semantics live client-side, pushdown only narrows (B1 design)
+
+`futon3c.evidence.futon1b-backend` re-applies the shared
+`filter-and-sort-entries` locally on every -query/-count (with
+`include-ephemeral=true` requested, so the local filter owns the
+ephemeral default). The server's filters are a transfer optimization,
+never the decider — keep it that way when adding params, or the three
+backends drift.
+
+### Boot recipe with futon1a fully absent (Gate 1, verified 2026-07-10)
+
+```
+FUTON1A_PORT=0 \
+FUTON3C_EVIDENCE_BACKEND=futon1b \
+FUTON1B_URL=http://localhost:7074 \
+FUTON1A_URL=http://localhost:7074 \
+make dev            # in futon3c; this server on :7074 first
+```
+
+The I-evidence-per-turn boot check probes this server's `/health` (live
+reachability, stronger than the in-process backends get), and
+`boundary/append!` → `verify-persisted` round-trips were verified with
+futon1a absent. Lucy caveat: something already holds :6667 there — sort
+the futon3c IRC port before a full `make dev`.
 
 ### Layered error envelope
 
