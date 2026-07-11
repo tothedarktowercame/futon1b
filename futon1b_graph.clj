@@ -289,9 +289,18 @@
   (cond
     type
     (let [t (normalize-type type)
+          clauses (cond-> [(list '= 'hx/type t)]
+                    ;; denormalized :prop/* columns (H4) let repo/source-file
+                    ;; push down — the [*] whole-type pull timed out live on
+                    ;; the 259k-doc edits type (2026-07-11)
+                    repo (conj (list '= 'prop/repo repo))
+                    source-file (conj (list '= 'prop/source-file source-file)))
           docs (fxt/safe-q node (list '-> '(from :hyperedges [*])
-                                (list 'where (list '= 'hx/type t))))
-          total (count docs)
+                                (cons 'where clauses)))
+          total (if (or repo source-file)
+                  (count docs)
+                  (count (fxt/safe-q node (list '-> '(from :hyperedges [xt/id hx/type])
+                                                (list 'where (list '= 'hx/type t))))))
           prop-get (fn [d k kw-col]
                      (or (get d kw-col)
                          (get-in d [:hx/props (keyword k)])

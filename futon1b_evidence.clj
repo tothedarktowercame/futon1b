@@ -121,19 +121,32 @@
 ;; post-filter in Clojure (contract §3 semantics, lexicographic since).
 ;; ---------------------------------------------------------------------------
 
+(def ^:private filter-cols
+  "Projection sufficient for every post-filter + sort AND every pushdown
+  where-column — a where var absent from the projection is unbound, which
+  safe-q maps to an empty result (silent zero; bit the /count tests).
+  Fetching [*] across the corpus died at 94k docs (>60s; 2026-07-11)."
+  '[xt/id evidence/at evidence/type evidence/claim-type evidence/author
+    evidence/session-id evidence/fork-of
+    evidence/ephemeral? evidence/tags evidence/subject])
+
 (defn- fetch-filtered
-  "All evidence docs, with type/claim-type/author/session-id pushed down."
-  [node {:keys [type claim-type author session-id fork-of]}]
+  "Evidence docs with type/claim-type/author/session-id AND since/before
+  (lexicographic string compare — the contract's own semantics) pushed
+  down to XTQL. cols = '[*] for full docs, filter-cols for cheap scans."
+  [node {:keys [type claim-type author session-id fork-of since before]} cols]
   (let [clauses (cond-> []
                   type (conj (list '= 'evidence/type type))
                   claim-type (conj (list '= 'evidence/claim-type claim-type))
                   author (conj (list '= 'evidence/author author))
                   session-id (conj (list '= 'evidence/session-id session-id))
-                  fork-of (conj (list '= 'evidence/fork-of fork-of)))]
+                  fork-of (conj (list '= 'evidence/fork-of fork-of))
+                  since (conj (list '>= 'evidence/at since))
+                  before (conj (list '< 'evidence/at before)))]
     (if (seq clauses)
-      (fxt/safe-q node (list '-> '(from :evidence [*])
+      (fxt/safe-q node (list '-> (list 'from :evidence cols)
                        (cons 'where clauses)))
-      (fxt/safe-q node '(from :evidence [*])))))
+      (fxt/safe-q node (list 'from :evidence cols)))))
 
 (defn- name-of [x]
   (cond (keyword? x) (name x)
@@ -183,23 +196,40 @@
                                    (catch Exception _ nil)))))
 
 (defn query-evidence
-  "GET /api/alpha/evidence → {:entries [...] :count n} (newest first)."
+  "GET /api/alpha/evidence → {:entries [...] :count n} (newest first).
+  With a limit: phase 1 scans projected columns to find the window, phase 2
+  re-fetches [*] bounded by the window's oldest :at — full docs are only
+  materialized for ~limit rows, not the corpus."
   [node http-params]
   (let [q (parse-query-params http-params)
-        docs (-> (fetch-filtered node q)
-                 (apply-post-filters q))
-        sorted (sort-by #(str (:evidence/at %)) #(compare %2 %1) docs)
-        limited (if (and (int? (:limit q)) (pos? (:limit q)))
-                  (take (:limit q) sorted)
-                  sorted)
-        entries (mapv public-doc limited)]
-    {:entries entries :count (count entries)}))
+        limit (:limit q)]
+    (if (and (int? limit) (pos? limit))
+      (let [slim (-> (fetch-filtered node q filter-cols)
+                     (apply-post-filters q))
+            window (->> slim
+                        (sort-by #(str (:evidence/at %)) #(compare %2 %1))
+                        (take limit))]
+        (if (empty? window)
+          {:entries [] :count 0}
+          (let [cutoff (str (:evidence/at (last window)))
+                q2 (update q :since (fn [s] (if (and s (pos? (compare s cutoff))) s cutoff)))
+                docs (-> (fetch-filtered node q2 '[*])
+                         (apply-post-filters q2))
+                sorted (sort-by #(str (:evidence/at %)) #(compare %2 %1) docs)
+                entries (mapv public-doc (take limit sorted))]
+            {:entries entries :count (count entries)})))
+      (let [docs (-> (fetch-filtered node q '[*])
+                     (apply-post-filters q))
+            sorted (sort-by #(str (:evidence/at %)) #(compare %2 %1) docs)
+            entries (mapv public-doc sorted)]
+        {:entries entries :count (count entries)}))))
 
 (defn count-evidence
-  "GET /api/alpha/evidence/count → {:count n} (same filters, no limit)."
+  "GET /api/alpha/evidence/count → {:count n} (same filters, no limit).
+  Projected scan — never materializes full docs."
   [node http-params]
   (let [q (dissoc (parse-query-params http-params) :limit)]
-    {:count (count (apply-post-filters (fetch-filtered node q) q))}))
+    {:count (count (apply-post-filters (fetch-filtered node q filter-cols) q))}))
 
 ;; ---------------------------------------------------------------------------
 ;; Sessions + chain.
@@ -214,7 +244,8 @@
         author (http-params "author")
         limit (some-> (http-params "limit")
                       (as-> s (try (Long/parseLong s) (catch Exception _ nil))))
-        docs (cond->> (fxt/safe-q node '(from :evidence [*]))
+        docs (cond->> (fxt/safe-q node '(from :evidence [xt/id evidence/session-id evidence/at
+                                                          evidence/type evidence/author]))
                author (filter #(= author (:evidence/author %)))
                since (filter #(>= (compare (str (:evidence/at %)) since) 0)))
         sessioned (filter :evidence/session-id docs)
