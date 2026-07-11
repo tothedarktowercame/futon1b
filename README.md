@@ -159,6 +159,23 @@ repo/source-file filters should use the denormalized `:prop/*` columns.
 Post-fix: the killer queries run 7-11s cold on the 94k corpus (client
 timeout 30s for headroom).
 
+### Heap OOM stops ingestion silently-ish; process survives (2026-07-11)
+
+After ~2h of serving-day load (`-Xmx1g`), the node hit
+`java.lang.OutOfMemoryError: Java heap space` during log-record
+processing. XTDB's response: **ingestion stops permanently and the node
+is marked unhealthy, but the JVM keeps running** — so systemd
+`Restart=on-failure` never fires, writes 500, and every read that stamps
+a current-time basis fails with "system-time (…) is after the latest
+completed tx (…)". That error message is the tell: reads demand a basis
+newer than the frozen indexer can serve. Remedy per XTDB docs: restart
+the node (`systemctl --user restart futon1b-server`); log replay from
+the last flushed block took ~60s on the 328k-hyperedge/94k-evidence
+store and no data was lost (the append that collided with the OOM was
+simply rejected, not half-applied). Open question: a watchdog that
+restarts on the unhealthy marker, or a modest `-Xmx` bump once Phase E
+frees the second JVM's budget.
+
 ### Layered error envelope
 
 Gate failures return futon1a's envelope
