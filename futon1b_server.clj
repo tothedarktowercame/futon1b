@@ -37,6 +37,7 @@
             [futon1b-graph :as graph]
             [zai-memory-1b :as zm]
             [futon1b-xt :as fxt]
+            [futon1b-text :as text]
             [xtdb.api :as xt])
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
            [java.net InetSocketAddress URLDecoder]
@@ -356,12 +357,66 @@
                (p "author") (assoc :author (p "author"))
                (p "since")  (assoc :since (p "since"))
                (p "tags")   (assoc :tags (mapv keyword (str/split (p "tags") #",")))
+               (p "text")   (assoc :text (p "text"))
                (p "limit")  (assoc :limit (Long/parseLong (p "limit"))))]
     (respond! ex 200 (pr-str (zm/memory-search @!node opts)))))
+
+(defn- text-search-route
+  "GET /api/alpha/evidence/text-search?q=…&author=&session-id=&since=&before=
+   &include-ephemeral=&limit= — D1 sidecar search (candidates + re-check).
+   ?stats=true returns index stats instead. POST {:op :catch-up} (penholder-
+   gated) starts a background catch-up/rebuild."
+  [^HttpExchange ex]
+  (let [method (.getRequestMethod ex)
+        p (query-params ex)]
+    (cond
+      (= method "POST")
+      (let [payload (parse-payload ex)
+            _ (penholder! ex payload)]
+        (future
+          (try (println "[fts] catch-up:" (pr-str (text/catch-up! @!node)))
+               (catch Throwable t (println "[fts] catch-up failed:" (.getMessage t)))))
+        (respond! ex 202 (pr-str {:ok true :started :catch-up})))
+
+      (not= method "GET")
+      (respond! ex 405 (pr-str {:ok false :error "GET (search) or POST (catch-up)"}))
+
+      (= "true" (p "stats"))
+      (respond! ex 200 (pr-str (text/stats)))
+
+      (str/blank? (str (p "q")))
+      (respond! ex 400 (pr-str {:error "q parameter required"}))
+
+      :else
+      (respond! ex 200
+                (pr-str (text/search @!node
+                                     (cond-> {:q (p "q")}
+                                       (p "author") (assoc :author (p "author"))
+                                       (p "session-id") (assoc :session-id (p "session-id"))
+                                       (p "since") (assoc :since (p "since"))
+                                       (p "before") (assoc :before (p "before"))
+                                       (p "include-ephemeral")
+                                       (assoc :include-ephemeral
+                                              (= "true" (str/lower-case (p "include-ephemeral"))))
+                                       (parse-limit p) (assoc :limit (parse-limit p)))))))))
 
 (defn start-server! [{:keys [store-dir port node]}]
   (gates/seed-mission-contract!)
   (reset! !node (or node (zm/open-store store-dir)))
+  ;; D1 sidecar: open/create the FTS5 db beside the store, then catch up in
+  ;; the background (first boot = full build; steady state = the tail since
+  ;; last-at). Failures here must not block serving.
+  (try
+    (let [{:keys [path last-at]} (text/init! {:store-dir store-dir})]
+      (println (format "[fts] sidecar at %s (last-at %s)" path (or last-at "none — full build")))
+      (doto (Thread. (fn []
+                       (try (println "[fts] catch-up:" (pr-str (text/catch-up! @!node)))
+                            (catch Throwable t
+                              (println "[fts] catch-up failed:" (.getMessage t))))))
+        (.setDaemon true)
+        (.start)))
+    (catch Throwable t
+      (println "[fts] init failed (serving continues):" (.getMessage t))))
   (let [server (HttpServer/create (InetSocketAddress. (int port)) 0)]
     (.createContext server "/health" (handler health))
     ;; NB JDK HttpServer matches contexts by raw string prefix — the longer
@@ -370,6 +425,8 @@
     (.createContext server "/api/alpha/hyperedge" (handler hyperedge-route))
     (.createContext server "/api/alpha/hyperedges" (handler hyperedges-route))
     (.createContext server "/api/alpha/evidence" (handler evidence-route))
+    ;; longer prefix wins (see NB above): text-search must out-rank /evidence
+    (.createContext server "/api/alpha/evidence/text-search" (handler text-search-route))
     (.createContext server "/api/alpha/entity" (handler entity-route))
     (.createContext server "/api/alpha/entities/latest" (handler entities-latest-route))
     (.createContext server "/api/alpha/relation" (handler relation-route))

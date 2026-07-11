@@ -5,7 +5,11 @@
   ;; JSON request/response support (API-CONTRACT §0): the futon3c watchers
   ;; POST application/json with string keys; futon1a keywordizes them
   ;; server-side. Same cheshire version as futon3c.
-  cheshire/cheshire  {:mvn/version "5.13.0"}}
+  cheshire/cheshire  {:mvn/version "5.13.0"}
+  ;; D1 text sidecar (M-text-sidecar): FTS5 lives in this JVM beside the
+  ;; store. next.jdbc arrives transitively via xtdb-core; the driver is
+  ;; the version futon3a's meme.arrow store proved.
+  org.xerial/sqlite-jdbc {:mvn/version "3.44.1.0"}}
  ;; XTDB 2 is Arrow-based; modern JDKs need java.nio opened to Arrow.
  ;; Run everything via -M:node (throwaway in-process node, E-futon1b-foothold).
  :aliases
