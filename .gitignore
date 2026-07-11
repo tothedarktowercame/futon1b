@@ -4,3 +4,5 @@ migration-export/
 migration-store*/
 .cpcache/
 textprobe/history-versions-full.edn
+switchover-store/
+switchover-server.log
