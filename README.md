@@ -176,6 +176,14 @@ simply rejected, not half-applied). Open question: a watchdog that
 restarts on the unhealthy marker, or a modest `-Xmx` bump once Phase E
 frees the second JVM's budget.
 
+**Recurred same day** (~40min after the restart, uncaught OOM in a
+coroutine thread; queries limping at 20-60s): 1g heap is genuinely
+under-sized for serving this store. Unit now runs
+`-J-Xmx1536m -J-XX:MaxDirectMemorySize=768m` (CLI `-J` opts land after
+alias jvm-opts, so they win; both OOMs were heap, not direct — net
+ceiling +256m on the box). Healthy on restart. If it recurs at 1.5g,
+stop bumping and treat it as Phase E pressure + add the health watchdog.
+
 ### Layered error envelope
 
 Gate failures return futon1a's envelope
