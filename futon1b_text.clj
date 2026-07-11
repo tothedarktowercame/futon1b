@@ -34,7 +34,11 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private ddl
-  ["CREATE VIRTUAL TABLE IF NOT EXISTS ev_fts USING fts5(
+  ;; WAL first: default rollback-journal mode makes WRITERS BLOCK READERS —
+  ;; a stats count() returned SQLITE_BUSY mid-build (found live 2026-07-11).
+  ;; WAL is a persistent db property; readers then never block on the build.
+  ["PRAGMA journal_mode=WAL"
+   "CREATE VIRTUAL TABLE IF NOT EXISTS ev_fts USING fts5(
       id UNINDEXED, author UNINDEXED, at UNINDEXED, session UNINDEXED,
       body, tokenize='unicode61')"
    "CREATE TABLE IF NOT EXISTS fts_meta (k TEXT PRIMARY KEY, v TEXT)"])
