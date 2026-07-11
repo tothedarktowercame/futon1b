@@ -12,7 +12,8 @@
   (:require [clojure.string :as str]
             [migration.transform :as xf]
             [migration.ingest :as ingest]
-            [futon1b-xt :as fxt]))
+            [futon1b-xt :as fxt]
+            [futon1b-text :as text]))
 
 ;; ---------------------------------------------------------------------------
 ;; Payload → doc.
@@ -109,10 +110,14 @@
       (let [xdoc (xf/transform-doc doc)
             res (ingest/put-doc-with-rescue! node :evidence xdoc !shape-log)]
         (if (exists? node (:xt/id xdoc))
-          [201 (cond-> {:ok true
-                        :evidence/id (:evidence/id xdoc)
-                        :entry (public-doc xdoc)}
-                 (keyword? res) (assoc :rescue res))]
+          (do
+            ;; D1 sidecar refresh rides the append path (M-text-sidecar P3);
+            ;; fire-and-forget — never affects the verified put.
+            (text/on-append! xdoc)
+            [201 (cond-> {:ok true
+                          :evidence/id (:evidence/id xdoc)
+                          :entry (public-doc xdoc)}
+                   (keyword? res) (assoc :rescue res))])
           [500 {:ok false :evidence/id (:evidence/id xdoc)
                 :error "verified put: doc absent after rescue ladder"}])))))
 
