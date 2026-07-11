@@ -145,6 +145,20 @@ Accept/Content-Type asks). `test_json.clj` locks the watcher payload
 shape. Lesson: "who actually calls this" beats "what the contract says
 clients could do" — enumerate callers before triaging format support.
 
+### Query layer at corpus scale (found live, 2026-07-11, post-backfill)
+
+`[*]`-everything reads died at 94k evidence docs (count >60s; the
+mission-control poll timed out perpetually). The pattern now: push every
+exact/range filter into XTQL where (since/before compare lexicographically
+on the ISO strings — the contract's own semantics); scan with a narrow
+projection for counting/filtering; hydrate `[*]` only for the sorted
+window (`:at`-cutoff second pass). Two traps: a where-column ABSENT from
+the projection is an unbound var, which `safe-q` maps to a silently empty
+result — projections must include every pushdown column; and hyperedge
+repo/source-file filters should use the denormalized `:prop/*` columns.
+Post-fix: the killer queries run 7-11s cold on the 94k corpus (client
+timeout 30s for headroom).
+
 ### Layered error envelope
 
 Gate failures return futon1a's envelope
