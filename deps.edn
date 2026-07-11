@@ -1,7 +1,11 @@
 {:paths ["."]
  :deps
  {com.xtdb/xtdb-core {:mvn/version "2.1.0"}
-  com.xtdb/xtdb-api  {:mvn/version "2.1.0"}}
+  com.xtdb/xtdb-api  {:mvn/version "2.1.0"}
+  ;; JSON request/response support (API-CONTRACT §0): the futon3c watchers
+  ;; POST application/json with string keys; futon1a keywordizes them
+  ;; server-side. Same cheshire version as futon3c.
+  cheshire/cheshire  {:mvn/version "5.13.0"}}
  ;; XTDB 2 is Arrow-based; modern JDKs need java.nio opened to Arrow.
  ;; Run everything via -M:node (throwaway in-process node, E-futon1b-foothold).
  :aliases

@@ -27,7 +27,8 @@
 ;;      clojure -M:node -m futon1b-server --store-dir migration-store --port 7073
 ;;      (lucy: --port 7074 — nginx owns :7073 there)
 (ns futon1b-server
-  (:require [clojure.edn :as edn]
+  (:require [cheshire.core :as json]
+            [clojure.edn :as edn]
             [clojure.string :as str]
             [migration.transform :as xf]
             [migration.ingest :as ingest]
@@ -126,12 +127,49 @@
 (defn- read-body [^HttpExchange ex]
   (slurp (.getRequestBody ex)))
 
-(defn- respond! [^HttpExchange ex status ^String body]
+(defn- json-request? [^HttpExchange ex]
+  (some-> (.getFirst (.getRequestHeaders ex) "Content-Type")
+          str/lower-case
+          (str/includes? "application/json")))
+
+(defn- wants-json? [^HttpExchange ex]
+  ;; futon1a app.clj:47-58 — JSON response when Accept OR Content-Type
+  ;; mentions application/json.
+  (boolean
+   (some #(some-> (.getFirst (.getRequestHeaders ex) %)
+                  str/lower-case
+                  (str/includes? "application/json"))
+         ["Accept" "Content-Type"])))
+
+(defn- parse-payload
+  "API-CONTRACT §0: JSON bodies (watchers!) decode with keywordized keys —
+  \"hx/type\" becomes :hx/type, so JSON and EDN hit the same code paths.
+  Otherwise EDN. Empty body -> {}."
+  [^HttpExchange ex]
+  (let [body (read-body ex)]
+    (cond
+      (str/blank? body) {}
+      (json-request? ex) (json/parse-string body keyword)
+      :else (edn/read-string body))))
+
+(defn- respond-str! [^HttpExchange ex status ^String body ^String ctype]
   (let [bytes (.getBytes body StandardCharsets/UTF_8)]
-    (.add (.getResponseHeaders ex) "Content-Type" "application/edn")
+    (.add (.getResponseHeaders ex) "Content-Type" ctype)
     (.sendResponseHeaders ex status (alength bytes))
     (with-open [os (.getResponseBody ex)]
       (.write os bytes))))
+
+(def ^:dynamic *json-response?* false)
+
+(defn- respond!
+  "EDN by default; JSON when the request asked for it (contract §0).
+  Accepts the response VALUE (map) — encoding happens here."
+  [^HttpExchange ex status body]
+  (let [v (if (string? body) (edn/read-string body) body)]
+    (if *json-response?*
+      (respond-str! ex status (json/generate-string v {:escape-non-ascii true})
+                    "application/json; charset=utf-8")
+      (respond-str! ex status (pr-str v) "application/edn; charset=utf-8"))))
 
 (defn- query-params [^HttpExchange ex]
   (into {}
@@ -144,13 +182,14 @@
 (defn- handler ^HttpHandler [route-fn]
   (reify HttpHandler
     (handle [_ ex]
-      (try
-        (route-fn ex)
-        (catch Exception e
-          ;; Layered gate errors keep futon1a's envelope + status mapping
-          ;; (API-CONTRACT §0); anything else is the generic 500.
-          (let [[status body] (gates/error->response e)]
-            (respond! ex status (pr-str body))))))))
+      (binding [*json-response?* (wants-json? ex)]
+        (try
+          (route-fn ex)
+          (catch Exception e
+            ;; Layered gate errors keep futon1a's envelope + status mapping
+            ;; (API-CONTRACT §0); anything else is the generic 500.
+            (let [[status body] (gates/error->response e)]
+              (respond! ex status body))))))))
 
 (defn- penholder!
   "Resolve (body → x-penholder header → default) and authorize (L3)."
@@ -185,7 +224,7 @@
         tail (uri-tail ex "/api/alpha/hyperedge")]
     (cond
       (and (= method "POST") (str/blank? tail))
-      (let [payload (edn/read-string (read-body ex))
+      (let [payload (parse-payload ex)
             _ (penholder! ex payload)
             res (upsert-hyperedge! @!node payload)]
         (respond! ex (if (:ok res) 200 500) (pr-str res)))
@@ -209,7 +248,7 @@
         tail (if (str/starts-with? tail "/") (subs tail 1) tail)]
     (cond
       (and (= method "POST") (str/blank? tail))
-      (let [payload (edn/read-string (read-body ex))
+      (let [payload (parse-payload ex)
             _ (penholder! ex payload)
             [status body] (ev/write-evidence! @!node payload)]
         (respond! ex status (pr-str body)))
@@ -243,7 +282,7 @@
         p (query-params ex)]
     (cond
       (and (= method "POST") (str/blank? tail))
-      (let [payload (edn/read-string (read-body ex))
+      (let [payload (parse-payload ex)
             _ (penholder! ex payload)
             res (graph/write-entity! @!node payload)]
         (respond! ex 200 (pr-str res)))
@@ -272,7 +311,7 @@
 
 (defn- relation-route [^HttpExchange ex]
   (if (= "POST" (.getRequestMethod ex))
-    (let [payload (edn/read-string (read-body ex))
+    (let [payload (parse-payload ex)
           _ (penholder! ex payload)
           res (graph/write-relation! @!node payload)]
       (respond! ex 200 (pr-str res)))
@@ -304,7 +343,7 @@
       (respond! ex 200 (pr-str (graph/list-types @!node)))
 
       (and (= method "POST") (#{"parent" "merge"} tail))
-      (let [payload (edn/read-string (read-body ex))]
+      (let [payload (parse-payload ex)]
         (respond! ex 200 (pr-str (graph/types-mutate! @!node (keyword tail) payload))))
 
       :else
