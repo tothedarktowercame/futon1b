@@ -43,6 +43,7 @@ futon3c-side (consumers of this server):
 | `FUTON3C_EVIDENCE_BACKEND` | (unset) | `futon1b` selects the HTTP/EDN evidence backend (wins over direct-xtdb) |
 | `FUTON1B_URL` | `http://localhost:7074` | where the backend + watcher dual-write find this server |
 | `FUTON1B_PENHOLDER` | falls back to `FUTON1A_PENHOLDER`, then `api` | `x-penholder` the backend sends |
+| `FUTON1B_TIMEOUT_MS` | `120000` | http-kit client timeout for backend reads/appends — a limit=1000 evidence scan takes ~19s on lucy and crossed the old 30s ceiling under ingest load (2026-07-13) |
 | `FUTON1A_PORT` | `7071` | **`0` disables embedded futon1a entirely** (B3 gate) |
 | `FUTON1A_URL` | `http://localhost:7071` | where the stack's substrate HTTP clients point — set to this server for cutover |
 
