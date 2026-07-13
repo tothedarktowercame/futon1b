@@ -286,17 +286,23 @@
 (defn relations-query
   "Typed relation read used by substrate consumers. Filters are conjunctive;
   the response preserves both legacy from/to and src/dst spellings."
-  [node {:keys [type from to limit hydrate?]}]
-  (let [clauses (cond-> []
-                  type (conj (list '= 'relation/type (normalize-type type)))
-                  from (conj (list '= 'relation/from from))
-                  to (conj (list '= 'relation/to to)))
-        query (cond-> (list '-> '(from :relations [xt/id relation/id relation/type
-                                                   relation/from relation/to
-                                                   relation/src relation/dst
-                                                   relation/provenance]))
-                (seq clauses) (concat [(cons 'where clauses)]))
-        docs (fxt/safe-q node query)
+  [node {:keys [type types from to limit hydrate?]}]
+  (let [types (or (seq types) (when type [type]))
+        query-for (fn [relation-type]
+                    (let [clauses (cond-> []
+                                    relation-type
+                                    (conj (list '= 'relation/type
+                                                (normalize-type relation-type)))
+                                    from (conj (list '= 'relation/from from))
+                                    to (conj (list '= 'relation/to to)))]
+                      (cond-> (list '-> '(from :relations [xt/id relation/id relation/type
+                                                           relation/from relation/to
+                                                           relation/src relation/dst
+                                                           relation/provenance]))
+                        (seq clauses) (concat [(cons 'where clauses)]))))
+        docs (if (seq types)
+               (mapcat #(fxt/safe-q node (query-for %)) types)
+               (fxt/safe-q node (query-for nil)))
         docs (sort-by #(str (or (:relation/id %) (:xt/id %))) docs)
         docs (if (and (int? limit) (pos? limit)) (take limit docs) docs)
         result {:relations (mapv #(dissoc % :xt/id) docs)

@@ -331,6 +331,8 @@
     (if (or (p "type") (p "from") (p "to"))
       (respond! ex 200 (pr-str (graph/relations-query
                                 @!node {:type (p "type")
+                                        :types (some-> (p "types")
+                                                       (str/split #","))
                                         :from (p "from")
                                         :to (p "to")
                                         :limit (parse-limit p)
