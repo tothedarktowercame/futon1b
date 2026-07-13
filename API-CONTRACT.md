@@ -408,6 +408,27 @@ or L2 500 `:missing-endpoint`; returns `{:profile :count :relations :tx-id
 
 ---
 
+## 6a. Backend-neutral graph extensions (2026-07-13)
+
+The authoritative Futon1b substrate additionally exposes three semantic
+operations needed by consumers that formerly dereferenced Futon1a's embedded
+XTDB node. These routes expose graph meanings rather than XTDB query forms:
+
+- `GET /api/alpha/entities?type=…&limit=…` returns raw typed entity documents
+  as `{:entities […] :count n}` so legacy top-level domain fields and newer
+  `:entity/props` fields remain interpretable.
+- `GET /api/alpha/relations?type=…|types=a,b&from=…&to=…&limit=…&hydrate=true`
+  returns matching relations. `hydrate=true` adds the referenced entity
+  documents once, avoiding N+1 endpoint lookups. Filters are conjunctive;
+  `types` is the sole disjunction.
+- `POST /api/alpha/graph/inhabited` with `{:bindings [{:kind :entity|:hyperedge
+  :type … :endpoint-types […]} …]}` returns the bindings in order with an
+  authoritative `:inhabited?` boolean. Hyperedge endpoint constraints preserve
+  the former existential Datalog semantics.
+
+Graph writes continue through the existing gated entity, relation, and
+hyperedge routes. There is deliberately no raw transaction or evict endpoint.
+
 ## 7. Census
 
 ### GET /api/alpha/census?type=… | ?entity-type=…

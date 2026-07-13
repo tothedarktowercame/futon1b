@@ -73,6 +73,7 @@ futon3c-side (consumers of this server):
 | `FUTON1A_URL` | `http://localhost:7071` | where the stack's substrate HTTP clients point — set to this server for cutover |
 | `FUTON1B_EMBED` | `0` (`1` on lucy) | run this server's node + HTTP **inside the futon3c JVM** (I-0 unification, 2026-07-14) instead of the `futon1b-server` unit. When `1`, that unit MUST be stopped — see the finding below |
 | `FUTON1B_STORE_DIR` | `~/code/futon1b/switchover-store` | store the embedded node opens. **Per-box**; the default is lucy's. Pin it explicitly on every other box |
+| `FUTON_SUBSTRATE_URL` | falls back to `FUTON1A_URL` | canonical substrate authority used by new graph clients; keep the legacy alias equal during migration |
 
 ## Findings (hard-won; read before touching the stack)
 
