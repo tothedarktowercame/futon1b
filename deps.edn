@@ -1,6 +1,10 @@
 {:paths ["."]
  :deps
- {com.xtdb/xtdb-core {:mvn/version "2.1.0"}
+ {
+        ;; PINNED (2026-07-13): unpinned, each box's CLI picks its default —
+        ;; chicago's old CLI resolved 1.10.1 and xtdb 2.x would not compile.
+        org.clojure/clojure {:mvn/version "1.12.4"}
+        com.xtdb/xtdb-core {:mvn/version "2.1.0"}
   com.xtdb/xtdb-api  {:mvn/version "2.1.0"}
   ;; JSON request/response support (API-CONTRACT §0): the futon3c watchers
   ;; POST application/json with string keys; futon1a keywordizes them
@@ -24,4 +28,12 @@
  {:node {:jvm-opts ["--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
                     "-Dio.netty.tryReflectionSetAccessible=true"
                     "-Djava.net.preferIPv4Stack=true"
-                    "-Xmx1g" "-XX:MaxDirectMemorySize=1g"]}}}
+                    "-Xmx1g" "-XX:MaxDirectMemorySize=1g"]}
+  ;; Serving JVM (futon1b-server.service, full migration-store-21 corpus):
+  ;; 1 GB heap OOM'd twice on 2026-07-12/13 (pool-2 cascade → HTTP-Dispatcher
+  ;; death, socket left listening but dead). The full-corpus store needs the
+  ;; larger cap; dev nodes must stay on :node's 1 GB.
+  :server {:jvm-opts ["--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
+                      "-Dio.netty.tryReflectionSetAccessible=true"
+                      "-Djava.net.preferIPv4Stack=true"
+                      "-Xmx4g" "-XX:MaxDirectMemorySize=1g"]}}}
