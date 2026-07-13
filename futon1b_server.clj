@@ -325,7 +325,8 @@
                                 @!node {:type (p "type") :end (p "end")
                                         :limit (parse-limit p)
                                         :repo (p "repo")
-                                        :source-file (p "source-file")})))
+                                        :source-file (p "source-file")
+                                        :latest? (= "true" (p "latest"))})))
       (respond! ex 400 (pr-str {:error "type or end parameter required"})))))
 
 (defn- census-route [^HttpExchange ex]
