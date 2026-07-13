@@ -282,10 +282,10 @@
     (when (:hx/id doc) (dissoc doc :xt/id))))
 
 (defn hyperedges-query
-  "GET /api/alpha/hyperedges?type=…|end=… (+limit, +repo/source-file with
+  "GET /api/alpha/hyperedges?type=…|end=… (+limit/latest, +repo/source-file with
   type). :count is the true type total when unfiltered even if limit
   truncates; returned-count otherwise (contract §4)."
-  [node {:keys [type end limit repo source-file]}]
+  [node {:keys [type end limit repo source-file latest?]}]
   (cond
     type
     (let [t (normalize-type type)
@@ -295,9 +295,13 @@
                     ;; the 259k-doc edits type (2026-07-11)
                     repo (conj (list '= 'prop/repo repo))
                     source-file (conj (list '= 'prop/source-file source-file)))
-          docs (fxt/safe-q node (list '-> '(from :hyperedges [*])
-                                (cons 'where clauses)))
-          total (if (or repo source-file)
+          query-tail (cond-> [(cons 'where clauses)]
+                       latest? (conj (list 'order-by
+                                           {:val 'prop/timestamp :dir :desc})
+                                     '(limit 1)))
+          docs (fxt/safe-q node (cons '-> (cons '(from :hyperedges [*])
+                                                query-tail)))
+          total (if (or latest? repo source-file)
                   (count docs)
                   (count (fxt/safe-q node (list '-> '(from :hyperedges [xt/id hx/type])
                                                 (list 'where (list '= 'hx/type t))))))
@@ -309,11 +313,13 @@
                      repo (filter #(= repo (str (prop-get % "repo" :prop/repo))))
                      source-file (filter #(= source-file
                                              (str (prop-get % "source-file" :prop/source-file)))))
-          sorted (sort-by #(str (:xt/id %)) filtered)
+          sorted (if latest?
+                   filtered
+                   (sort-by #(str (:xt/id %)) filtered))
           limited (if (and (int? limit) (pos? limit)) (take limit sorted) sorted)
           out (mapv #(dissoc % :xt/id) limited)]
       {:hyperedges out
-       :count (if (or repo source-file) (count out) total)})
+       :count (if (or latest? repo source-file) (count out) total)})
 
     end
     (let [end-id (if (uuid-shaped? end)

@@ -135,6 +135,10 @@
     (req "POST" HX {:hx/type :test/edge :hx/endpoints ["b" "c"]
                     :hx/props {:repo "r2"}} ph)
     (req "POST" HX {:hx/type :other/edge :hx/endpoints ["a" "z"]} ph)
+    (req "POST" HX {:hx/type (keyword "code/v05/commit") :hx/endpoints ["old"]
+                    :hx/props {:repo "r1" :timestamp 10}} ph)
+    (req "POST" HX {:hx/type (keyword "code/v05/commit") :hx/endpoints ["new"]
+                    :hx/props {:repo "r1" :timestamp 20}} ph)
     (let [r (req "GET" (str HX "/hx:test/edge:a.b"))]
       (check! "GET hyperedge by id (colons+slashes in tail)"
               (and (= 200 (:status r)) (= :test/edge (get-in r [:body :hx/type]))
@@ -154,6 +158,11 @@
       (check! "repo props filter -> 1, filtered count"
               (and (= 1 (:count (:body r)))
                    (= "r1" (get-in r [:body :hyperedges 0 :hx/props :repo])))
+              r))
+    (let [r (req "GET" (str HXS "?type=code/v05/commit&repo=r1&latest=true&limit=1"))]
+      (check! "latest orders by denormalized timestamp and returns one"
+              (and (= 1 (:count (:body r)))
+                   (= ["new"] (get-in r [:body :hyperedges 0 :hx/endpoints])))
               r))
     (let [r (req "GET" (str HXS "?end=a"))]
       (check! "?end=a -> 2 across types" (= 2 (:count (:body r))) r))

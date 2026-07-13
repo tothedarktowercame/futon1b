@@ -66,6 +66,8 @@
                            :evidence/claim-type :observation :evidence/author "alice"
                            :evidence/at "2026-07-10T10:00:00Z"
                            :evidence/session-id "s1"
+                           :evidence/subject {:ref/type :thread :ref/id "t1"}
+                           :evidence/pattern-id :agent/pause
                            :evidence/tags [:alpha :beta]
                            :evidence/body {"json-key" 1}} ph)]
       (check! "write -> 201 {:ok true :evidence/id :entry}"
@@ -112,6 +114,12 @@
       (check! "?before exclusive -> e1 + ph-body" (= 2 (:count (:body r))) r))
     (let [r (req "GET" (str E "?tags=alpha,beta"))]
       (check! "?tags AND -> e1 only" (= 1 (:count (:body r))) r))
+    (let [r (req "GET" (str E "?subject-type=thread&subject-id=t1"))]
+      (check! "?subject -> e1 only" (= ["e1"]
+                                        (mapv :evidence/id (get-in r [:body :entries]))) r))
+    (let [r (req "GET" (str E "?pattern-id=agent/pause"))]
+      (check! "?pattern-id -> e1 only" (= ["e1"]
+                                           (mapv :evidence/id (get-in r [:body :entries]))) r))
     (let [r (req "GET" (str E "?include-ephemeral=false"))]
       (check! "include-ephemeral=false excludes e4"
               (not-any? #(= "e4" (:evidence/id %)) (get-in r [:body :entries]))

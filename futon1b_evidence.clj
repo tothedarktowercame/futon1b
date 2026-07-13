@@ -131,9 +131,9 @@
   where-column — a where var absent from the projection is unbound, which
   safe-q maps to an empty result (silent zero; bit the /count tests).
   Fetching [*] across the corpus died at 94k docs (>60s; 2026-07-11)."
-  '[xt/id evidence/at evidence/type evidence/claim-type evidence/author
+  '[xt/id evidence/id evidence/at evidence/type evidence/claim-type evidence/author
     evidence/session-id evidence/fork-of
-    evidence/ephemeral? evidence/tags evidence/subject])
+    evidence/ephemeral? evidence/tags evidence/subject evidence/pattern-id])
 
 (defn- fetch-filtered
   "Evidence docs with type/claim-type/author/session-id AND since/before
@@ -170,7 +170,8 @@
          (or (nil? subject-id) (= (str ref-id) subject-id)))))
 
 (defn- apply-post-filters
-  [docs {:keys [since before tags subject-type subject-id include-ephemeral]}]
+  [docs {:keys [since before tags subject-type subject-id pattern-id
+                include-ephemeral]}]
   (cond->> docs
     ;; include-ephemeral absent (nil) = futon1a behavior: no filtering.
     (false? include-ephemeral)
@@ -179,7 +180,21 @@
     since  (filter #(>= (compare (str (:evidence/at %)) since) 0))
     before (filter #(neg? (compare (str (:evidence/at %)) before)))
     (seq tags) (filter #(tag-match? % tags))
-    (or subject-type subject-id) (filter #(subject-match? % subject-type subject-id))))
+    (or subject-type subject-id) (filter #(subject-match? % subject-type subject-id))
+    pattern-id (filter #(= pattern-id (normalize-type (:evidence/pattern-id %))))))
+
+(defn- post-filtered?
+  [{:keys [tags subject-type subject-id pattern-id]}]
+  (boolean (or (seq tags) subject-type subject-id pattern-id)))
+
+(defn- hydrate-filtered
+  "Hydrate only projected rows that survived the non-XTQL filters. This is
+  the unbounded-query path used by futon3c for exact local membership: scan
+  compact columns, then point-read matching full documents."
+  [node q]
+  (let [matches (-> (fetch-filtered node q filter-cols)
+                    (apply-post-filters q))]
+    (keep #(fetch-by-id node (:evidence/id %)) matches)))
 
 (defn- parse-query-params
   "String HTTP params (contract §3) → typed filter map."
@@ -192,6 +207,7 @@
     (p "fork-of") (assoc :fork-of (p "fork-of"))
     (p "subject-type") (assoc :subject-type (normalize-type (p "subject-type")))
     (p "subject-id") (assoc :subject-id (p "subject-id"))
+    (p "pattern-id") (assoc :pattern-id (normalize-type (p "pattern-id")))
     (p "since") (assoc :since (p "since"))
     (p "before") (assoc :before (p "before"))
     (p "tags") (assoc :tags (remove str/blank? (str/split (p "tags") #",")))
@@ -223,8 +239,10 @@
                 sorted (sort-by #(str (:evidence/at %)) #(compare %2 %1) docs)
                 entries (mapv public-doc (take limit sorted))]
             {:entries entries :count (count entries)})))
-      (let [docs (-> (fetch-filtered node q '[*])
-                     (apply-post-filters q))
+      (let [docs (if (post-filtered? q)
+                   (hydrate-filtered node q)
+                   (-> (fetch-filtered node q '[*])
+                       (apply-post-filters q)))
             sorted (sort-by #(str (:evidence/at %)) #(compare %2 %1) docs)
             entries (mapv public-doc sorted)]
         {:entries entries :count (count entries)}))))
