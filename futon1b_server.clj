@@ -310,12 +310,42 @@
     (respond! ex 200 (pr-str (graph/entities-latest
                               @!node {:type (p "type") :limit (parse-limit p)})))))
 
+(defn- entities-route [^HttpExchange ex]
+  (let [p (query-params ex)]
+    (if (p "type")
+      (respond! ex 200 (pr-str (graph/entities-query
+                                @!node {:type (p "type")
+                                        :limit (parse-limit p)})))
+      (respond! ex 400 (pr-str {:error "entities requires ?type=<entity-type>"})))))
+
 (defn- relation-route [^HttpExchange ex]
   (if (= "POST" (.getRequestMethod ex))
     (let [payload (parse-payload ex)
           _ (penholder! ex payload)
           res (graph/write-relation! @!node payload)]
       (respond! ex 200 (pr-str res)))
+    (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
+
+(defn- relations-route [^HttpExchange ex]
+  (let [p (query-params ex)]
+    (if (or (p "type") (p "from") (p "to"))
+      (respond! ex 200 (pr-str (graph/relations-query
+                                @!node {:type (p "type")
+                                        :from (p "from")
+                                        :to (p "to")
+                                        :limit (parse-limit p)
+                                        :hydrate? (= "true" (p "hydrate"))})))
+      (respond! ex 400
+                (pr-str {:error "relations requires type, from, or to"})))))
+
+(defn- graph-inhabited-route [^HttpExchange ex]
+  (if (= "POST" (.getRequestMethod ex))
+    (let [payload (parse-payload ex)
+          bindings (:bindings payload)]
+      (if (vector? bindings)
+        (respond! ex 200
+                  (pr-str {:bindings (graph/inhabitation @!node bindings)}))
+        (respond! ex 400 (pr-str {:error "vector :bindings required"}))))
     (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
 
 (defn- hyperedges-route [^HttpExchange ex]
@@ -429,8 +459,11 @@
     ;; longer prefix wins (see NB above): text-search must out-rank /evidence
     (.createContext server "/api/alpha/evidence/text-search" (handler text-search-route))
     (.createContext server "/api/alpha/entity" (handler entity-route))
+    (.createContext server "/api/alpha/entities" (handler entities-route))
     (.createContext server "/api/alpha/entities/latest" (handler entities-latest-route))
     (.createContext server "/api/alpha/relation" (handler relation-route))
+    (.createContext server "/api/alpha/relations" (handler relations-route))
+    (.createContext server "/api/alpha/graph/inhabited" (handler graph-inhabited-route))
     (.createContext server "/api/alpha/census" (handler census-route))
     (.createContext server "/api/alpha/types" (handler types-route))
     (.createContext server "/api/alpha/memory/search" (handler memory-search-route))
