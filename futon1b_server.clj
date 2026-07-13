@@ -328,7 +328,7 @@
 
 (defn- relations-route [^HttpExchange ex]
   (let [p (query-params ex)]
-    (if (or (p "type") (p "from") (p "to"))
+    (if (or (p "type") (p "types") (p "from") (p "to"))
       (respond! ex 200 (pr-str (graph/relations-query
                                 @!node {:type (p "type")
                                         :types (some-> (p "types")
