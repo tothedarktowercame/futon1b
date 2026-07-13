@@ -135,6 +135,13 @@
                    (= 1 (get-in r [:body :count]))
                    (= :uses (get-in r [:body :relations 0 :relation/type])))
               r))
+    (let [r (req "GET" (str RELS "?types=uses,unused&hydrate=true"))]
+      (check! "multi-type relation snapshot hydrates endpoint entities once"
+              (and (= 200 (:status r))
+                   (= 1 (get-in r [:body :count]))
+                   (= #{"Widget" "Sprocket"}
+                      (set (map :entity/name (get-in r [:body :entities])))))
+              r))
     (req "POST" ENT {:name "DomainProps" :type "gadget"
                       :props {:color "red"}} ph)
     (let [r (req "GET" (str base "/api/alpha/entities?type=gadget&limit=10"))]
