@@ -216,6 +216,19 @@
      :type (if t (subs (str t) 1) (str type))
      :entities docs}))
 
+(defn entities-query
+  "Backend-neutral typed entity read. Returns raw entity documents so callers
+  can inspect domain fields written before the HTTP cutover as well as the
+  equivalent fields carried in :entity/props by post-cutover writes."
+  [node {:keys [type limit]}]
+  (let [t (normalize-type type)
+        docs (fxt/safe-q node (list '-> '(from :entities [*])
+                                    (list 'where (list '= 'entity/type t))))
+        docs (sort-by #(str (or (:entity/id %) (:xt/id %))) docs)
+        docs (if (and (int? limit) (pos? limit)) (take limit docs) docs)]
+    {:entities (mapv #(dissoc % :xt/id) docs)
+     :count (count docs)}))
+
 ;; ---------------------------------------------------------------------------
 ;; Relations (A3) — §6. Stable rel| ids, both key spellings.
 ;; ---------------------------------------------------------------------------
@@ -269,6 +282,74 @@
        :relation {:id rel-id :type type :relation/type type
                   :src-id src-id :dst-id dst-id :provenance prov}
        :rescue rescue})))
+
+(defn relations-query
+  "Typed relation read used by substrate consumers. Filters are conjunctive;
+  the response preserves both legacy from/to and src/dst spellings."
+  [node {:keys [type from to limit hydrate?]}]
+  (let [clauses (cond-> []
+                  type (conj (list '= 'relation/type (normalize-type type)))
+                  from (conj (list '= 'relation/from from))
+                  to (conj (list '= 'relation/to to)))
+        query (cond-> (list '-> '(from :relations [xt/id relation/id relation/type
+                                                   relation/from relation/to
+                                                   relation/src relation/dst
+                                                   relation/provenance]))
+                (seq clauses) (concat [(cons 'where clauses)]))
+        docs (fxt/safe-q node query)
+        docs (sort-by #(str (or (:relation/id %) (:xt/id %))) docs)
+        docs (if (and (int? limit) (pos? limit)) (take limit docs) docs)
+        result {:relations (mapv #(dissoc % :xt/id) docs)
+                :count (count docs)}]
+    (if-not hydrate?
+      result
+      (let [ids (into #{} (mapcat #(keep % [:relation/from :relation/to])) docs)
+            entities (->> (fxt/safe-q node '(from :entities [*]))
+                          (filter #(contains? ids (or (:entity/id %) (:xt/id %))))
+                          (mapv #(dissoc % :xt/id)))]
+        (assoc result :entities entities)))))
+
+(defn- entity-ids-of-type
+  [node type]
+  (into #{} (map :xt/id)
+        (fxt/safe-q node
+                    (list '-> '(from :entities [xt/id entity/type])
+                          (list 'where (list '= 'entity/type
+                                            (normalize-type type)))))))
+
+(defn- entity-type-inhabited?
+  [node type]
+  (boolean
+   (seq (fxt/safe-q node
+                    (list '-> '(from :entities [xt/id entity/type])
+                          (list 'where (list '= 'entity/type
+                                            (normalize-type type)))
+                          '(limit 1))))))
+
+(defn- hyperedge-type-inhabited?
+  [node type endpoint-types]
+  (let [docs (fxt/safe-q node
+                         (list '-> '(from :hyperedges [xt/id hx/type hx/endpoints])
+                               (list 'where (list '= 'hx/type
+                                                 (normalize-type type)))))
+        required (mapv #(entity-ids-of-type node %) endpoint-types)]
+    (boolean
+     (some (fn [doc]
+             (let [endpoints (set (:hx/endpoints doc))]
+               (every? #(some endpoints %) required)))
+           docs))))
+
+(defn inhabitation
+  "Evaluate semantic graph bindings without exposing an XTDB query language.
+  Results retain input order and contain only authoritative existence claims."
+  [node bindings]
+  (mapv (fn [{:keys [kind type endpoint-types] :as binding}]
+          (assoc binding :inhabited?
+                 (case kind
+                   :entity (entity-type-inhabited? node type)
+                   :hyperedge (hyperedge-type-inhabited? node type endpoint-types)
+                   false)))
+        bindings))
 
 ;; ---------------------------------------------------------------------------
 ;; Hyperedge reads (A4) — §4.

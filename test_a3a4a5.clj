@@ -38,6 +38,7 @@
 (defn run-tests [base]
   (let [ENT (str base "/api/alpha/entity")
         REL (str base "/api/alpha/relation")
+        RELS (str base "/api/alpha/relations")
         HX (str base "/api/alpha/hyperedge")
         HXS (str base "/api/alpha/hyperedges")]
 
@@ -128,6 +129,21 @@
                    (= "relation requires resolvable src/dst and type"
                       (get-in r [:body :error :message])))
               r))
+    (let [r (req "GET" (str RELS "?type=uses"))]
+      (check! "typed relation read returns the stored relation"
+              (and (= 200 (:status r))
+                   (= 1 (get-in r [:body :count]))
+                   (= :uses (get-in r [:body :relations 0 :relation/type])))
+              r))
+    (req "POST" ENT {:name "DomainProps" :type "gadget"
+                      :props {:color "red"}} ph)
+    (let [r (req "GET" (str base "/api/alpha/entities?type=gadget&limit=10"))]
+      (check! "typed raw entity read preserves domain props"
+              (and (= 200 (:status r))
+                   (= 4 (get-in r [:body :count]))
+                   (= "red" (some #(get-in % [:entity/props :color])
+                                   (get-in r [:body :entities]))))
+              r))
 
     (println "— A4 hyperedge reads")
     (req "POST" HX {:hx/type :test/edge :hx/endpoints ["a" "b"]
@@ -135,6 +151,8 @@
     (req "POST" HX {:hx/type :test/edge :hx/endpoints ["b" "c"]
                     :hx/props {:repo "r2"}} ph)
     (req "POST" HX {:hx/type :other/edge :hx/endpoints ["a" "z"]} ph)
+    (req "POST" ENT {:id "a" :name "a" :type "left-kind"} ph)
+    (req "POST" ENT {:id "b" :name "b" :type "right-kind"} ph)
     (req "POST" HX {:hx/type (keyword "code/v05/commit") :hx/endpoints ["old"]
                     :hx/props {:repo "r1" :timestamp 10}} ph)
     (req "POST" HX {:hx/type (keyword "code/v05/commit") :hx/endpoints ["new"]
@@ -168,14 +186,25 @@
       (check! "?end=a -> 2 across types" (= 2 (:count (:body r))) r))
     (let [r (req "GET" HXS)]
       (check! "no params -> 400" (= 400 (:status r)) r))
+    (let [r (req "POST" (str base "/api/alpha/graph/inhabited")
+                 {:bindings [{:id :entity :kind :entity :type :gadget}
+                             {:id :edge :kind :hyperedge :type :test/edge
+                              :endpoint-types [:left-kind :right-kind]}
+                             {:id :absent :kind :entity :type :not-present}]}
+                 nil)
+          rows (get-in r [:body :bindings])]
+      (check! "batch inhabitation proves entity and typed hyperedge bindings"
+              (and (= 200 (:status r))
+                   (= [true true false] (mapv :inhabited? rows)))
+              r))
 
     (println "— A5 census + types")
     (let [r (req "GET" (str base "/api/alpha/census?type=test/edge"))]
       (check! "census hx type" (= {:type "test/edge" :kind :hyperedge :count 2}
                                   (:body r)) r))
     (let [r (req "GET" (str base "/api/alpha/census?entity-type=gadget"))]
-      (check! "census entity type -> 3"
-              (and (= :entity (get-in r [:body :kind])) (= 3 (get-in r [:body :count])))
+      (check! "census entity type -> 4"
+              (and (= :entity (get-in r [:body :kind])) (= 4 (get-in r [:body :count])))
               r))
     (let [r (req "GET" (str base "/api/alpha/census"))]
       (check! "census no params -> 400" (= 400 (:status r)) r))
