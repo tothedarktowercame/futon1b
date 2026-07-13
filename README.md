@@ -237,3 +237,14 @@ L1=409, L0=503. The three evidence required-field errors are plain
 | `test_a1a2.clj`, `test_a3a4a5.clj` | HTTP smoke suites (26/26, 31/31) |
 | `textprobe*.clj` | standalone history extractors for private store copies (M-text-sidecar) |
 | `p1_*/p2*/parity_*/s0-s2*` | the original port-era probes and parity harness (E-futon1b-foothold) |
+
+### Unfiltered GET /api/alpha/evidence can kill the JVM (2026-07-13)
+
+`?limit=1` with NO filters crashed the server twice in a row (systemd restart
+counter 2→3 territory): `limit` does not bound the underlying `[*]` scan, so
+an unfiltered list on the 94k-doc store materializes far too much before the
+limit applies (empty reply, then process death). Filtered forms
+(`since=`/`author=`/`before=` + limit) return promptly and safely, as do
+/count and /text-search (FTS pre-filters). Until the scan is bounded
+server-side, treat the unfiltered list as forbidden; page with time windows.
+Found while wiring the futon1bi soak harness (claude-1).
