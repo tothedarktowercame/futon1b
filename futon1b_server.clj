@@ -449,6 +449,17 @@
                                               (= "true" (str/lower-case (p "include-ephemeral"))))
                                        (parse-limit p) (assoc :limit (parse-limit p)))))))))
 
+(defonce ^:private !server-executors (atom {}))
+
+(defn stop-server!
+  "Stop a server returned by start-server! and release its worker threads."
+  [^HttpServer server]
+  (.stop server 0)
+  (when-let [executor (get @!server-executors server)]
+    (swap! !server-executors dissoc server)
+    (.shutdownNow ^java.util.concurrent.ExecutorService executor))
+  nil)
+
 (defn start-server! [{:keys [store-dir port node]}]
   (gates/seed-mission-contract!)
   (reset! !node (or node (zm/open-store store-dir)))
@@ -466,7 +477,8 @@
         (.start)))
     (catch Throwable t
       (println "[fts] init failed (serving continues):" (.getMessage t))))
-  (let [server (HttpServer/create (InetSocketAddress. (int port)) 0)]
+  (let [server (HttpServer/create (InetSocketAddress. (int port)) 0)
+        executor (java.util.concurrent.Executors/newFixedThreadPool 4)]
     (.createContext server "/health" (handler health))
     ;; NB JDK HttpServer matches contexts by raw string prefix — the longer
     ;; /api/alpha/hyperedges context must be registered so it wins over
@@ -485,7 +497,8 @@
     (.createContext server "/api/alpha/census" (handler census-route))
     (.createContext server "/api/alpha/types" (handler types-route))
     (.createContext server "/api/alpha/memory/search" (handler memory-search-route))
-    (.setExecutor server (java.util.concurrent.Executors/newFixedThreadPool 4))
+    (.setExecutor server executor)
+    (swap! !server-executors assoc server executor)
     (.start server)
     (println (format "futon1b-server up on :%d (store %s)" port store-dir))
     server))

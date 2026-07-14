@@ -250,7 +250,7 @@
           base (str "http://127.0.0.1:" port)]
       (try
         (run-tests base)
-        (finally (.stop server 0)))))
+        (finally (srv/stop-server! server)))))
   (let [results @!results
         fails (remove :ok? results)]
     (println (format "%n%d/%d PASS" (- (count results) (count fails)) (count results)))
