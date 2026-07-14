@@ -8,7 +8,8 @@
 ;; single-process: while this server runs, no dev JVM may open --store-dir.
 ;;
 ;; Endpoints (EDN in, EDN out — no JSON dependency):
-;;   GET  /health                     → {:ok true :tables {...}}
+;;   GET  /health                     → cheap liveness {:ok true}
+;;        /health?deep=true           → explicit full table census
 ;;   POST /api/alpha/hyperedge        → watcher-compatible payload:
 ;;        {:hx/type <kw-or-str> :hx/endpoints [id...] :hx/id <opt>
 ;;         :hx/labels [...] :hx/props {...} :hx/op "retract" <opt>}
@@ -183,14 +184,25 @@
 (defn- handler ^HttpHandler [route-fn]
   (reify HttpHandler
     (handle [_ ex]
-      (binding [*json-response?* (wants-json? ex)]
-        (try
-          (route-fn ex)
-          (catch Exception e
-            ;; Layered gate errors keep futon1a's envelope + status mapping
-            ;; (API-CONTRACT §0); anything else is the generic 500.
-            (let [[status body] (gates/error->response e)]
-              (respond! ex status body))))))))
+      (let [started (System/nanoTime)
+            method (.getRequestMethod ex)
+            uri (str (.getRequestURI ex))]
+        (println (format "[futon1b-request] start method=%s uri=%s" method uri))
+        (flush)
+        (binding [*json-response?* (wants-json? ex)]
+          (try
+            (route-fn ex)
+            (println (format "[futon1b-request] end method=%s uri=%s elapsed-ms=%d outcome=ok"
+                             method uri (quot (- (System/nanoTime) started) 1000000)))
+            (catch Exception e
+              ;; Layered gate errors keep futon1a's envelope + status mapping
+              ;; (API-CONTRACT §0); anything else is the generic 500.
+              (let [[status body] (gates/error->response e)]
+                (println (format "[futon1b-request] end method=%s uri=%s elapsed-ms=%d outcome=error status=%d class=%s"
+                                 method uri (quot (- (System/nanoTime) started) 1000000)
+                                 status (.getName (class e))))
+                (respond! ex status body)))
+            (finally (flush))))))))
 
 (defn- penholder!
   "Resolve (body → x-penholder header → default) and authorize (L3)."
@@ -214,11 +226,15 @@
   [:hyperedges :entities :evidence :relations :type-catalog :docs :misc])
 
 (defn- health [^HttpExchange ex]
-  (let [node @!node
-        counts (into {}
-                     (for [t tables]
-                       [t (count (fxt/safe-q node (list 'from t ['xt/id])))]))]
-    (respond! ex 200 (pr-str {:ok true :tables counts}))))
+  ;; Liveness must never materialize or count the corpus. Operators can request
+  ;; the expensive census explicitly while profiling with ?deep=true.
+  (if (= "true" ((query-params ex) "deep"))
+    (let [node @!node
+          counts (into {}
+                       (for [t tables]
+                         [t (count (fxt/safe-q node (list 'from t ['xt/id])))]))]
+      (respond! ex 200 (pr-str {:ok true :deep true :tables counts})))
+    (respond! ex 200 (pr-str {:ok true :deep false :node-open? (some? @!node)}))))
 
 (defn- hyperedge-route [^HttpExchange ex]
   (let [method (.getRequestMethod ex)
