@@ -153,6 +153,57 @@
                        (cons 'where clauses)))
       (fxt/safe-q node (list 'from :evidence cols)))))
 
+(declare apply-post-filters)
+
+(defn- fetch-newest-page
+  "One newest-first keyset page. Unlike the former limit path, the XTQL limit
+  is inside the query, so neither XTDB's result nor this JVM materializes the
+  matching corpus. The (at,id) key guarantees progress across import-time ties."
+  [node {:keys [type claim-type author session-id fork-of since before]} cursor page-size]
+  (let [[cursor-at cursor-id] cursor
+        clauses (cond-> []
+                  type (conj (list '= 'evidence/type type))
+                  claim-type (conj (list '= 'evidence/claim-type claim-type))
+                  author (conj (list '= 'evidence/author author))
+                  session-id (conj (list '= 'evidence/session-id session-id))
+                  fork-of (conj (list '= 'evidence/fork-of fork-of))
+                  since (conj (list '>= 'evidence/at since))
+                  before (conj (list '< 'evidence/at before))
+                  cursor (conj (list 'or
+                                     (list '< 'evidence/at cursor-at)
+                                     (list 'and
+                                           (list '= 'evidence/at cursor-at)
+                                           (list '< 'xt/id cursor-id)))))
+        tail (cond-> []
+               (seq clauses) (conj (cons 'where clauses))
+               true (conj (list 'order-by
+                                {:val 'evidence/at :dir :desc}
+                                {:val 'xt/id :dir :desc})
+                          (list 'limit page-size)))]
+    (fxt/safe-q node (cons '-> (cons '(from :evidence [*]) tail)))))
+
+(defn- bounded-window
+  "Return at most limit exact matches, newest first, using bounded keyset
+  pages. Post-filters remain authoritative, but a sparse filter only advances
+  to another bounded page rather than retaining the corpus in memory."
+  [node q limit]
+  (let [page-size (long (max 100 (min 1000 limit)))]
+    (loop [cursor nil
+           entries []]
+      (let [page (vec (fetch-newest-page node q cursor page-size))
+            matches (vec (apply-post-filters page q))
+            entries' (into entries matches)]
+        (cond
+          (>= (count entries') limit) (mapv public-doc (take limit entries'))
+          (< (count page) page-size) (mapv public-doc entries')
+          :else (let [last-row (peek page)
+                      next-cursor [(str (:evidence/at last-row))
+                                   (str (:xt/id last-row))]]
+                  (when (= cursor next-cursor)
+                    (throw (ex-info "Evidence keyset scan made no progress"
+                                    {:cursor cursor :limit limit})))
+                  (recur next-cursor entries')))))))
+
 (defn- name-of [x]
   (cond (keyword? x) (name x)
         (symbol? x) (name x)
@@ -218,9 +269,8 @@
 
 (defn query-evidence
   "GET /api/alpha/evidence → {:entries [...] :count n} (newest first).
-  With a limit: phase 1 scans projected columns to find the window, phase 2
-  re-fetches [*] bounded by the window's oldest :at — full docs are only
-  materialized for ~limit rows, not the corpus."
+  With a limit: bounded newest-first keyset pages fill the exact post-filtered
+  window; no page and no in-memory result exceeds the configured page size."
   [node http-params]
   (let [q (parse-query-params http-params)
         limit (:limit q)]
