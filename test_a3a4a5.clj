@@ -179,6 +179,12 @@
       (check! "limit truncates, :count stays true total"
               (and (= 2 (:count (:body r))) (= 1 (count (get-in r [:body :hyperedges]))))
               r))
+    (let [r (req "GET" (str HXS "?type=test/edge&limit=1&include-total=false"))]
+      (check! "caller can skip the exact-total scan"
+              (and (= 1 (:count (:body r)))
+                   (false? (:count-exact? (:body r)))
+                   (= 1 (count (get-in r [:body :hyperedges]))))
+              r))
     (let [r (req "GET" (str HXS "?type=test/edge&repo=r1"))]
       (check! "repo props filter -> 1, filtered count"
               (and (= 1 (:count (:body r)))

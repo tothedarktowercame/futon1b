@@ -374,6 +374,7 @@
                                         :limit (parse-limit p)
                                         :repo (p "repo")
                                         :source-file (p "source-file")
+                                        :include-total? (not= "false" (p "include-total"))
                                         :latest? (= "true" (p "latest"))})))
       (respond! ex 400 (pr-str {:error "type or end parameter required"})))))
 

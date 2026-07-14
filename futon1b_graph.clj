@@ -372,7 +372,8 @@
   "GET /api/alpha/hyperedges?type=…|end=… (+limit/latest, +repo/source-file with
   type). :count is the true type total when unfiltered even if limit
   truncates; returned-count otherwise (contract §4)."
-  [node {:keys [type end limit repo source-file latest?]}]
+  [node {:keys [type end limit repo source-file latest? include-total?]
+         :or {include-total? true}}]
   (cond
     type
     (let [t (normalize-type type)
@@ -391,10 +392,11 @@
                              (list 'limit limit)))
           docs (fxt/safe-q node (cons '-> (cons '(from :hyperedges [*])
                                                 query-tail)))
-          total (if (or latest? repo source-file)
-                  (count docs)
-                  (count (fxt/safe-q node (list '-> '(from :hyperedges [xt/id hx/type])
-                                                (list 'where (list '= 'hx/type t))))))
+          total (when include-total?
+                  (if (or latest? repo source-file)
+                    (count docs)
+                    (count (fxt/safe-q node (list '-> '(from :hyperedges [xt/id hx/type])
+                                                  (list 'where (list '= 'hx/type t)))))))
           prop-get (fn [d k kw-col]
                      (or (get d kw-col)
                          (get-in d [:hx/props (keyword k)])
@@ -413,7 +415,10 @@
                     sorted)
           out (mapv #(dissoc % :xt/id) limited)]
       {:hyperedges out
-       :count (if (or latest? repo source-file) (count out) total)})
+       :count (if (or (not include-total?) latest? repo source-file)
+                (count out)
+                total)
+       :count-exact? (boolean include-total?)})
 
     end
     (let [end-id (if (uuid-shaped? end)
