@@ -47,7 +47,8 @@ Heap is **`-Xmx1536m` + 768m direct** (`deps.edn :server`), right-sized
 pool-2 cascade). If the target box's RAM differs materially from lucy's
 3.8G, change the cap in `deps.edn :server`, not the unit. The two genuine
 per-box knobs in the unit are `--store-dir` (lucy `switchover-store`,
-chicago `migration-store`) and `--port` (lucy `7074`, default `7073`).
+chicago `chicago-store`) and `--port` (lucy `7074`, chicago `7074`,
+default elsewhere `7073`) — edit these in the copied unit before `enable`.
 
 Tests: `clojure -M:node -m test-a1a2` (HTTP smoke suite against an
 in-memory node; 26/26 as of `d171150`). Gates for any Clojure change:

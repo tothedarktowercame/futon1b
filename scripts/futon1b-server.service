@@ -13,9 +13,10 @@
 # -Xmx1536m + the Arrow (--add-opens) and pgwire (preferIPv4Stack) opts.
 #
 # PER-BOX KNOBS (the only two things that legitimately differ per box):
-#   --store-dir : lucy=switchover-store, chicago=migration-store (each box
+#   --store-dir : lucy=switchover-store, chicago=chicago-store (each box
 #                 builds its own store; stores are gitignored).
-#   --port      : lucy=7074 (nginx owns :7073 there), default elsewhere=7073.
+#   --port      : lucy=7074 (nginx owns :7073 there), chicago=7074,
+#                 default elsewhere=7073.
 # If the target box has materially different RAM than lucy's 3.8G, adjust the
 # heap in deps.edn :server rather than adding a -J override here.
 
