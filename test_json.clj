@@ -80,6 +80,6 @@
     (let [server (srv/start-server! {:node node :port 0})
           port (.getPort (.getAddress server))]
       (try (run-tests (str "http://127.0.0.1:" port))
-           (finally (.stop server 0)))))
+           (finally (srv/stop-server! server)))))
   (println (format "%nfails: %d" @!fails))
   (System/exit (min 1 @!fails)))
