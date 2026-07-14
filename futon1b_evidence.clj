@@ -232,12 +232,19 @@
                         (take limit))]
         (if (empty? window)
           {:entries [] :count 0}
-          (let [cutoff (str (:evidence/at (last window)))
-                q2 (update q :since (fn [s] (if (and s (pos? (compare s cutoff))) s cutoff)))
-                docs (-> (fetch-filtered node q2 '[*])
-                         (apply-post-filters q2))
-                sorted (sort-by #(str (:evidence/at %)) #(compare %2 %1) docs)
-                entries (mapv public-doc (take limit sorted))]
+          ;; Hydrate the window by id (point reads on xt/id), NOT via a
+          ;; :since-bounded re-fetch. The old phase 2 injected a range
+          ;; predicate (>= evidence/at cutoff), which XTDB2's planner runs as
+          ;; a full temporal scan of the corpus (~17s @ 95k docs) even when
+          ;; phase 1 was already narrowed by a cheap equality like session-id
+          ;; (0.8s) — so `limit` paradoxically made narrow queries ~10x slower
+          ;; (session recall: 2.8s unbounded -> 8s at limit=1, 2026-07-14).
+          ;; window is already sorted-desc, limited, and fully post-filtered
+          ;; (filter-cols carry ephemeral?/tags/subject/pattern-id), so point-
+          ;; reading its ids yields the identical result at O(limit) reads.
+          (let [entries (into [] (comp (keep #(fetch-by-id node (:evidence/id %)))
+                                       (map public-doc))
+                              window)]
             {:entries entries :count (count entries)})))
       (let [docs (if (post-filtered? q)
                    (hydrate-filtered node q)
