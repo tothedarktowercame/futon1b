@@ -368,7 +368,7 @@
                                 (list 'where (list '= 'xt/id id))))]
     (when (:hx/id doc) (dissoc doc :xt/id))))
 
-(defn hyperedges-query
+(defn- hyperedges-query-uncached
   "GET /api/alpha/hyperedges?type=…|end=… (+limit/latest, +repo/source-file with
   type). :count is the true type total when unfiltered even if limit
   truncates; returned-count otherwise (contract §4)."
@@ -431,6 +431,31 @@
           limited (if (and (int? limit) (pos? limit)) (take limit sorted) sorted)
           out (mapv #(dissoc % :xt/id) limited)]
       {:hyperedges out :count (count out)})))
+
+(defonce ^:private !hyperedge-query-cache (atom {}))
+
+(defn invalidate-hyperedge-query-cache!
+  "Invalidate materialized bounded query windows after a hyperedge mutation."
+  []
+  (reset! !hyperedge-query-cache {})
+  nil)
+
+(defn hyperedges-query
+  "Read hyperedges, materializing bounded type windows that explicitly waive an
+  exact total. The cache is invalidated synchronously by every server mutation."
+  [node opts]
+  (let [{:keys [type limit include-total?]} opts
+        cacheable? (and type (int? limit) (pos? limit) (false? include-total?))
+        cache-key [node opts]]
+    (if-not cacheable?
+      (hyperedges-query-uncached node opts)
+      (if-let [cached (get @!hyperedge-query-cache cache-key)]
+        cached
+        (let [result (hyperedges-query-uncached node opts)]
+          (when (>= (count @!hyperedge-query-cache) 32)
+            (reset! !hyperedge-query-cache {}))
+          (swap! !hyperedge-query-cache assoc cache-key result)
+          result)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Census (A5) — §7. Bound-type count, no doc materialization.
