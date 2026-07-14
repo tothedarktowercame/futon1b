@@ -385,7 +385,10 @@
           query-tail (cond-> [(cons 'where clauses)]
                        latest? (conj (list 'order-by
                                            {:val 'prop/timestamp :dir :desc})
-                                     '(limit 1)))
+                                     '(limit 1))
+                       (and (not latest?) (int? limit) (pos? limit))
+                       (conj (list 'order-by {:val 'xt/id :dir :asc})
+                             (list 'limit limit)))
           docs (fxt/safe-q node (cons '-> (cons '(from :hyperedges [*])
                                                 query-tail)))
           total (if (or latest? repo source-file)
@@ -400,10 +403,14 @@
                      repo (filter #(= repo (str (prop-get % "repo" :prop/repo))))
                      source-file (filter #(= source-file
                                              (str (prop-get % "source-file" :prop/source-file)))))
-          sorted (if latest?
+          ;; Limited non-latest queries are ordered and bounded inside XTDB;
+          ;; never hydrate the whole typed collection and truncate in Clojure.
+          sorted (if (or latest? (and (int? limit) (pos? limit)))
                    filtered
                    (sort-by #(str (:xt/id %)) filtered))
-          limited (if (and (int? limit) (pos? limit)) (take limit sorted) sorted)
+          limited (if (and (not latest?) (int? limit) (pos? limit))
+                    (take limit sorted)
+                    sorted)
           out (mapv #(dissoc % :xt/id) limited)]
       {:hyperedges out
        :count (if (or latest? repo source-file) (count out) total)})
