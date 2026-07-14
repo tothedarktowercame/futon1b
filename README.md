@@ -25,6 +25,30 @@ may open the same `--store-dir`. Stores (`migration-store*/`,
 `migration-export/`) are gitignored — each box builds its own from its own
 futon1a.
 
+## Deploy (systemd --user)
+
+The persistent service runs from the tracked unit
+`scripts/futon1b-server.service`, which uses **`-M:server`** — so the heap
+sizing lives in `deps.edn :server` (version-controlled) and reproduces on
+every box without a per-box `-J-Xmx` override. To install / reproduce
+(e.g. on linode-chicago):
+
+```
+mkdir -p ~/.config/systemd/user
+cp scripts/futon1b-server.service ~/.config/systemd/user/
+rm -rf ~/.config/systemd/user/futon1b-server.service.d   # drop stale -J override
+systemctl --user daemon-reload
+systemctl --user enable --now futon1b-server
+```
+
+Heap is **`-Xmx1536m` + 768m direct** (`deps.edn :server`), right-sized
+2026-07-14 from lucy's `gc.log`: the full-corpus live set after GC is only
+~800–850M, so 1536m gives ~44% headroom on a 3.8G box while `1g` OOM'd (the
+pool-2 cascade). If the target box's RAM differs materially from lucy's
+3.8G, change the cap in `deps.edn :server`, not the unit. The two genuine
+per-box knobs in the unit are `--store-dir` (lucy `switchover-store`,
+chicago `migration-store`) and `--port` (lucy `7074`, default `7073`).
+
 Tests: `clojure -M:node -m test-a1a2` (HTTP smoke suite against an
 in-memory node; 26/26 as of `d171150`). Gates for any Clojure change:
 `clj-kondo` (0 errors) and `futon4/dev/check-parens.el`.
