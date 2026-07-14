@@ -101,6 +101,7 @@
         id (:xt/id doc)]
     (if retract?
       (do (xt/execute-tx node [[:delete-docs :hyperedges id]])
+          (graph/invalidate-hyperedge-query-cache!)
           {:ok true :hx/id id :retracted? true})
       ;; No-op guard: compare against stored (project the doc's own keys —
       ;; [*] binds nothing in XTDB 2.0.0).
@@ -118,7 +119,8 @@
           {:ok true :hx/id id :no-op? true}
           (let [res (ingest/put-doc-with-rescue! node :hyperedges doc nil)]
             (if (present? node id)
-              {:ok true :hx/id id :rescue (when (keyword? res) res)}
+              (do (graph/invalidate-hyperedge-query-cache!)
+                  {:ok true :hx/id id :rescue (when (keyword? res) res)})
               {:ok false :hx/id id
                :error "verified put: doc absent after rescue ladder"})))))))
 
