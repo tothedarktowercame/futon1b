@@ -1,0 +1,36 @@
+# futon1b XTDB2 store server — systemd --user unit (tracked template).
+#
+# Install on a box:
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/futon1b-server.service ~/.config/systemd/user/
+#   # remove any stale drop-in from the pre-2026-07-14 -J-Xmx override era:
+#   rm -rf ~/.config/systemd/user/futon1b-server.service.d
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now futon1b-server
+#
+# Heap/direct-memory sizing is NOT here — it lives in deps.edn :server, so it
+# is version-controlled and reproduces across boxes. -M:server carries
+# -Xmx1536m + the Arrow (--add-opens) and pgwire (preferIPv4Stack) opts.
+#
+# PER-BOX KNOBS (the only two things that legitimately differ per box):
+#   --store-dir : lucy=switchover-store, chicago=migration-store (each box
+#                 builds its own store; stores are gitignored).
+#   --port      : lucy=7074 (nginx owns :7073 there), default elsewhere=7073.
+# If the target box has materially different RAM than lucy's 3.8G, adjust the
+# heap in deps.edn :server rather than adding a -J override here.
+
+[Unit]
+Description=futon1b XTDB2 store server (E-futon1b-operational-switchover)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/joe/code/futon1b
+ExecStart=/usr/local/bin/clojure -J-XX:+ExitOnOutOfMemoryError -J-Xlog:gc:file=/home/joe/code/futon1b/gc.log:time,uptime:filecount=2,filesize=10m -M:server -m futon1b-server --store-dir switchover-store --port 7074
+Restart=on-failure
+SuccessExitStatus=143
+RestartSec=10
+# XTDB 2 stores are single-process; never run two instances on one store-dir.
+
+[Install]
+WantedBy=default.target

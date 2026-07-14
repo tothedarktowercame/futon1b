@@ -6,3 +6,5 @@ migration-store*/
 textprobe/history-versions-full.edn
 switchover-store/
 switchover-server.log
+gc.log*
+migration-export-lucy/

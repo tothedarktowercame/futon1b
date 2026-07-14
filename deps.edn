@@ -29,11 +29,20 @@
                     "-Dio.netty.tryReflectionSetAccessible=true"
                     "-Djava.net.preferIPv4Stack=true"
                     "-Xmx1g" "-XX:MaxDirectMemorySize=1g"]}
-  ;; Serving JVM (futon1b-server.service, full migration-store-21 corpus):
-  ;; 1 GB heap OOM'd twice on 2026-07-12/13 (pool-2 cascade → HTTP-Dispatcher
-  ;; death, socket left listening but dead). The full-corpus store needs the
-  ;; larger cap; dev nodes must stay on :node's 1 GB.
+  ;; Serving JVM (futon1b-server.service, full switchover-store corpus).
+  ;; This alias is the authoritative heap sizing for the persistent service —
+  ;; scripts/futon1b-server.service runs -M:server, so the cap travels with
+  ;; the repo and reproduces on every box (chicago, lucy) without a per-box
+  ;; systemd -J override.
+  ;;
+  ;; Right-sized 2026-07-14 (was -Xmx4g, never actually run — the unit used
+  ;; -M:node + a stale -J-Xmx2048m override): gc.log on lucy's full corpus
+  ;; shows the live set after every G1 collection is only ~800-850M. 1536m
+  ;; gives ~44% headroom on the 3.8G box; 1g was too tight (~150M over live
+  ;; -> GC death-spiral + swap = the pool-2 OOM cascade of 2026-07-12/13).
+  ;; Direct memory (Arrow off-heap) 768m. Adjust both if the target box has
+  ;; materially different RAM than lucy's 3.8G.
   :server {:jvm-opts ["--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
                       "-Dio.netty.tryReflectionSetAccessible=true"
                       "-Djava.net.preferIPv4Stack=true"
-                      "-Xmx4g" "-XX:MaxDirectMemorySize=1g"]}}}
+                      "-Xmx1536m" "-XX:MaxDirectMemorySize=768m"]}}}
