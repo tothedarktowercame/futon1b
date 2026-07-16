@@ -71,6 +71,8 @@ futon3c-side (consumers of this server):
 | `FUTON1B_TIMEOUT_MS` | `120000` | http-kit client timeout for backend reads/appends — a limit=1000 evidence scan takes ~19s on lucy and crossed the old 30s ceiling under ingest load (2026-07-13) |
 | `FUTON1A_PORT` | `7071` | **`0` disables embedded futon1a entirely** (B3 gate) |
 | `FUTON1A_URL` | `http://localhost:7071` | where the stack's substrate HTTP clients point — set to this server for cutover |
+| `FUTON1B_EMBED` | `0` (`1` on lucy) | run this server's node + HTTP **inside the futon3c JVM** (I-0 unification, 2026-07-14) instead of the `futon1b-server` unit. When `1`, that unit MUST be stopped — see the finding below |
+| `FUTON1B_STORE_DIR` | `~/code/futon1b/switchover-store` | store the embedded node opens. **Per-box**; the default is lucy's. Pin it explicitly on every other box |
 
 ## Findings (hard-won; read before touching the stack)
 
@@ -273,3 +275,48 @@ limit applies (empty reply, then process death). Filtered forms
 /count and /text-search (FTS pre-filters). Until the scan is bounded
 server-side, treat the unfiltered list as forbidden; page with time windows.
 Found while wiring the futon1bi soak harness (claude-1).
+
+### Under `FUTON1B_EMBED`, the systemd unit is the FAULT, not the fix (2026-07-16)
+
+Since the I-0 unification each box is in ONE of two states, and the launcher's
+health check has to know which. Get it backwards and the advice is actively
+self-defeating:
+
+| `FUTON1B_EMBED` | `futon1b-server` unit | who serves :7074 |
+|---|---|---|
+| `1` (lucy) | **must be STOPPED** | the futon3c JVM, in-process |
+| `0` (chicago, laptop) | **must be RUNNING** | the unit |
+
+XTDB 2 stores are single-process, so under `EMBED=1` a running unit both holds
+the store lock and owns :7074 — the embedding JVM then dies on a bare
+`Address already in use` from `HttpServer/create` (`futon1b_server.clj:421`).
+That bind happens AFTER `zm/open-store`, so the failure costs a full store open
+first and names neither the port nor the holder. `dev-linode-env`'s check was
+written pre-unification and stayed unconditional: it alarmed on the CORRECT
+state (unit stopped) and told the operator to START the unit — which causes the
+very collision it warned about. Fixed in futon3c: the check is now embed-gated
+on both linode launchers, and `start-futon1b-embedded!` preflights the port
+before the store open, naming the holder via `ss`.
+
+**Two traps for whoever unifies the next box:**
+
+1. **The store default is lucy's.** `FUTON1B_STORE_DIR` defaults to
+   `switchover-store`. Flip `FUTON1B_EMBED=1` elsewhere without pinning it and
+   XTDB 2 does not fail loudly — it CREATES an empty `switchover-store` on that
+   box and serves a blank evidence store that looks fine. Strictly nastier than
+   the bind error. `dev-linode2-env` now pins `chicago-store`.
+2. **The launchers run `set -euo pipefail`.** A guard reading `${FUTON1B_EMBED}`
+   aborts the whole script if the var is merely unset, so export it (defaulted)
+   before any check reads it.
+
+**Laptop side is still open** (`futon3c/scripts/dev-laptop-env`). Its check is
+unconditional but currently CORRECT, because the laptop is unified-exempt: the
+unit serves :7073 (not :7074) against `migration-store-21`. Before embedding
+there, a laptop agent must (a) gate the check on `FUTON1B_EMBED` the way
+`dev-linode-env` does, (b) pin `FUTON1B_STORE_DIR` to `migration-store-21`, and
+(c) set `FUTON1B_PORT=7073` — `dev-laptop-env` points `FUTON1B_URL` at 7073 but
+never sets `FUTON1B_PORT`, which `bootstrap.clj` defaults to 7074, so the embed
+would bind 7074 while the stack talks to 7073. The futon3c regression test
+(`futon3c.dev.bootstrap-test/futon1b-health-check-is-embed-aware`) deliberately
+covers only the two linode launchers; add the laptop to that list as part of
+the same change.
