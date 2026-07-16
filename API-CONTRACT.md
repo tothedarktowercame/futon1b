@@ -406,6 +406,17 @@ single tx via `run-open-world!`; endpoints must already exist in the store
 or L2 500 `:missing-endpoint`; returns `{:profile :count :relations :tx-id
 :path/id}`.)
 
+**Futon1b port (2026-07-16, `futon1b-graph/write-relations-batch!`):** the
+batch variant is now served on :7073. Deviations, mirroring the single
+route's: success envelope carries `:rescue` (map of rescued ids → stage)
+instead of `:tx-id`/`:path/id`; the whole batch validates and resolves
+endpoints before the first write, commits in one `execute-tx`, and every
+doc is verified by read-back (XTDB 2 batch puts can drop rows silently) —
+absent docs escalate through the per-doc rescue ladder, L0 503 if
+unrescuable. §6 batch endpoint-existence is enforced for resolved ids
+(stricter than the single route's uuid pass-through). Empty or non-map
+`:relations` → L4 400 `:invalid-relations-batch`.
+
 ---
 
 ## 6a. Backend-neutral graph extensions (2026-07-13)
