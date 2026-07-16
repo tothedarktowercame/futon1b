@@ -16,7 +16,8 @@
             [futon1b-gates :as gates]
             [migration.transform :as xf]
             [migration.ingest :as ingest]
-            [futon1b-xt :as fxt]))
+            [futon1b-xt :as fxt]
+            [xtdb.api :as xt]))
 
 ;; ---------------------------------------------------------------------------
 ;; Shared write plumbing: transform + rescue ladder + verified read-back.
@@ -282,6 +283,78 @@
        :relation {:id rel-id :type type :relation/type type
                   :src-id src-id :dst-id dst-id :provenance prov}
        :rescue rescue})))
+
+(defn write-relations-batch!
+  "POST /api/alpha/relations/batch (contract §6 batch variant).
+  {:relations [<per-item shape of write-relation!> ...]}. All validation and
+  endpoint resolution run before the first write, and §6 batch semantics
+  require every resolved endpoint to already exist in :entities (L2
+  :missing-endpoint) — stricter than the single route's uuid pass-through.
+  The whole batch commits in one execute-tx; XTDB 2 batch puts can drop rows
+  silently (E-futon1a-to-futon1b 2026-07-10), so every doc is read back and
+  an absent one escalates through the per-doc rescue ladder, throwing the
+  L0 error if still absent. Envelope carries :rescue instead of
+  :tx-id/:path/id, per this port's deviations."
+  [node payload]
+  (when-not (contains? payload :relations)
+    (throw (gates/layered-error 4 :missing-required {:required [:relations]})))
+  (let [rels (:relations payload)]
+    (when-not (and (sequential? rels) (seq rels) (every? map? rels))
+      (throw (gates/layered-error 4 :invalid-relations-batch
+                                  {:expected :non-empty-seq-of-maps
+                                   :got (if (sequential? rels)
+                                          (mapv (comp str type) rels)
+                                          (str (type rels)))})))
+    (let [built
+          (mapv
+           (fn [r]
+             (when (or (nil? (:type r)) (nil? (:src r)) (nil? (:dst r)))
+               (throw (gates/layered-error 4 :missing-required
+                                           {:required [:type :src :dst]
+                                            :got (select-keys r [:type :src :dst])})))
+             (let [type (normalize-type (:type r))
+                   prov (or (:provenance r)
+                            (when (map? (:props r))
+                              {:note (:label (:props r)) :props (:props r)}))
+                   src-id (resolve-rel-endpoint node (:src r))
+                   dst-id (resolve-rel-endpoint node (:dst r))
+                   rel-id (or (:id r) (stable-relation-id src-id type dst-id prov))]
+               {:doc (cond-> {:xt/id rel-id :relation/id rel-id :relation/type type
+                              :relation/src src-id :relation/dst dst-id
+                              :relation/from src-id :relation/to dst-id}
+                       prov (assoc :relation/provenance prov))
+                :public {:id rel-id :type type :relation/type type
+                         :src-id src-id :dst-id dst-id :provenance prov}}))
+           rels)
+          missing (->> built
+                       (mapcat (fn [{:keys [doc]}]
+                                 [(:relation/from doc) (:relation/to doc)]))
+                       distinct
+                       (remove #(fxt/present? node :entities %))
+                       vec)]
+      (when (seq missing)
+        (throw (gates/layered-error 2 :missing-endpoint {:missing missing})))
+      (let [docs (mapv (comp xf/transform-doc :doc) built)]
+        (try (xt/execute-tx node (mapv (fn [d] [:put-docs :relations d]) docs))
+             (catch Exception _ nil))
+        (let [rescue
+              (into {}
+                    (keep (fn [d]
+                            (when-not (fxt/present? node :relations (:xt/id d))
+                              (let [res (ingest/put-doc-with-rescue!
+                                         node :relations d !shape-log)]
+                                (if (fxt/present? node :relations (:xt/id d))
+                                  [(:xt/id d) (if (keyword? res) res :ok)]
+                                  (throw (gates/layered-error
+                                          0 :postcommit-missing-entities
+                                          {:xt/id (:xt/id d) :table :relations})))))))
+                    docs)]
+          (register-types! node (mapv (fn [t] {:kind :relation :type-id t})
+                                      (distinct (map (comp :relation/type :doc) built))))
+          (cond-> {:profile "default"
+                   :count (count built)
+                   :relations (mapv :public built)}
+            (seq rescue) (assoc :rescue rescue)))))))
 
 (defn relations-query
   "Typed relation read used by substrate consumers. Filters are conjunctive;

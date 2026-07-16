@@ -152,6 +152,67 @@
                                    (get-in r [:body :entities]))))
               r))
 
+    (println "— A3 relations/batch (contract §6 batch variant)")
+    (let [r (req "POST" (str RELS "/batch")
+                 {:relations [{:type "batch/wires" :src "Widget" :dst "Gizmo"
+                               :provenance {:note "w1"}}
+                              {:type "batch/wires" :src "Gizmo" :dst "Sprocket"
+                               :props {:label "w2"}}]}
+                 ph)
+          rels (get-in r [:body :relations])]
+      (check! "batch write -> 200, :count 2, stable rel| ids"
+              (and (= 200 (:status r))
+                   (= 2 (get-in r [:body :count]))
+                   (every? #(cstr/starts-with? (:id %) "rel|") rels)
+                   (every? #(= :batch/wires (:relation/type %)) rels))
+              r))
+    (let [r (req "GET" (str RELS "?type=batch/wires"))]
+      (check! "both batch relations stored and readable"
+              (and (= 200 (:status r)) (= 2 (get-in r [:body :count])))
+              r))
+    (let [r (req "POST" (str RELS "/batch")
+                 {:relations [{:type "batch/wires" :src "Widget" :dst "Gizmo"}]}
+                 nil)]
+      (check! "batch without penholder -> 403" (= 403 (:status r)) r))
+    (let [r (req "POST" (str RELS "/batch") {} ph)]
+      (check! "batch missing :relations -> 400 :missing-required"
+              (and (= 400 (:status r))
+                   (= :missing-required (get-in r [:body :error :reason])))
+              r))
+    (let [r (req "POST" (str RELS "/batch") {:relations []} ph)]
+      (check! "batch empty :relations -> 400 :invalid-relations-batch"
+              (and (= 400 (:status r))
+                   (= :invalid-relations-batch (get-in r [:body :error :reason])))
+              r))
+    (let [r (req "POST" (str RELS "/batch")
+                 {:relations [{:type "batch/partial" :src "Widget" :dst "Gizmo"}
+                              {:type "batch/partial" :src "Widget"}]}
+                 ph)
+          stored (req "GET" (str RELS "?type=batch/partial"))]
+      (check! "item missing dst -> 400, and NOTHING from the batch is written"
+              (and (= 400 (:status r))
+                   (= :missing-required (get-in r [:body :error :reason]))
+                   (= 0 (get-in stored [:body :count])))
+              [r stored]))
+    (let [r (req "POST" (str RELS "/batch")
+                 {:relations [{:type "batch/dangling" :src "Widget"
+                               :dst "0b16c1b1-0000-4000-8000-000000000000"}]}
+                 ph)
+          stored (req "GET" (str RELS "?type=batch/dangling"))]
+      (check! "absent uuid endpoint -> 500 L2 :missing-endpoint, nothing written"
+              (and (= 500 (:status r))
+                   (= :missing-endpoint (get-in r [:body :error :reason]))
+                   (= 0 (get-in stored [:body :count])))
+              [r stored]))
+    (let [r1 (req "POST" (str RELS "/batch")
+                  {:relations [{:type "batch/wires" :src "Widget" :dst "Gizmo"
+                                :provenance {:note "w1"}}]}
+                  ph)
+          r2 (req "GET" (str RELS "?type=batch/wires"))]
+      (check! "re-posting a batch item is idempotent (stable id, count holds)"
+              (and (= 200 (:status r1)) (= 2 (get-in r2 [:body :count])))
+              [r1 r2]))
+
     (println "— A4 hyperedge reads")
     (req "POST" HX {:hx/type :test/edge :hx/endpoints ["a" "b"]
                     :hx/props {:repo "r1" :source-file "f.clj"}} ph)

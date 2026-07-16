@@ -344,6 +344,14 @@
       (respond! ex 200 (pr-str res)))
     (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
 
+(defn- relations-batch-route [^HttpExchange ex]
+  (if (= "POST" (.getRequestMethod ex))
+    (let [payload (parse-payload ex)
+          _ (penholder! ex payload)
+          res (graph/write-relations-batch! @!node payload)]
+      (respond! ex 200 (pr-str res)))
+    (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
+
 (defn- relations-route [^HttpExchange ex]
   (let [p (query-params ex)]
     (if (or (p "type") (p "types") (p "from") (p "to"))
@@ -496,6 +504,8 @@
     (.createContext server "/api/alpha/entities/latest" (handler entities-latest-route))
     (.createContext server "/api/alpha/relation" (handler relation-route))
     (.createContext server "/api/alpha/relations" (handler relations-route))
+    ;; longer prefix wins (see NB above): batch must out-rank /relations
+    (.createContext server "/api/alpha/relations/batch" (handler relations-batch-route))
     (.createContext server "/api/alpha/graph/inhabited" (handler graph-inhabited-route))
     (.createContext server "/api/alpha/census" (handler census-route))
     (.createContext server "/api/alpha/types" (handler types-route))
