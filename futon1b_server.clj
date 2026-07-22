@@ -18,6 +18,8 @@
 ;;        and a VERIFIED put — XTDB 2.0.0 batch puts can drop rows silently
 ;;        (E-futon1a-to-futon1b 2026-07-10), so every put is point-read
 ;;        back and escalated through the rescue ladder if absent.
+;;   POST /api/alpha/documents/retract → atomic, gated entity/hyperedge
+;;        retraction with validation before write and read-back verification.
 ;;   GET  /api/alpha/memory/search    → §12.3 envelope via zai-memory-1b;
 ;;        params: type author since tags (comma-sep) limit.
 ;;   POST /api/alpha/evidence + GET /{id} /{id}/chain /count /sessions and
@@ -321,6 +323,13 @@
         (respond! ex 404 (pr-str {:error "Entity not found"
                                   :profile "default" :entity-id tail}))))))
 
+(defn- documents-retract-route [^HttpExchange ex]
+  (if (= "POST" (.getRequestMethod ex))
+    (let [payload (parse-payload ex)
+          _ (penholder! ex payload)]
+      (respond! ex 200 (pr-str (graph/retract-documents! @!node payload))))
+    (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
+
 (defn- entities-latest-route [^HttpExchange ex]
   (let [p (query-params ex)]
     (when-not (p "type")
@@ -502,6 +511,7 @@
     (.createContext server "/api/alpha/entity" (handler entity-route))
     (.createContext server "/api/alpha/entities" (handler entities-route))
     (.createContext server "/api/alpha/entities/latest" (handler entities-latest-route))
+    (.createContext server "/api/alpha/documents/retract" (handler documents-retract-route))
     (.createContext server "/api/alpha/relation" (handler relation-route))
     (.createContext server "/api/alpha/relations" (handler relations-route))
     ;; longer prefix wins (see NB above): batch must out-rank /relations

@@ -272,6 +272,39 @@
                    (= [true true false] (mapv :inhabited? rows)))
               r))
 
+    (println "— maintenance document retraction")
+    (let [_ (req "POST" ENT {:id "retract-me" :name "RetractMe" :type "gadget"} ph)
+          _ (req "POST" HX {:hx/id "hx:retract-me" :hx/type "test/retract"
+                             :hx/endpoints ["retract-me" "Widget"]} ph)
+          no-ph (req "POST" (str base "/api/alpha/documents/retract")
+                     {:documents [{:table :hyperedges :id "hx:retract-me"}]} nil)
+          retract (req "POST" (str base "/api/alpha/documents/retract")
+                       {:documents [{:table :hyperedges :id "hx:retract-me"}
+                                    {:table :entities :id "retract-me"}]} ph)]
+      (check! "document retract requires penholder"
+              (= 403 (:status no-ph)) no-ph)
+      (check! "document retract atomically accepts entity + hyperedge"
+              (and (= 200 (:status retract)) (= 2 (get-in retract [:body :count])))
+              retract)
+      (check! "document retract read-back is absent"
+              (and (= 404 (:status (req "GET" (str HX "/hx%3Aretract-me"))))
+                   (= 404 (:status (req "GET" (str ENT "/retract-me")))))
+              retract))
+    (let [_ (req "POST" ENT {:id "retain-me" :name "RetainMe" :type "gadget"} ph)
+          rejected (req "POST" (str base "/api/alpha/documents/retract")
+                        {:documents [{:table :entities :id "retain-me"}
+                                     {:table :evidence :id "not-allowed"}]} ph)]
+      (check! "invalid batch rejects before deleting its valid prefix"
+              (and (= 400 (:status rejected))
+                   (= 200 (:status (req "GET" (str ENT "/retain-me")))))
+              rejected)
+      (req "POST" (str base "/api/alpha/documents/retract")
+           {:documents [{:table :entities :id "retain-me"}]} ph))
+    (let [r (req "POST" (str base "/api/alpha/documents/retract")
+                 {:documents [{:table :entities :id "already-absent"}]} ph)]
+      (check! "document retract is idempotent for an absent id"
+              (and (= 200 (:status r)) (= 1 (get-in r [:body :count]))) r))
+
     (println "— A5 census + types")
     (let [r (req "GET" (str base "/api/alpha/census?type=test/edge"))]
       (check! "census hx type" (= {:type "test/edge" :kind :hyperedge :count 2}
