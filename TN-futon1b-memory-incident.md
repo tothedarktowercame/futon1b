@@ -256,3 +256,49 @@ The Z3a zaif cohort (M-zaif-harness, futon2) is entering its pilot phase; the
 study's judgment channel (operator marks) and its instrumentation (dual
 decisions, transcripts) all ride this store. Store brown-outs during the
 cohort window are silent data loss for a preregistered experiment.
+
+## Second episode same day — dispatcher death by IOException storm (14:36 BST)
+
+Distinct from the 13:2x brown-out; occurred ~25 min AFTER the hardening pass
+deployed, and was caused by an interaction of two of its new pieces. Chain,
+each link verified live:
+
+1. Two Emacs outbox records (chat turns, 14:25/14:33) could not deliver:
+   their POSTs to the futon3c compat route HANG indefinitely (a manual POST
+   with a 60s budget never returned) — the route's new retry/backoff loops
+   never conclude. Each record carries its ORIGINAL 1-second timeout frozen
+   into the outbox file, so Emacs abandons every attempt at 1s → `retry`
+   forever, every 15s per record.
+2. Each abandoned attempt leaves live retry loops server-side doing dedup
+   GETs against :7073 — accumulating across ticks into a flood (observed:
+   ~8 point-reads/sec for 2 ids; store request pool saturated; my /health
+   probes queued in the accept backlog and died).
+3. Clients timing out and disconnecting en masse → the store writes
+   responses to closed sockets → journal shows `/health … status=500
+   class=java.io.IOException` → **the HTTP accept/dispatch thread died of
+   an uncaught exception ~14:36**.
+4. Terminal state = the 07-13 zombie signature precisely: `ss -tln` shows
+   `Recv-Q 51` vs backlog 50 on :7073; thread dump
+   (`/tmp/futon1b-stuck-threads.txt`) shows all 4 pool-2 workers IDLE in
+   `getTask` and NO dispatcher thread; JVM memory healthy (5.9G/high 10G).
+   Only remedy: `systemctl --user restart futon1b-server`.
+
+**Mitigation applied live (claude-2, ~14:40):** Emacs outbox replay timer
+STOPPED (`agent-chat--evidence-outbox-timer` cancelled — must be re-armed
+after the fix, or evidence retries silently never happen); both stuck
+records parked in `evidence-outbox/failed/` for inspection + eventual
+redelivery. Flood confirmed stopped (journal silent on emacs-* ids within
+15s). The dispatcher was already dead by then.
+
+**New items for the fixer, atop the deployed pass:**
+- The accept/dispatch loop needs a top-level catch-and-continue (both
+  killers so far — 07-13 OOM, today IOException — end in the same
+  unrecoverable zombie; this is the single highest-value fix).
+- Outbox records must not freeze the 1s interactive timeout into the retry
+  path — replay is async; use a generous per-attempt budget (30s+), and ack
+  on duplicate-id like the design intends.
+- The compat-route delivery hang (60s POST never returns) needs its own
+  diagnosis — bounded backoff appears unbounded in practice, and concurrent
+  attempts for the same id should coalesce, not accumulate.
+- /health must not share the fate of the request path it is meant to probe
+  (dedicated acceptor or thread), or the vitality timer watches a corpse.
