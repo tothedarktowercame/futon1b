@@ -45,4 +45,6 @@
   :server {:jvm-opts ["--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
                       "-Dio.netty.tryReflectionSetAccessible=true"
                       "-Djava.net.preferIPv4Stack=true"
-                      "-Xmx1536m" "-XX:MaxDirectMemorySize=768m"]}}}
+                      "-Xmx1536m" "-XX:MaxDirectMemorySize=768m"
+                      "-XX:+ExitOnOutOfMemoryError"
+                      "-XX:NativeMemoryTracking=summary"]}}}

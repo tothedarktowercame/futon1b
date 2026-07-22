@@ -12,7 +12,9 @@
             [xtdb.node :as xtn])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
-            HttpResponse$BodyHandlers]))
+            HttpResponse$BodyHandlers]
+           [java.util.concurrent CountDownLatch RejectedExecutionException
+            TimeUnit]))
 
 (def client (HttpClient/newHttpClient))
 
@@ -80,6 +82,13 @@
                            :evidence/claim-type :observation :evidence/author "alice"} ph)]
       (check! "duplicate id -> 409"
               (and (= 409 (:status r)) (= "duplicate evidence id" (get-in r [:body :error])))
+              r))
+    (let [r (req "POST" E {:evidence/id "bad-reply" :evidence/type :claim
+                           :evidence/claim-type :observation :evidence/author "alice"
+                           :evidence/in-reply-to "missing-parent"} ph)]
+      (check! "missing reply is rejected at the store boundary"
+              (and (= 409 (:status r))
+                   (= :reply-not-found (get-in r [:body :error])))
               r))
     ;; corpus for query tests
     (doseq [[id typ author at sid tags eph reply]
@@ -230,16 +239,44 @@
               r))
     (check! "unregistered type -> gate silent"
             (nil? (gates/gate-entity-id! {:entity/type :whatever/doc :entity/name "x"}))
-            nil)))
+            nil)
+
+    (println "— bounded HTTP handoff")
+    (let [executor (#'srv/bounded-executor 4 16)
+          release (CountDownLatch. 1)
+          task (reify Runnable
+                 (run [_]
+                   (try
+                     (.await release 5 TimeUnit/SECONDS)
+                     (catch InterruptedException _ nil))))]
+      (try
+        (dotimes [_ 20] (.execute executor task))
+        (let [rejected? (try
+                          (.execute executor task)
+                          false
+                          (catch RejectedExecutionException _ true))]
+          (check! "HTTP executor rejects beyond four workers + sixteen queued"
+                  rejected?
+                  {:queue-size (.size (.getQueue executor))}))
+        (finally
+          (.countDown release)
+          (.shutdownNow executor))))))
 
 (defn -main [& _]
   (gates/seed-mission-contract!)
   (with-open [node (xtn/start-node)]
-    (let [server (srv/start-server! {:node node :port 0})
+    (let [server (srv/start-server! {:node node :port 0 :health-port 0})
           port (.getPort (.getAddress server))
-          base (str "http://127.0.0.1:" port)]
+          base (str "http://127.0.0.1:" port)
+          health-server (get-in @(var-get #'srv/!server-executors)
+                                [server :companions 0 :server])
+          health-port (.getPort (.getAddress health-server))]
       (try
         (run-tests base)
+        (let [r (req "GET" (str "http://127.0.0.1:" health-port "/health"))]
+          (check! "independent liveness acceptor responds"
+                  (and (= 200 (:status r)) (true? (get-in r [:body :ok])))
+                  r))
         (finally (srv/stop-server! server)))))
   (let [results @!results
         fails (remove :ok? results)]

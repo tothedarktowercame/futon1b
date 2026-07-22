@@ -257,48 +257,109 @@ study's judgment channel (operator marks) and its instrumentation (dual
 decisions, transcripts) all ride this store. Store brown-outs during the
 cohort window are silent data loss for a preregistered experiment.
 
-## Second episode same day — dispatcher death by IOException storm (14:36 BST)
+## Second episode same day — heap OOM in HTTP dispatcher (14:35 BST)
 
-Distinct from the 13:2x brown-out; occurred ~25 min AFTER the hardening pass
-deployed, and was caused by an interaction of two of its new pieces. Chain,
-each link verified live:
+The initial field diagnosis correctly captured the zombie signature and the
+outbox interaction, but incorrectly named IOException as the dispatcher
+killer and treated 5.9G cgroup use against a 10G high watermark as proof that
+the incident was not memory-related. The preserved journal makes the direct
+cause unambiguous:
 
-1. Two Emacs outbox records (chat turns, 14:25/14:33) could not deliver:
-   their POSTs to the futon3c compat route HANG indefinitely (a manual POST
-   with a 60s budget never returned) — the route's new retry/backoff loops
-   never conclude. Each record carries its ORIGINAL 1-second timeout frozen
-   into the outbox file, so Emacs abandons every attempt at 1s → `retry`
-   forever, every 15s per record.
-2. Each abandoned attempt leaves live retry loops server-side doing dedup
-   GETs against :7073 — accumulating across ticks into a flood (observed:
-   ~8 point-reads/sec for 2 ids; store request pool saturated; my /health
-   probes queued in the accept backlog and died).
-3. Clients timing out and disconnecting en masse → the store writes
-   responses to closed sockets → journal shows `/health … status=500
-   class=java.io.IOException` → **the HTTP accept/dispatch thread died of
-   an uncaught exception ~14:36**.
-4. Terminal state = the 07-13 zombie signature precisely: `ss -tln` shows
-   `Recv-Q 51` vs backlog 50 on :7073; thread dump
-   (`/tmp/futon1b-stuck-threads.txt`) shows all 4 pool-2 workers IDLE in
-   `getTask` and NO dispatcher thread; JVM memory healthy (5.9G/high 10G).
-   Only remedy: `systemctl --user restart futon1b-server`.
+```text
+14:35:39 Exception in thread "HTTP-Dispatcher"
+java.lang.OutOfMemoryError: Java heap space
+  at ...ServerImpl$Dispatcher.lambda$run$0(ServerImpl.java:534)
+  at java.util.Collection.toArray(Collection.java:418)
+```
 
-**Mitigation applied live (claude-2, ~14:40):** Emacs outbox replay timer
-STOPPED (`agent-chat--evidence-outbox-timer` cancelled — must be re-armed
-after the fix, or evidence retries silently never happen); both stuck
-records parked in `evidence-outbox/failed/` for inspection + eventual
-redelivery. Flood confirmed stopped (journal silent on emacs-* ids within
-15s). The dispatcher was already dead by then.
+The cgroup still had capacity, but the JVM's separately bounded 4G heap did
+not. The IOException lines were workers discovering that timed-out clients had
+closed their sockets; they were aftermath, not what killed the dispatcher.
 
-**New items for the fixer, atop the deployed pass:**
-- The accept/dispatch loop needs a top-level catch-and-continue (both
-  killers so far — 07-13 OOM, today IOException — end in the same
-  unrecoverable zombie; this is the single highest-value fix).
-- Outbox records must not freeze the 1s interactive timeout into the retry
-  path — replay is async; use a generous per-attempt budget (30s+), and ack
-  on duplicate-id like the design intends.
-- The compat-route delivery hang (60s POST never returns) needs its own
-  diagnosis — bounded backoff appears unbounded in practice, and concurrent
-  attempts for the same id should coalesce, not accumulate.
-- /health must not share the fate of the request path it is meant to probe
-  (dedicated acceptor or thread), or the vitality timer watches a corpse.
+### Corrected causal chain
+
+1. At 14:20:01 and 14:20:04 two
+   `/api/alpha/hyperedges?end=...&limit=1` calls began. The endpoint branch
+   still queried `(from :hyperedges [*])`, filtered endpoint membership in
+   Clojure, and applied `limit` last. Thus the first hardening pass's bounded
+   realization claim did not cover this branch.
+2. Both scans occupied the two expensive-read permits for **936.7 s and
+   941.7 s**. Point reads and writes were intended to remain available, but
+   they now competed for the remaining global XTDB/query capacity.
+3. The new outbox froze its caller's one-second interactive timeout into each
+   disk record. Two Emacs processes could retry the same shared queue every 15
+   seconds. Each abandoned Futon3c request continued server-side, including
+   reference/read-back point queries, after Emacs had closed its connection.
+4. JDK `HttpServer` was backed by `Executors/newFixedThreadPool(4)`, whose
+   handoff queue is unbounded. It continued accepting abandoned connections
+   faster than the four workers could retire them. The dispatcher eventually
+   exhausted the Java heap while copying its selected connection set.
+5. `OutOfMemoryError` is not caught by the dispatcher's `Exception` guard, so
+   the accept thread vanished while the listener and JVM remained. The saved
+   `/tmp/futon1b-stuck-threads.txt` and `Recv-Q 51`/backlog 50 are the expected
+   terminal state.
+
+The outbox was therefore an amplifier, but not the sole cause: the unbounded
+endpoint realization and unbounded HTTP handoff queue were necessary parts of
+the failure. A top-level IOException catch would not have prevented this OOM.
+
+### Remediation deployed 15:18–15:23 BST
+
+- Endpoint membership now uses XTQL `unnest` + `where`, orders/limits the
+  projected ids inside XTDB, and hydrates only the selected window. The exact
+  two formerly fatal queries completed concurrently in **2.98 s and 3.02 s**.
+  Ten main and independent health probes stayed between 1–5 ms.
+- The main HTTP executor is bounded at four running exchanges plus sixteen
+  queued. Excess accepted work is rejected/closed rather than retained in an
+  unbounded heap queue. A closed client is logged as `client-disconnected` and
+  does not provoke an impossible second 500 write.
+- The serving JVM now has `-XX:+ExitOnOutOfMemoryError`. If any other heap OOM
+  escapes, the whole JVM exits and `Restart=on-failure` recovers it instead of
+  preserving a socket-listening zombie. This is safer than attempting to
+  continue inside a potentially corrupted/OOM JVM.
+- Production exposes a separate one-worker liveness acceptor on `:7072`; the
+  vitality sampler records both it and main-path `:7073/health`. After restart,
+  both returned 200 on readiness attempt 19.
+- Futon1b now enforces reply/fork existence itself. The Futon3c backend removes
+  redundant client preflight reads, bounds an append attempt at 30 seconds, and
+  the live compatibility handler single-flights a stable evidence id (a second
+  in-flight request receives retryable 503). The live compatibility probe
+  appended/read back in **0.67 s**; its duplicate returned 409 in **0.06 s**.
+  The existing backend object in the live Futon3c JVM retains its old method
+  body until the next normal JVM lifecycle, but the hot-loaded timeout vars and
+  handler single-flight are active now. Futon3c was deliberately not restarted
+  from its own Agency-routed session.
+- Outbox records no longer persist the one-second UI timeout. Interactive
+  delivery remains short, while replay is an asynchronous curl process with a
+  75-second budget, a filesystem lease shared by both Emacs servers, and a
+  persisted exponential `next-at` deadline so aligned timers cannot retry in a
+  burst. Both Emacs servers were hot-loaded and their timers re-armed.
+- All three parked records are now readable from Futon1b. One was acknowledged
+  automatically as an already-stored duplicate. Two were redelivered under
+  operator control, verified by direct GET, and retained privately under
+  `evidence-outbox/acknowledged/` as incident audit artifacts. Live queue state
+  is pending=0, failed=0.
+- A forced-timeout end-to-end replay used stable id
+  `emacs-hardening-replay-probe-20260722`: the interactive 1 ms attempt queued
+  it, the asynchronous retry stored it by the second observation, and the
+  third observation found pending=0 with direct GET=200. This exercises the
+  normal timer/acknowledgement path rather than only the controlled recovery
+  path. Both Emacs timers remain active; pending=0, failed=0.
+
+### Validation and remaining observation
+
+- Futon1b suites: **39/39** and **51/51**; these include finite executor
+  rejection, independent liveness, server-side reference validation, and
+  endpoint-limit pushdown.
+- Futon3c backend/boundary: **17 tests / 68 assertions**. Emacs outbox suite:
+  **16/16** after the cross-process deadline/status parsing tests; the combined
+  chat/session/identity run is **26/26**. Broad HTTP: **99 tests / 492
+  assertions**, the same seven pre-existing stale failures; the new stable-id
+  single-flight test passed.
+- Keep the week-long memory/latency acceptance run. Additionally watch bounded
+  executor rejection/client-disconnect rates and both liveness surfaces. The
+  first normal Futon3c restart must be followed by a compatibility append probe
+  proving that the newly instantiated backend has dropped the legacy preflight
+  GET. Investigate any recurrence of the transient zero-duration XTDB
+  `RuntimeException` seen during controlled redelivery; request logs now retain
+  the exception message for that purpose.

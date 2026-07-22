@@ -232,6 +232,10 @@ projection; full bodies are hydrated only after the exact window is selected.
 - Corpus-wide read routes share two admission permits. A contending scan gets
   **503** `{:error :expensive-read-busy :retry-after-seconds 1}` while write,
   point-read, and `/health` workers remain available.
+- The HTTP executor admits at most four running requests plus sixteen queued
+  exchanges. This bounds abandoned client connections in heap. Endpoint
+  hyperedge searches apply membership and limit inside XTDB before full-body
+  hydration; `limit` is not a post-realization truncation.
 
 ### GET /api/alpha/evidence/count
 **Does not exist in futon1a** (falls through to the `{id}` handler → 404).

@@ -45,7 +45,8 @@
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
            [java.net InetSocketAddress URLDecoder]
            [java.nio.charset StandardCharsets]
-           [java.util.concurrent Semaphore])
+           [java.util.concurrent ArrayBlockingQueue Semaphore ThreadPoolExecutor
+            ThreadPoolExecutor$AbortPolicy TimeUnit])
   (:gen-class))
 
 (defonce !node (atom nil))
@@ -199,14 +200,27 @@
             (route-fn ex)
             (println (format "[futon1b-request] end method=%s uri=%s elapsed-ms=%d outcome=ok"
                              method uri (quot (- (System/nanoTime) started) 1000000)))
+            (catch java.io.IOException e
+              ;; A client may abandon a slow request before its response is
+              ;; ready. The response write then throws; attempting a second
+              ;; 500 response on the same closed exchange only throws again.
+              (println (format "[futon1b-request] end method=%s uri=%s elapsed-ms=%d outcome=client-disconnected class=%s"
+                               method uri (quot (- (System/nanoTime) started) 1000000)
+                               (.getName (class e))))
+              (.close ^HttpExchange ex))
             (catch Exception e
               ;; Layered gate errors keep futon1a's envelope + status mapping
               ;; (API-CONTRACT §0); anything else is the generic 500.
               (let [[status body] (gates/error->response e)]
-                (println (format "[futon1b-request] end method=%s uri=%s elapsed-ms=%d outcome=error status=%d class=%s"
+                (println (format "[futon1b-request] end method=%s uri=%s elapsed-ms=%d outcome=error status=%d class=%s message=%s"
                                  method uri (quot (- (System/nanoTime) started) 1000000)
-                                 status (.getName (class e))))
-                (respond! ex status body)))
+                                 status (.getName (class e)) (pr-str (.getMessage e))))
+                (try
+                  (respond! ex status body)
+                  (catch java.io.IOException write-error
+                    (println (format "[futon1b-request] error-response-abandoned method=%s uri=%s class=%s"
+                                     method uri (.getName (class write-error))))
+                    (.close ^HttpExchange ex)))))
             (finally (flush))))))))
 
 (defn- penholder!
@@ -524,16 +538,28 @@
 
 (defonce ^:private !server-executors (atom {}))
 
+(defn- bounded-executor
+  "A fixed worker pool with a finite handoff queue. JDK HttpServer otherwise
+  feeds Executors/newFixedThreadPool's unbounded queue: timed-out clients can
+  accumulate thousands of Exchange objects until the dispatcher itself OOMs."
+  [threads queue-capacity]
+  (ThreadPoolExecutor. threads threads 0 TimeUnit/MILLISECONDS
+                       (ArrayBlockingQueue. queue-capacity)
+                       (ThreadPoolExecutor$AbortPolicy.)))
+
 (defn stop-server!
   "Stop a server returned by start-server! and release its worker threads."
   [^HttpServer server]
   (.stop server 0)
-  (when-let [executor (get @!server-executors server)]
+  (when-let [{:keys [executor companions]} (get @!server-executors server)]
     (swap! !server-executors dissoc server)
-    (.shutdownNow ^java.util.concurrent.ExecutorService executor))
+    (.shutdownNow ^java.util.concurrent.ExecutorService executor)
+    (doseq [{companion-server :server companion-executor :executor} companions]
+      (.stop ^HttpServer companion-server 0)
+      (.shutdownNow ^java.util.concurrent.ExecutorService companion-executor)))
   nil)
 
-(defn start-server! [{:keys [store-dir port node]}]
+(defn start-server! [{:keys [store-dir port health-port node]}]
   (gates/seed-mission-contract!)
   (reset! !node (or node (zm/open-store store-dir)))
   ;; D1 sidecar: open/create the FTS5 db beside the store, then catch up in
@@ -550,8 +576,11 @@
         (.start)))
     (catch Throwable t
       (println "[fts] init failed (serving continues):" (.getMessage t))))
-  (let [server (HttpServer/create (InetSocketAddress. (int port)) 0)
-        executor (java.util.concurrent.Executors/newFixedThreadPool 4)]
+  (let [server (HttpServer/create (InetSocketAddress. (int port)) 50)
+        executor (bounded-executor 4 16)
+        health-server (when health-port
+                        (HttpServer/create (InetSocketAddress. (int health-port)) 8))
+        health-executor (when health-server (bounded-executor 1 4))]
     (.createContext server "/health" (handler health))
     ;; NB JDK HttpServer matches contexts by raw string prefix — the longer
     ;; /api/alpha/hyperedges context must be registered so it wins over
@@ -574,9 +603,19 @@
     (.createContext server "/api/alpha/types" (handler types-route))
     (.createContext server "/api/alpha/memory/search" (handler memory-search-route))
     (.setExecutor server executor)
-    (swap! !server-executors assoc server executor)
+    (when health-server
+      (.createContext health-server "/health" (handler health))
+      (.setExecutor health-server health-executor))
+    (swap! !server-executors assoc server
+           {:executor executor
+            :companions (cond-> []
+                          health-server
+                          (conj {:server health-server :executor health-executor}))})
     (.start server)
+    (when health-server (.start health-server))
     (println (format "futon1b-server up on :%d (store %s)" port store-dir))
+    (when health-server
+      (println (format "futon1b independent liveness up on :%d" health-port)))
     server))
 
 (defn- parse-args [args]
@@ -586,6 +625,8 @@
       (case (first args)
         "--store-dir" (recur (nnext args) (assoc opts :store-dir (second args)))
         "--port"      (recur (nnext args) (assoc opts :port (Long/parseLong (second args))))
+        "--health-port" (recur (nnext args) (assoc opts :health-port
+                                                    (Long/parseLong (second args))))
         (throw (ex-info (str "Unknown arg: " (first args)) {:args args}))))))
 
 (defn -main [& args]
