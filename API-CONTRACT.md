@@ -214,6 +214,25 @@ URL-decoded here).
   `before` + `include-ephemeral` (the futon3c EvidenceBackend protocol grew
   them 2026-07-10) — flagged as a deliberate contract extension.
 
+#### Futon1b bounded-page extension (2026-07-22)
+
+Futon1b deliberately does not preserve futon1a's unsafe unbounded realization
+for this route. Every response is one newest-first keyset page over a compact
+projection; full bodies are hydrated only after the exact window is selected.
+
+- `limit` defaults to 100 and must be an integer from 1 through 1000. Invalid,
+  non-positive, and oversized values return **400**.
+- A full page carries `:next-cursor {:at <iso-string> :id <xt-id>}`. Continue
+  with `cursor-at` and `cursor-id`. An absent cursor means the exact filtered
+  result is exhausted. A cursor may lead to one final empty page when the
+  preceding page ended exactly at EOF.
+- Futon3c's `Futon1bBackend` follows these cursors when protocol semantics
+  require more than one page; it never asks the store JVM for an unbounded
+  response.
+- Corpus-wide read routes share two admission permits. A contending scan gets
+  **503** `{:error :expensive-read-busy :retry-after-seconds 1}` while write,
+  point-read, and `/health` workers remain available.
+
 ### GET /api/alpha/evidence/count
 **Does not exist in futon1a** (falls through to the `{id}` handler → 404).
 futon1b SHOULD add it (protocol `-count`, `{:count <n>}`, same query params

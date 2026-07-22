@@ -99,6 +99,121 @@ by OOM under the old `-Xmx1g`.)
   120s via `FUTON1B_TIMEOUT_MS` (07-13, f62a3ef) — but note callers with
   their OWN short timeouts (elisp chat-turn emit: 1s) still fail fast.
 
+## Hardening pass deployed 2026-07-22 (Codex, 14:04–14:11 BST)
+
+This pass addresses immediate capacity, bounded realization, write-path
+availability, transport diagnosis, durable Emacs delivery, and monitoring as
+one coherent change. It does **not** declare the incident closed: the week-long
+steady-state acceptance observations below remain outstanding.
+
+### Store/query invariants now enforced
+
+- Evidence lists are cursor pages over a compact projection. `limit` defaults
+  to 100, is restricted to 1–1000, and invalid/oversized values return 400.
+  Full evidence bodies are hydrated only after the exact filtered page is
+  selected. `:next-cursor {:at ... :id ...}` continues the newest-first keyset
+  scan without gaps or duplicates. Futon3c follows these cursors when its
+  backend protocol requires more than one page, including `-all`; it never
+  requests one unbounded store-JVM response.
+- All `futon1b-xt/safe-q` calls share a fair process-wide four-permit pgwire
+  budget. Four hydration futures are therefore a global ceiling rather than a
+  per-request multiplier.
+- Corpus-scale HTTP reads share two admission permits. A third concurrent scan
+  receives retryable 503 `:expensive-read-busy`, leaving two of the four HTTP
+  workers for writes, point reads, and `/health`. The futon3c evidence client
+  retries this response with bounded exponential backoff.
+- Other list/search endpoints now receive a validated default limit of 100 and
+  reject non-positive/invalid values; their current compatibility maximum is
+  5000 because the mission-scope readers legitimately request that window.
+  Evidence remains the stricter 1000-page protocol because it has a cursor.
+
+### Failure taxonomy and marks durability
+
+- Futon1b HTTP append errors are classified as `:store-timeout` versus
+  `:store-unreachable`. The boundary now records these as I-evidence-per-turn
+  `:kind :timeout` / `:kind :unreachable`, not `:shape`, and the futon3c HTTP
+  compatibility route returns retryable 503 for transport/store failures.
+- Emacs chat evidence is written first to a private disk outbox under
+  `~/.local/state/futon3c/evidence-outbox/`, with one stable evidence id carried
+  in both futon3c and direct-futon1b JSON spellings. A 2xx or duplicate-id 409
+  acknowledges and removes it; transport/408/429/5xx keeps it for periodic
+  replay; terminal 4xx moves it to `failed/` for inspection. Pending/failed
+  counts are visible in chat headers and echo-area messages. Thus the existing
+  one-second UI timeout no longer implies loss, and reply chains may reference
+  an entry while it is pending because its identity is already fixed.
+  `agent-chat.el` was hot-loaded into both live Emacs servers (`server` and
+  `futon-ops`) after its tests passed; both reported zero pending/failed files.
+
+### Capacity and monitoring deployed
+
+- The installed unit is now `MemoryHigh=10G`, `MemoryMax=12G`; the parent
+  `futon-services.slice` has no memory cap. `MemorySwapMax=1G` is unchanged.
+- `futon1b-vitality.timer` is installed and enabled once per minute. It records
+  bounded private JSONL at `~/.local/state/futon1b/vitality.jsonl`: cgroup
+  current/high/max, anon/file/swapcached, `memory.events`, PSI, and timed
+  `/health`. It alerts at 80% of `memory.high`, on a new `memory.events high`
+  event, failed health, or health latency >=500 ms. The log rotates at 10 MiB.
+
+### Evidence collected during deployment
+
+- Before changing the live 7G high watermark, at ~14:00 BST the cgroup had
+  reached **6.29 GB / 83.7%** after roughly 22 minutes: **5.53 GB anon** and
+  **0.73 GB file**, with `memory.events high=0` and `/health` 53 ms. This
+  confirms tight budget growth but weakens the earlier claim that page cache
+  alone dominates it.
+- Both futon1b restarts recovered `/health` on attempt 22 (~21 seconds, mostly
+  XTDB replay/startup). After the final restart: high/max = 10/12 GiB, memory
+  1.44 GB (13.4% of high), no swap, no high/max/OOM events, PSI zero.
+- The 14:11 timer sample, roughly three minutes later, was already **4.90 GB
+  (45.7% of high)**: **4.65 GB anon** and **0.23 GB file**, still with zero
+  high events, zero PSI, and `/health` 115 ms. This rapid post-start increase
+  is why the new capacity must remain a monitored hypothesis rather than being
+  called a resolution; the 24-hour/one-week observations below are mandatory.
+- A cold `GET /api/alpha/evidence?limit=2` took **5.79 s**. During it, ten
+  `/health` probes completed in 1.9–44.6 ms (nine under 11 ms), demonstrating
+  liveness isolation. The cold list latency itself is still unacceptable and
+  remains an investigation below.
+- Live oversized evidence limit returned 400 in 3 ms with the documented
+  envelope. A two-entry response returned the documented next cursor.
+
+### Validation completed
+
+- Futon1b: clj-kondo 0 errors/warnings on changed Clojure; check-parens clean;
+  `test-a1a2` **36/36 PASS** including pagination, limit rejection, two occupied
+  scans + third 503, and a concurrent successful write; `test-a3a4a5`
+  **50/50 PASS**.
+- Futon3c focused Clojure: boundary + backend **16 tests / 66 assertions**, all
+  pass. Emacs shared chat/session/identity suites: **24/24**, including timeout
+  replay, duplicate acknowledgement, terminal-failure retention. Changed Lisp
+  and Clojure are check-parens clean; clj-kondo reports 0 errors (the existing
+  http-kit macro-resolution warnings were excluded in the focused invocation).
+- Broad `futon3c.transport.http-test`: **98 tests / 489 assertions**, 7 failures,
+  all outside this change: two stale `/health` evidence-count expectations,
+  one pre-existing `server-sent-at-ms` expectation, and four stale AIF agenda
+  expectations. The new retryable evidence-status assertion passed. Do not
+  restore the removed unbounded health count to satisfy the stale test.
+
+### Still open / evidence that requires time
+
+1. Let the vitality timer collect at least a week of normal cohort load. Report
+   warm steady-state max and p95 headroom, anon/file split, PSI, and any
+   `memory.events high` deltas here. The acceptance target remains >=1.5G below
+   `MemoryHigh`; the higher limit is capacity, not proof of stabilization.
+2. Derive per-route p50/p95/p99 from `[futon1b-request]` logs. The timer measures
+   liveness latency, not route latency. Specifically explain the 5.8 s cold
+   two-entry page and the observed 20.4 s mission-doc hyperedge window; likely
+   dimensions are XTDB compilation/warmup, ingestion overlap, and point-read
+   hydration. Do not raise HTTP concurrency as a remedy.
+3. Review `vitality.jsonl` after 24 hours for monotonic anon growth. Capture NMT,
+   heap occupancy/histogram, and `memory.stat` together if ratio reaches 70%,
+   so heap, metaspace/native, and file cache can be apportioned at the same
+   instant.
+4. Audit and reconcile the Emacs outbox during the pilot: pending must drain to
+   zero; every file under `failed/` requires an operator decision. Add an HUD
+   surface if chat-header visibility proves insufficient.
+5. Update the seven stale broad HTTP assertions separately; they are test drift,
+   not justification to restore removed behavior or rewrite current AIF facts.
+
 ## Candidate directions for the fixer (with the tradeoffs named)
 
 1. **Fix the budget arithmetic** (cheapest, likely first): either raise

@@ -88,6 +88,27 @@
 (defn- public-doc [doc]
   (dissoc doc :xt/id))
 
+(def ^:private hydration-width 4)
+(def ^:private default-page-size 100)
+(def ^:private max-page-size 1000)
+(def ^:private scan-page-size 1000)
+
+(defn- hydrate-projected
+  "Hydrate projected identities with bounded concurrency while preserving
+  their order. A 1,000-entry watcher page otherwise performs 1,000 serial
+  local XTDB round trips (~86s on the live store). Four in flight matches the
+  server's deliberately small concurrency budget and bounds the number of full
+  evidence bodies resident at once. `futon1b-xt/safe-q` supplies the global
+  four-query budget, so concurrency cannot multiply across HTTP requests."
+  [node projected]
+  (->> projected
+       (partition-all hydration-width)
+       (mapcat (fn [batch]
+                 (->> batch
+                      (mapv #(future (fetch-by-id node (:xt/id %))))
+                      (mapv deref))))
+       (keep identity)))
+
 ;; ---------------------------------------------------------------------------
 ;; Write path: append-only, duplicate-id 409, transform + rescue + verify.
 ;; ---------------------------------------------------------------------------
@@ -135,11 +156,8 @@
     evidence/session-id evidence/fork-of
     evidence/ephemeral? evidence/tags evidence/subject evidence/pattern-id])
 
-(defn- fetch-filtered
-  "Evidence docs with type/claim-type/author/session-id AND since/before
-  (lexicographic string compare — the contract's own semantics) pushed
-  down to XTQL. cols = '[*] for full docs, filter-cols for cheap scans."
-  [node {:keys [type claim-type author session-id fork-of since before]} cols]
+(defn- filter-clauses
+  [{:keys [type claim-type author session-id fork-of since before]}]
   (let [clauses (cond-> []
                   type (conj (list '= 'evidence/type type))
                   claim-type (conj (list '= 'evidence/claim-type claim-type))
@@ -148,27 +166,25 @@
                   fork-of (conj (list '= 'evidence/fork-of fork-of))
                   since (conj (list '>= 'evidence/at since))
                   before (conj (list '< 'evidence/at before)))]
+    clauses))
+
+(defn- fetch-filtered
+  "Evidence docs with type/claim-type/author/session-id AND since/before
+  (lexicographic string compare — the contract's own semantics) pushed
+  down to XTQL. cols = '[*] for full docs, filter-cols for cheap scans."
+  [node q cols]
+  (let [clauses (filter-clauses q)]
     (if (seq clauses)
       (fxt/safe-q node (list '-> (list 'from :evidence cols)
                        (cons 'where clauses)))
       (fxt/safe-q node (list 'from :evidence cols)))))
 
-(declare apply-post-filters)
-
-(defn- fetch-newest-page
-  "One newest-first keyset page. Unlike the former limit path, the XTQL limit
-  is inside the query, so neither XTDB's result nor this JVM materializes the
-  matching corpus. The (at,id) key guarantees progress across import-time ties."
-  [node {:keys [type claim-type author session-id fork-of since before]} cursor page-size]
+(defn- fetch-newest-projected-page
+  "Fetch one compact newest-first keyset page. Full evidence bodies never
+  participate in the corpus-wide order-by."
+  [node q cursor page-size]
   (let [[cursor-at cursor-id] cursor
-        clauses (cond-> []
-                  type (conj (list '= 'evidence/type type))
-                  claim-type (conj (list '= 'evidence/claim-type claim-type))
-                  author (conj (list '= 'evidence/author author))
-                  session-id (conj (list '= 'evidence/session-id session-id))
-                  fork-of (conj (list '= 'evidence/fork-of fork-of))
-                  since (conj (list '>= 'evidence/at since))
-                  before (conj (list '< 'evidence/at before))
+        clauses (cond-> (filter-clauses q)
                   cursor (conj (list 'or
                                      (list '< 'evidence/at cursor-at)
                                      (list 'and
@@ -180,29 +196,50 @@
                                 {:val 'evidence/at :dir :desc}
                                 {:val 'xt/id :dir :desc})
                           (list 'limit page-size)))]
-    (fxt/safe-q node (cons '-> (cons '(from :evidence [*]) tail)))))
+    (fxt/safe-q node (cons '-> (cons (list 'from :evidence filter-cols)
+                                     tail)))))
+
+(declare apply-post-filters)
+
+(defn- row-cursor [row]
+  [(str (:evidence/at row)) (str (:xt/id row))])
 
 (defn- bounded-window
-  "Return at most limit exact matches, newest first, using bounded keyset
-  pages. Post-filters remain authoritative, but a sparse filter only advances
-  to another bounded page rather than retaining the corpus in memory."
-  [node q limit]
-  (let [page-size (long (max 100 (min 1000 limit)))]
-    (loop [cursor nil
-           entries []]
-      (let [page (vec (fetch-newest-page node q cursor page-size))
-            matches (vec (apply-post-filters page q))
-            entries' (into entries matches)]
-        (cond
-          (>= (count entries') limit) (mapv public-doc (take limit entries'))
-          (< (count page) page-size) (mapv public-doc entries')
-          :else (let [last-row (peek page)
-                      next-cursor [(str (:evidence/at last-row))
-                                   (str (:xt/id last-row))]]
-                  (when (= cursor next-cursor)
-                    (throw (ex-info "Evidence keyset scan made no progress"
-                                    {:cursor cursor :limit limit})))
-                  (recur next-cursor entries')))))))
+  "Return a cursor page of at most LIMIT exact matches, newest first.
+
+  Do not ask XTDB to order full evidence documents. On the full store that
+  query built an Arrow order-by/coalescing result over the matching corpus,
+  drove the server through MemoryHigh, and occupied every HTTP worker long
+  enough for even /health to time out. Instead, scan the compact projection
+  already used by /count, apply the authoritative filters, retain only the
+  newest LIMIT identities, and hydrate that bounded window with point reads.
+  This keeps the expensive full-document cardinality at LIMIT while preserving
+  exact API ordering and filter semantics."
+  [node q limit initial-cursor]
+  (loop [cursor initial-cursor
+         selected []]
+    (let [page (vec (fetch-newest-projected-page node q cursor scan-page-size))
+          matches (vec (apply-post-filters page q))
+          selected' (into selected matches)]
+      (cond
+        (>= (count selected') limit)
+        (let [window (vec (take limit selected'))
+              next-cursor (some-> window peek row-cursor)]
+          {:entries (mapv public-doc (hydrate-projected node window))
+           ;; A full page may end exactly at EOF. Returning its cursor is safe:
+           ;; the next request proves exhaustion with an empty page.
+           :next-cursor next-cursor})
+
+        (< (count page) scan-page-size)
+        {:entries (mapv public-doc (hydrate-projected node selected'))
+         :next-cursor nil}
+
+        :else
+        (let [next-cursor (row-cursor (peek page))]
+          (when (= cursor next-cursor)
+            (throw (ex-info "Evidence keyset scan made no progress"
+                            {:cursor cursor :limit limit})))
+          (recur next-cursor selected'))))))
 
 (defn- name-of [x]
   (cond (keyword? x) (name x)
@@ -234,19 +271,6 @@
     (or subject-type subject-id) (filter #(subject-match? % subject-type subject-id))
     pattern-id (filter #(= pattern-id (normalize-type (:evidence/pattern-id %))))))
 
-(defn- post-filtered?
-  [{:keys [tags subject-type subject-id pattern-id]}]
-  (boolean (or (seq tags) subject-type subject-id pattern-id)))
-
-(defn- hydrate-filtered
-  "Hydrate only projected rows that survived the non-XTQL filters. This is
-  the unbounded-query path used by futon3c for exact local membership: scan
-  compact columns, then point-read matching full documents."
-  [node q]
-  (let [matches (-> (fetch-filtered node q filter-cols)
-                    (apply-post-filters q))]
-    (keep #(fetch-by-id node (:evidence/id %)) matches)))
-
 (defn- parse-query-params
   "String HTTP params (contract §3) → typed filter map."
   [p]
@@ -261,48 +285,46 @@
     (p "pattern-id") (assoc :pattern-id (normalize-type (p "pattern-id")))
     (p "since") (assoc :since (p "since"))
     (p "before") (assoc :before (p "before"))
+    (and (p "cursor-at") (p "cursor-id"))
+    (assoc :cursor [(p "cursor-at") (p "cursor-id")])
     (p "tags") (assoc :tags (remove str/blank? (str/split (p "tags") #",")))
     (p "include-ephemeral")
     (assoc :include-ephemeral (= "true" (str/lower-case (p "include-ephemeral"))))
     (p "limit") (assoc :limit (try (Long/parseLong (p "limit"))
                                    (catch Exception _ nil)))))
 
-(defn query-evidence
-  "GET /api/alpha/evidence → {:entries [...] :count n} (newest first).
-  With a limit: bounded newest-first keyset pages fill the exact post-filtered
-  window; no page and no in-memory result exceeds the configured page size."
+(defn query-evidence-response
+  "Validate and serve one bounded evidence page as [HTTP-STATUS BODY].
+
+  Missing limit uses DEFAULT-PAGE-SIZE. Invalid, non-positive, and oversized
+  limits are rejected rather than selecting an unbounded realization path.
+  Continue with the returned :next-cursor map as cursor-at/cursor-id."
   [node http-params]
-  (let [q (parse-query-params http-params)
-        limit (:limit q)]
-    (if (and (int? limit) (pos? limit))
-      (let [slim (-> (fetch-filtered node q filter-cols)
-                     (apply-post-filters q))
-            window (->> slim
-                        (sort-by #(str (:evidence/at %)) #(compare %2 %1))
-                        (take limit))]
-        (if (empty? window)
-          {:entries [] :count 0}
-          ;; Hydrate the window by id (point reads on xt/id), NOT via a
-          ;; :since-bounded re-fetch. The old phase 2 injected a range
-          ;; predicate (>= evidence/at cutoff), which XTDB2's planner runs as
-          ;; a full temporal scan of the corpus (~17s @ 95k docs) even when
-          ;; phase 1 was already narrowed by a cheap equality like session-id
-          ;; (0.8s) — so `limit` paradoxically made narrow queries ~10x slower
-          ;; (session recall: 2.8s unbounded -> 8s at limit=1, 2026-07-14).
-          ;; window is already sorted-desc, limited, and fully post-filtered
-          ;; (filter-cols carry ephemeral?/tags/subject/pattern-id), so point-
-          ;; reading its ids yields the identical result at O(limit) reads.
-          (let [entries (into [] (comp (keep #(fetch-by-id node (:evidence/id %)))
-                                       (map public-doc))
-                              window)]
-            {:entries entries :count (count entries)})))
-      (let [docs (if (post-filtered? q)
-                   (hydrate-filtered node q)
-                   (-> (fetch-filtered node q '[*])
-                       (apply-post-filters q)))
-            sorted (sort-by #(str (:evidence/at %)) #(compare %2 %1) docs)
-            entries (mapv public-doc sorted)]
-        {:entries entries :count (count entries)}))))
+  (let [raw-limit (http-params "limit")
+        parsed-limit (if raw-limit
+                       (try (Long/parseLong raw-limit)
+                            (catch Exception _ ::invalid))
+                       default-page-size)]
+    (if (or (= ::invalid parsed-limit)
+            (not (pos-int? parsed-limit))
+            (> parsed-limit max-page-size))
+      [400 {:ok false
+            :error "limit must be an integer between 1 and 1000"
+            :limit/max max-page-size}]
+      (let [q (parse-query-params http-params)
+            {:keys [entries next-cursor]}
+            (bounded-window node q parsed-limit (:cursor q))]
+        [200 (cond-> {:entries entries
+                      :count (count entries)
+                      :limit parsed-limit}
+               next-cursor
+               (assoc :next-cursor {:at (first next-cursor)
+                                    :id (second next-cursor)}))]))))
+
+(defn query-evidence
+  "Compatibility helper for in-process callers; returns the validated body."
+  [node http-params]
+  (second (query-evidence-response node http-params)))
 
 (defn count-evidence
   "GET /api/alpha/evidence/count → {:count n} (same filters, no limit).
