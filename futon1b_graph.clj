@@ -569,12 +569,27 @@
     (let [end-id (if (uuid-shaped? end)
                    (or (some-> (fetch-entity node end) :entity/name) end)
                    end)
-          targets (set [end end-id])
-          docs (->> (fxt/safe-q node '(from :hyperedges [*]))
-                    (filter #(some targets (:hx/endpoints %))))
-          sorted (sort-by :hx/id docs)
-          limited (if (and (int? limit) (pos? limit)) (take limit sorted) sorted)
-          out (mapv #(dissoc % :xt/id) limited)]
+          targets (distinct [end end-id])
+          n (long (or limit 100))
+          projected (->> targets
+                         (mapcat
+                          (fn [target]
+                            (fxt/safe-q
+                             node
+                             (list '->
+                                   (list 'from :hyperedges '[xt/id hx/endpoints])
+                                   (list 'unnest '{:ep hx/endpoints})
+                                   (list 'where (list '= 'ep target))
+                                   (list 'return 'xt/id)
+                                   (list 'order-by {:val 'xt/id :dir :asc})
+                                   (list 'limit n)))))
+                         (reduce (fn [by-id row]
+                                   (assoc by-id (:xt/id row) row)) {})
+                         vals
+                         (sort-by #(str (:xt/id %)))
+                         (take n))
+          docs (hydrate-hyperedge-window node projected)
+          out (mapv #(dissoc % :xt/id) docs)]
       {:hyperedges out :count (count out)})))
 
 (defonce ^:private !hyperedge-query-cache (atom {}))

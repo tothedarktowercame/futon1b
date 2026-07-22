@@ -124,6 +124,18 @@
     (cond
       invalid [400 invalid]
 
+      (and (:evidence/in-reply-to doc)
+           (not (exists? node (:evidence/in-reply-to doc))))
+      [409 {:error :reply-not-found
+            :evidence/id (:xt/id doc)
+            :in-reply-to (:evidence/in-reply-to doc)}]
+
+      (and (:evidence/fork-of doc)
+           (not (exists? node (:evidence/fork-of doc))))
+      [409 {:error :fork-not-found
+            :evidence/id (:xt/id doc)
+            :fork-of (:evidence/fork-of doc)}]
+
       (exists? node (:xt/id doc))
       [409 {:error "duplicate evidence id" :evidence/id (:xt/id doc)}]
 

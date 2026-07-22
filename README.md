@@ -197,6 +197,13 @@ multiply across HTTP requests. Corpus scans also share a two-permit admission
 gate; contention returns retryable 503 and leaves workers for writes, point
 reads, and liveness. See `API-CONTRACT.md` §3 for cursor fields.
 
+After the second 2026-07-22 episode, the JDK HTTP handoff is also bounded to
+four running requests plus sixteen queued exchanges. Endpoint membership
+queries push `unnest`/`where` and `limit` into XTDB before hydrating full
+hyperedges. The serving JVM uses `ExitOnOutOfMemoryError`, allowing systemd's
+`Restart=on-failure` to recover instead of retaining a socket-listening zombie,
+and production exposes an independent liveness acceptor on port 7072.
+
 ### Heap OOM stops ingestion silently-ish; process survives (2026-07-11)
 
 After ~2h of serving-day load (`-Xmx1g`), the node hit

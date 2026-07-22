@@ -258,6 +258,11 @@
               r))
     (let [r (req "GET" (str HXS "?end=a"))]
       (check! "?end=a -> 2 across types" (= 2 (:count (:body r))) r))
+    (let [r (req "GET" (str HXS "?end=a&limit=1"))]
+      (check! "?end limit is pushed down before full-doc hydration"
+              (and (= 1 (:count (:body r)))
+                   (= 1 (count (get-in r [:body :hyperedges]))))
+              r))
     (let [r (req "GET" HXS)]
       (check! "no params -> 400" (= 400 (:status r)) r))
     (let [r (req "POST" (str base "/api/alpha/graph/inhabited")
