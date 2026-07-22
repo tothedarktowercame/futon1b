@@ -139,6 +139,49 @@
     (:entity/props doc) (assoc :props (:entity/props doc))
     (:media/sha256 doc) (assoc :media/sha256 (:media/sha256 doc))))
 
+(def ^:private retractable-tables #{:entities :hyperedges})
+
+(declare invalidate-hyperedge-query-cache!)
+
+(defn retract-documents!
+  "Atomically retract entity/hyperedge documents after validating the whole
+  request. Deletes are idempotent; every requested id is read back after the
+  transaction so XTDB's silent-drop failure mode cannot report success."
+  [node payload]
+  (let [requested (:documents payload)]
+    (when-not (and (sequential? requested) (seq requested) (every? map? requested))
+      (throw (gates/layered-error 4 :invalid-document-retraction
+                                  {:expected :non-empty-seq-of-maps})))
+    (let [documents
+          (->> requested
+               (mapv (fn [{:keys [table id]}]
+                       (let [table (cond
+                                     (keyword? table) table
+                                     (string? table) (keyword table)
+                                     :else nil)]
+                         (when-not (and (contains? retractable-tables table)
+                                        (string? id) (not (str/blank? id)))
+                           (throw (gates/layered-error
+                                   4 :invalid-document-retraction
+                                   {:allowed-tables retractable-tables
+                                    :document {:table table :id id}})))
+                         {:table table :id id})))
+               distinct
+               vec)]
+      (xt/execute-tx node
+                     (mapv (fn [{:keys [table id]}]
+                             [:delete-docs table id])
+                           documents))
+      (let [remaining (filterv (fn [{:keys [table id]}]
+                                 (fxt/present? node table id))
+                               documents)]
+        (when (seq remaining)
+          (throw (gates/layered-error 0 :postcommit-retraction-failed
+                                      {:remaining remaining}))))
+      (when (some #(= :hyperedges (:table %)) documents)
+        (invalidate-hyperedge-query-cache!))
+      {:ok true :count (count documents) :documents documents})))
+
 (defn entity-by-external
   "GET /api/alpha/entity?source=…&external-id=… (contract §5): both params
   required (L4 400); multiple matches → L1 409 :external-id-ambiguous."

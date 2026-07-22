@@ -358,6 +358,16 @@ smallest-id pick on duplicates). Id path segment is URL-decoded.
 params required (else L4 400). **200** `{:entity <raw-doc>}`; **404** layered
 `:not-found`; multiple identity docs → L1 **409** `:external-id-ambiguous`.
 
+### POST /api/alpha/documents/retract
+Gated batch retraction for substrate-maintenance clients. Body requires
+`:documents`, a non-empty sequence of `{:table :entities|:hyperedges :id
+<non-blank-string>}` maps, plus the normal penholder. The entire request is
+validated before the first write, duplicate table/id pairs are coalesced, and
+the batch is committed in one XTDB transaction. Every requested document is
+then read back as absent; a surviving document fails at L0 with **503**
+`:postcommit-retraction-failed`. Missing documents are an idempotent success.
+Success **200**: `{:ok true :count N :documents [...]}`.
+
 ### GET /api/alpha/entities/latest?type=…&limit=…
 `app.clj:611-618` → `routes/compat-entities-latest` (`routes.clj:343-357`).
 - `type` **required** (string like `"pattern/library"`; missing → L4 400).
