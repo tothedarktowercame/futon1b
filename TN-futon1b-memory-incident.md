@@ -348,6 +348,11 @@ the failure. A top-level IOException catch would not have prevented this OOM.
 
 ### Validation and remaining observation
 
+- A final post-commit Futon1b-only lifecycle at **15:32 BST** loaded the exact
+  committed server code. Main `:7073/health` and independent `:7072/health`
+  were both 200 on readiness attempt 17; systemd reported active/running, PID
+  1058379, and `NRestarts=0`. Futon3c was not restarted from its Agency-routed
+  session.
 - Futon1b suites: **39/39** and **51/51**; these include finite executor
   rejection, independent liveness, server-side reference validation, and
   endpoint-limit pushdown.
