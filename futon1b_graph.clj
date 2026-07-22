@@ -484,6 +484,25 @@
                                 (list 'where (list '= 'xt/id id))))]
     (when (:hx/id doc) (dissoc doc :xt/id))))
 
+(def ^:private hyperedge-window-cols
+  '[xt/id hx/type prop/timestamp prop/repo prop/source-file])
+
+(defn- fetch-hyperedge-doc [node id]
+  (fxt/q1 node (list '-> '(from :hyperedges [*])
+                     (list 'where (list '= 'xt/id id)))))
+
+(defn- hydrate-hyperedge-window
+  "Hydrate an ordered projected window with bounded concurrency, preserving
+  order. Full hyperedge bodies never participate in the corpus-wide sort."
+  [node projected]
+  (->> projected
+       (partition-all 4)
+       (mapcat (fn [batch]
+                 (->> batch
+                      (mapv #(future (fetch-hyperedge-doc node (:xt/id %))))
+                      (mapv deref))))
+       (keep identity)))
+
 (defn- hyperedges-query-uncached
   "GET /api/alpha/hyperedges?type=…|end=… (+limit/latest, +repo/source-file with
   type). :count is the true type total when unfiltered even if limit
@@ -506,8 +525,18 @@
                        (and (not latest?) (int? limit) (pos? limit))
                        (conj (list 'order-by {:val 'xt/id :dir :asc})
                              (list 'limit limit)))
-          docs (fxt/safe-q node (cons '-> (cons '(from :hyperedges [*])
-                                                query-tail)))
+          bounded? (or latest? (and (int? limit) (pos? limit)))
+          selected (fxt/safe-q
+                    node
+                    (cons '->
+                          (cons (list 'from :hyperedges
+                                      (if bounded?
+                                        hyperedge-window-cols
+                                        '[*]))
+                                query-tail)))
+          docs (if bounded?
+                 (hydrate-hyperedge-window node selected)
+                 selected)
           total (when include-total?
                   (if (or latest? repo source-file)
                     (count docs)

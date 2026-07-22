@@ -6,6 +6,7 @@
 ;; Run: clojure -M:node -m test-a1a2
 (ns test-a1a2
   (:require [clojure.edn :as edn]
+            [futon1b-evidence :as ev]
             [futon1b-gates :as gates]
             [futon1b-server :as srv]
             [xtdb.node :as xtn])
@@ -129,8 +130,25 @@
               (some #(= "e4" (:evidence/id %)) (get-in r [:body :entries]))
               r))
     (let [r (req "GET" (str E "?limit=2"))
+          ids (mapv :evidence/id (get-in r [:body :entries]))
+          cursor (get-in r [:body :next-cursor])
+          r2 (req "GET" (str E "?limit=2&cursor-at=" (:at cursor)
+                              "&cursor-id=" (:id cursor)))
+          ids2 (mapv :evidence/id (get-in r2 [:body :entries]))]
+      (check! "limit + newest-first" (= ["e4" "e3"] ids) r)
+      (check! "cursor continues without gaps or duplicates"
+              (= ["e2" "e1"] ids2)
+              r2))
+    (doseq [bad ["0" "1001" "not-a-number"]]
+      (let [r (req "GET" (str E "?limit=" bad))]
+        (check! (str "invalid/oversized limit rejected: " bad)
+                (= 400 (:status r))
+                r)))
+    (let [r (req "GET" (str E "?session-id=s1&include-ephemeral=false&limit=1"))
           ids (mapv :evidence/id (get-in r [:body :entries]))]
-      (check! "limit + newest-first" (= ["e4" "e3"] ids) r))
+      (check! "session limit selects exact newest projected row"
+              (= ["e2"] ids)
+              r))
     (let [r (req "GET" (str E "/count?type=note"))]
       (check! "/count -> {:count 2}" (= 2 (get-in r [:body :count])) r))
 
@@ -147,6 +165,38 @@
     (let [r (req "GET" (str E "/e3/chain"))
           ids (mapv :evidence/id (get-in r [:body :chain]))]
       (check! "chain oldest-first" (= ["e1" "e2" "e3"] ids) r))
+
+    (println "— admission control: scans cannot occupy the write path")
+    (let [entered (java.util.concurrent.CountDownLatch. 2)
+          release (promise)]
+      (with-redefs [ev/count-evidence
+                    (fn [_ _]
+                      (.countDown entered)
+                      @release
+                      {:count 0})]
+        (let [first-scan (future (req "GET" (str E "/count")))
+              second-scan (future (req "GET" (str E "/count")))]
+          (when-not (.await entered 2 java.util.concurrent.TimeUnit/SECONDS)
+            (throw (ex-info "two scan workers did not enter admission gate" {})))
+          (let [rejected-scan (req "GET" (str E "/count"))
+                write (req "POST" E
+                           {:evidence/id "admission-write"
+                            :evidence/type :claim
+                            :evidence/claim-type :observation
+                            :evidence/author "test"}
+                           ph)]
+            (check! "contending corpus scan fails fast with retryable 503"
+                    (and (= 503 (:status rejected-scan))
+                         (= :expensive-read-busy
+                            (get-in rejected-scan [:body :error])))
+                    rejected-scan)
+            (check! "write succeeds while two corpus scans are occupied"
+                    (= 201 (:status write))
+                    write))
+          (deliver release true)
+          (check! "both admitted scans complete after release"
+                  (every? #(= 200 (:status %)) [@first-scan @second-scan])
+                  [@first-scan @second-scan]))))
 
     (println "— A2 gates: hyperedge penholder + no-op guard intact")
     (let [r (req "POST" (str base "/api/alpha/hyperedge")

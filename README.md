@@ -188,6 +188,15 @@ repo/source-file filters should use the denormalized `:prop/*` columns.
 Post-fix: the killer queries run 7-11s cold on the 94k corpus (client
 timeout 30s for headroom).
 
+The 2026-07-22 hardening pass makes boundedness a server invariant rather
+than a caller convention. Evidence list responses are cursor pages (default
+100, maximum 1000), reject invalid/oversized limits, order only compact
+projections, and hydrate at most the selected page. `futon1b-xt/safe-q` owns a
+fair process-wide four-query semaphore, so hydration concurrency cannot
+multiply across HTTP requests. Corpus scans also share a two-permit admission
+gate; contention returns retryable 503 and leaves workers for writes, point
+reads, and liveness. See `API-CONTRACT.md` §3 for cursor fields.
+
 ### Heap OOM stops ingestion silently-ish; process survives (2026-07-11)
 
 After ~2h of serving-day load (`-Xmx1g`), the node hit

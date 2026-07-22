@@ -44,7 +44,8 @@
             [xtdb.api :as xt])
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
            [java.net InetSocketAddress URLDecoder]
-           [java.nio.charset StandardCharsets])
+           [java.nio.charset StandardCharsets]
+           [java.util.concurrent Semaphore])
   (:gen-class))
 
 (defonce !node (atom nil))
@@ -223,8 +224,43 @@
     (URLDecoder/decode (if (str/starts-with? tail "/") (subs tail 1) tail)
                        "UTF-8")))
 
-(defn- parse-limit [p]
-  (some-> (p "limit") (as-> s (try (Long/parseLong s) (catch Exception _ nil)))))
+(def ^:private default-result-limit 100)
+(def ^:private max-result-limit 5000)
+
+(defn- parse-limit
+  "Validated server-side result bound for list/search endpoints."
+  [p]
+  (let [raw (p "limit")
+        parsed (if raw
+                 (try (Long/parseLong raw) (catch Exception _ ::invalid))
+                 default-result-limit)]
+    (when (or (= ::invalid parsed)
+              (not (pos-int? parsed))
+              (> parsed max-result-limit))
+      (throw (gates/layered-error
+              4 :invalid-limit
+              {:provided raw :minimum 1 :maximum max-result-limit})))
+    parsed))
+
+(defonce ^:private expensive-read-permit
+  ;; Corpus scans are admitted globally, not once per route or request. Two
+  ;; scans at a time leave two HTTP workers available for writes, point reads,
+  ;; and liveness. Contending scans fail fast with a retryable 503.
+  (Semaphore. 2 true))
+
+(defn- with-expensive-read!
+  [^HttpExchange ex f]
+  (if (.tryAcquire expensive-read-permit)
+    (try
+      (f)
+      (finally (.release expensive-read-permit)))
+    (do
+      (.set (.getResponseHeaders ex) "Retry-After" "1")
+      (println (format "[futon1b-admission] rejected uri=%s reason=expensive-read-busy"
+                       (str (.getRequestURI ex))))
+      (respond! ex 503 (pr-str {:ok false
+                                :error :expensive-read-busy
+                                :retry-after-seconds 1})))))
 
 (def ^:private tables
   [:hyperedges :entities :evidence :relations :type-catalog :docs :misc])
@@ -278,13 +314,20 @@
       (respond! ex 405 (pr-str {:ok false :error "GET/POST only"}))
 
       (str/blank? tail)
-      (respond! ex 200 (pr-str (ev/query-evidence @!node (query-params ex))))
+      (with-expensive-read!
+        ex
+        (fn []
+          (let [[status body]
+                (ev/query-evidence-response @!node (query-params ex))]
+            (respond! ex status (pr-str body)))))
 
       (= tail "count")
-      (respond! ex 200 (pr-str (ev/count-evidence @!node (query-params ex))))
+      (with-expensive-read!
+        ex #(respond! ex 200 (pr-str (ev/count-evidence @!node (query-params ex)))))
 
       (= tail "sessions")
-      (respond! ex 200 (pr-str (ev/sessions @!node (query-params ex))))
+      (with-expensive-read!
+        ex #(respond! ex 200 (pr-str (ev/sessions @!node (query-params ex)))))
 
       (str/ends-with? tail "/chain")
       (let [id (subs tail 0 (- (count tail) (count "/chain")))]
@@ -334,15 +377,18 @@
   (let [p (query-params ex)]
     (when-not (p "type")
       (throw (gates/layered-error 4 :missing-required {:required ["type"]})))
-    (respond! ex 200 (pr-str (graph/entities-latest
-                              @!node {:type (p "type") :limit (parse-limit p)})))))
+    (with-expensive-read!
+      ex #(respond! ex 200 (pr-str (graph/entities-latest
+                                    @!node {:type (p "type")
+                                            :limit (parse-limit p)}))))))
 
 (defn- entities-route [^HttpExchange ex]
   (let [p (query-params ex)]
     (if (p "type")
-      (respond! ex 200 (pr-str (graph/entities-query
-                                @!node {:type (p "type")
-                                        :limit (parse-limit p)})))
+      (with-expensive-read!
+        ex #(respond! ex 200 (pr-str (graph/entities-query
+                                      @!node {:type (p "type")
+                                              :limit (parse-limit p)}))))
       (respond! ex 400 (pr-str {:error "entities requires ?type=<entity-type>"})))))
 
 (defn- relation-route [^HttpExchange ex]
@@ -364,14 +410,15 @@
 (defn- relations-route [^HttpExchange ex]
   (let [p (query-params ex)]
     (if (or (p "type") (p "types") (p "from") (p "to"))
-      (respond! ex 200 (pr-str (graph/relations-query
-                                @!node {:type (p "type")
-                                        :types (some-> (p "types")
-                                                       (str/split #","))
-                                        :from (p "from")
-                                        :to (p "to")
-                                        :limit (parse-limit p)
-                                        :hydrate? (= "true" (p "hydrate"))})))
+      (with-expensive-read!
+        ex #(respond! ex 200 (pr-str (graph/relations-query
+                                      @!node {:type (p "type")
+                                              :types (some-> (p "types")
+                                                             (str/split #","))
+                                              :from (p "from")
+                                              :to (p "to")
+                                              :limit (parse-limit p)
+                                              :hydrate? (= "true" (p "hydrate"))}))))
       (respond! ex 400
                 (pr-str {:error "relations requires type, from, or to"})))))
 
@@ -388,20 +435,23 @@
 (defn- hyperedges-route [^HttpExchange ex]
   (let [p (query-params ex)]
     (if (or (p "type") (p "end"))
-      (respond! ex 200 (pr-str (graph/hyperedges-query
-                                @!node {:type (p "type") :end (p "end")
-                                        :limit (parse-limit p)
-                                        :repo (p "repo")
-                                        :source-file (p "source-file")
-                                        :include-total? (not= "false" (p "include-total"))
-                                        :latest? (= "true" (p "latest"))})))
+      (with-expensive-read!
+        ex #(respond! ex 200 (pr-str (graph/hyperedges-query
+                                      @!node {:type (p "type") :end (p "end")
+                                              :limit (parse-limit p)
+                                              :repo (p "repo")
+                                              :source-file (p "source-file")
+                                              :include-total? (not= "false" (p "include-total"))
+                                              :latest? (= "true" (p "latest"))}))))
       (respond! ex 400 (pr-str {:error "type or end parameter required"})))))
 
 (defn- census-route [^HttpExchange ex]
   (let [p (query-params ex)]
     (if (or (p "type") (p "entity-type"))
-      (respond! ex 200 (pr-str (graph/census @!node {:type (p "type")
-                                                     :entity-type (p "entity-type")})))
+      (with-expensive-read!
+        ex #(respond! ex 200 (pr-str (graph/census
+                                      @!node {:type (p "type")
+                                              :entity-type (p "entity-type")}))))
       (respond! ex 400
                 (pr-str {:error "census requires ?type=<hx-type> or ?entity-type=<type>"})))))
 
@@ -421,14 +471,14 @@
 
 (defn- memory-search-route [^HttpExchange ex]
   (let [p (query-params ex)
-        opts (cond-> {}
+        opts (cond-> {:limit (parse-limit p)}
                (p "type")   (assoc :type (keyword (p "type")))
                (p "author") (assoc :author (p "author"))
                (p "since")  (assoc :since (p "since"))
                (p "tags")   (assoc :tags (mapv keyword (str/split (p "tags") #",")))
-               (p "text")   (assoc :text (p "text"))
-               (p "limit")  (assoc :limit (Long/parseLong (p "limit"))))]
-    (respond! ex 200 (pr-str (zm/memory-search @!node opts)))))
+               (p "text")   (assoc :text (p "text")))]
+    (with-expensive-read!
+      ex #(respond! ex 200 (pr-str (zm/memory-search @!node opts))))))
 
 (defn- text-search-route
   "GET /api/alpha/evidence/text-search?q=…&author=&session-id=&since=&before=
@@ -457,17 +507,20 @@
       (respond! ex 400 (pr-str {:error "q parameter required"}))
 
       :else
-      (respond! ex 200
-                (pr-str (text/search @!node
-                                     (cond-> {:q (p "q")}
-                                       (p "author") (assoc :author (p "author"))
-                                       (p "session-id") (assoc :session-id (p "session-id"))
-                                       (p "since") (assoc :since (p "since"))
-                                       (p "before") (assoc :before (p "before"))
-                                       (p "include-ephemeral")
-                                       (assoc :include-ephemeral
-                                              (= "true" (str/lower-case (p "include-ephemeral"))))
-                                       (parse-limit p) (assoc :limit (parse-limit p)))))))))
+      (with-expensive-read!
+        ex
+        #(respond! ex 200
+                   (pr-str (text/search @!node
+                                        (cond-> {:q (p "q")
+                                                 :limit (parse-limit p)}
+                                          (p "author") (assoc :author (p "author"))
+                                          (p "session-id") (assoc :session-id (p "session-id"))
+                                          (p "since") (assoc :since (p "since"))
+                                          (p "before") (assoc :before (p "before"))
+                                          (p "include-ephemeral")
+                                          (assoc :include-ephemeral
+                                                 (= "true" (str/lower-case
+                                                            (p "include-ephemeral"))))))))))))
 
 (defonce ^:private !server-executors (atom {}))
 
