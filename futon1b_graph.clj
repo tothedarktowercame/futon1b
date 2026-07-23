@@ -477,39 +477,91 @@
 ;; Hyperedge reads (A4) — §4.
 ;; ---------------------------------------------------------------------------
 
+(declare hyperedge-from)
+
 (defn hyperedge-by-id
   "GET /api/alpha/hyperedge/{id} (id = URL-decoded URI tail)."
-  [node id]
-  (when-let [doc (fxt/q1 node (list '-> '(from :hyperedges [*])
-                                (list 'where (list '= 'xt/id id))))]
-    (when (:hx/id doc) (dissoc doc :xt/id))))
+  ([node id] (hyperedge-by-id node id {}))
+  ([node id temporal]
+   (when-let [doc (fxt/q1 node (list '->
+                                     (hyperedge-from '[*] temporal)
+                                     (list 'where (list '= 'xt/id id))))]
+     (when (:hx/id doc) (dissoc doc :xt/id)))))
 
 (def ^:private hyperedge-window-cols
   '[xt/id hx/type prop/timestamp prop/repo prop/source-file])
 
-(defn- fetch-hyperedge-doc [node id]
-  (fxt/q1 node (list '-> '(from :hyperedges [*])
+(defn- temporal-filter
+  [instant]
+  (when instant (list 'at instant)))
+
+(defn- hyperedge-from
+  [bindings {:keys [valid-as-of system-as-of]}]
+  (let [opts (cond-> {:bind bindings}
+               valid-as-of (assoc :for-valid-time (temporal-filter valid-as-of))
+               system-as-of (assoc :for-system-time (temporal-filter system-as-of)))]
+    (if (> (count opts) 1)
+      (list 'from :hyperedges opts)
+      (list 'from :hyperedges bindings))))
+
+(defn- fetch-hyperedge-doc [node id temporal]
+  (fxt/q1 node (list '-> (hyperedge-from '[*] temporal)
                      (list 'where (list '= 'xt/id id)))))
 
 (defn- hydrate-hyperedge-window
   "Hydrate an ordered projected window with bounded concurrency, preserving
   order. Full hyperedge bodies never participate in the corpus-wide sort."
-  [node projected]
+  [node projected temporal]
   (->> projected
        (partition-all 4)
        (mapcat (fn [batch]
                  (->> batch
-                      (mapv #(future (fetch-hyperedge-doc node (:xt/id %))))
+                      (mapv #(future (fetch-hyperedge-doc node (:xt/id %) temporal)))
                       (mapv deref))))
        (keep identity)))
 
 (defn- hyperedges-query-uncached
-  "GET /api/alpha/hyperedges?type=…|end=… (+limit/latest, +repo/source-file with
-  type). :count is the true type total when unfiltered even if limit
-  truncates; returned-count otherwise (contract §4)."
+  "GET /api/alpha/hyperedges?type=… and/or end=… (+limit/latest,
+  +repo/source-file for type-only queries). When end is present, type is an
+  optional pushed-down filter rather than a competing branch. :count is the
+  true type total when unfiltered even if limit truncates; returned-count
+  otherwise (contract §4)."
   [node {:keys [type end limit repo source-file latest? include-total?]
-         :or {include-total? true}}]
+         :or {include-total? true}
+         :as opts}]
+  (let [temporal (select-keys opts [:valid-as-of :system-as-of])]
   (cond
+    end
+    (let [end-id (if (uuid-shaped? end)
+                   (or (some-> (fetch-entity node end) :entity/name) end)
+                   end)
+          targets (distinct [end end-id])
+          n (long (or limit 100))
+          t (some-> type normalize-type)
+          projected (->> targets
+                         (mapcat
+                          (fn [target]
+                            (let [clauses (cond-> [(list '= 'ep target)]
+                                            t (conj (list '= 'hx/type t)))]
+                              (fxt/safe-q
+                               node
+                               (list '->
+                                     (hyperedge-from
+                                      '[xt/id hx/type hx/endpoints] temporal)
+                                     (list 'unnest '{:ep hx/endpoints})
+                                     (cons 'where clauses)
+                                     (list 'return 'xt/id)
+                                     (list 'order-by {:val 'xt/id :dir :asc})
+                                     (list 'limit n))))))
+                         (reduce (fn [by-id row]
+                                   (assoc by-id (:xt/id row) row)) {})
+                         vals
+                         (sort-by #(str (:xt/id %)))
+                         (take n))
+          docs (hydrate-hyperedge-window node projected temporal)
+          out (mapv #(dissoc % :xt/id) docs)]
+      {:hyperedges out :count (count out)})
+
     type
     (let [t (normalize-type type)
           clauses (cond-> [(list '= 'hx/type t)]
@@ -529,18 +581,21 @@
           selected (fxt/safe-q
                     node
                     (cons '->
-                          (cons (list 'from :hyperedges
-                                      (if bounded?
-                                        hyperedge-window-cols
-                                        '[*]))
+                          (cons (hyperedge-from
+                                 (if bounded?
+                                   hyperedge-window-cols
+                                   '[*])
+                                 temporal)
                                 query-tail)))
           docs (if bounded?
-                 (hydrate-hyperedge-window node selected)
+                 (hydrate-hyperedge-window node selected temporal)
                  selected)
           total (when include-total?
                   (if (or latest? repo source-file)
                     (count docs)
-                    (count (fxt/safe-q node (list '-> '(from :hyperedges [xt/id hx/type])
+                    (count (fxt/safe-q node (list '->
+                                                  (hyperedge-from
+                                                   '[xt/id hx/type] temporal)
                                                   (list 'where (list '= 'hx/type t)))))))
           prop-get (fn [d k kw-col]
                      (or (get d kw-col)
@@ -563,34 +618,7 @@
        :count (if (or (not include-total?) latest? repo source-file)
                 (count out)
                 total)
-       :count-exact? (boolean include-total?)})
-
-    end
-    (let [end-id (if (uuid-shaped? end)
-                   (or (some-> (fetch-entity node end) :entity/name) end)
-                   end)
-          targets (distinct [end end-id])
-          n (long (or limit 100))
-          projected (->> targets
-                         (mapcat
-                          (fn [target]
-                            (fxt/safe-q
-                             node
-                             (list '->
-                                   (list 'from :hyperedges '[xt/id hx/endpoints])
-                                   (list 'unnest '{:ep hx/endpoints})
-                                   (list 'where (list '= 'ep target))
-                                   (list 'return 'xt/id)
-                                   (list 'order-by {:val 'xt/id :dir :asc})
-                                   (list 'limit n)))))
-                         (reduce (fn [by-id row]
-                                   (assoc by-id (:xt/id row) row)) {})
-                         vals
-                         (sort-by #(str (:xt/id %)))
-                         (take n))
-          docs (hydrate-hyperedge-window node projected)
-          out (mapv #(dissoc % :xt/id) docs)]
-      {:hyperedges out :count (count out)})))
+       :count-exact? (boolean include-total?)}))))
 
 (defonce ^:private !hyperedge-query-cache (atom {}))
 

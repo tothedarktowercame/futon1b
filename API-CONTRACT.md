@@ -288,11 +288,11 @@ using `f1w/upsert-hyperedge-doc` (`futon1_write.clj:230-287`).
     keywords), `:hx/confidence` (number), `:hx/id`/`:id` (overrides minted
     id).
   - `:hx/valid-time` (or `:valid-time`) — optional; epoch-millis number,
-    numeric string, or ISO-8601 instant; coerced to `java.util.Date`
-    (`routes.clj:1031-1054`); unparseable degrades to nil (current-time
-    put). Stamped as the 3rd element of the put/delete op; **never stored in
-    the doc**. (futon1b v1 has no valid-time — replays stay primary-only
-    until cutover, per the dual-write design.)
+    numeric string, or ISO-8601 instant. The futon1b compatibility server
+    parses this strictly: an unparseable value is rejected rather than
+    silently becoming a current-time write. The instant is submitted as
+    XTDB2 `:valid-from` metadata for both puts and retractions and is
+    **never stored in the document**.
   - `:hx/op` (or `:op`) `"retract"` — delete instead of put
     (`routes.clj:1091, 1102-1104`).
 - **Id minting — stable**: unless `:hx/id` supplied, `hx-id = "hx:" +
@@ -322,10 +322,18 @@ because the tail is taken wholesale.
   only if the doc exists **and** has `:hx/id`; otherwise **404** `{:error
   "not found" :hx/id <id>}`.
 
-### GET /api/alpha/hyperedges?type=…&end=…&limit=…
+### GET /api/alpha/hyperedges?type=…&end=…&limit=…&as-of=…
 `app.clj:387-403`. Requires `type` **or** `end`, else **400** `{:error "type
-or end parameter required"}`. `limit` = int (unparseable ignored). Extra
-params with `type`: `repo`, `source-file`.
+or end parameter required"}`. `limit` = int (unparseable ignored). When both
+`end` and `type` are present they are conjunctive: endpoint membership is
+matched first with the type predicate pushed into the same bounded query.
+Extra params for type-only queries: `repo`, `source-file`.
+
+The futon1b compatibility server additionally accepts `as-of` (alias
+`valid-as-of`) and `system-as-of`, each as a strict ISO-8601 instant.
+They set the XTDB2 valid-time and system-time bases for both the bounded id
+query and subsequent document hydration. Omitting them returns the current
+projection. A malformed temporal parameter is rejected rather than ignored.
 - **type branch** → `routes/hyperedges-by-type` (`routes.clj:1150-1189`):
   index-only id lookup on `:hx/type` (15s query timeout), ids sorted by
   `str`, docs pulled lazily; `repo`/`source-file` filter against `:hx/props`
@@ -337,7 +345,8 @@ params with `type`: `repo`, `source-file`.
 - **end branch** → `routes/hyperedges-by-end` (`routes.clj:1215-1244`): if
   `end` is UUID-shaped, it is resolved via `:entity/id` → `:entity/name`
   first (`routes.clj:1195-1213`); then exact match against the flat
-  `:hx/endpoints` vector. Sorted by `:hx/id`, limit applied post-sort.
+  `:hx/endpoints` vector. An optional `type` filters `:hx/type` in the same
+  query. Sorted by `:hx/id`, limit applied before full-doc hydration.
   **200** `{:hyperedges [...] :count <returned-count>}`.
 
 ---

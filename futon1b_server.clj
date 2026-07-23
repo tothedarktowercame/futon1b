@@ -45,11 +45,14 @@
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
            [java.net InetSocketAddress URLDecoder]
            [java.nio.charset StandardCharsets]
+           [java.time Instant]
            [java.util.concurrent ArrayBlockingQueue Semaphore ThreadPoolExecutor
             ThreadPoolExecutor$AbortPolicy TimeUnit])
   (:gen-class))
 
 (defonce !node (atom nil))
+
+(declare parse-instant)
 
 ;; ---------------------------------------------------------------------------
 ;; Hyperedge write path.
@@ -101,10 +104,15 @@
   [node payload]
   (let [retract? (= "retract" (some-> (or (:hx/op payload) (:op payload))
                                       name str/lower-case))
+        valid-from (some-> (or (:hx/valid-time payload) (:valid-time payload))
+                           parse-instant)
         doc (xf/transform-doc (build-hyperedge-doc payload))
         id (:xt/id doc)]
     (if retract?
-      (do (xt/execute-tx node [[:delete-docs :hyperedges id]])
+      (do (xt/execute-tx node [[:delete-docs
+                                (cond-> {:from :hyperedges}
+                                  valid-from (assoc :valid-from valid-from))
+                                id]])
           (graph/invalidate-hyperedge-query-cache!)
           {:ok true :hx/id id :retracted? true})
       ;; No-op guard: compare against stored (project the doc's own keys —
@@ -119,9 +127,9 @@
             ;; nil-valued keys are stored as absent (XTDB 2 semantics)
             doc-cmp (into {} (filter (comp some? val)) doc)
             stored-cmp (when stored (into {} (filter (comp some? val)) stored))]
-        (if (= doc-cmp stored-cmp)
+        (if (and (nil? valid-from) (= doc-cmp stored-cmp))
           {:ok true :hx/id id :no-op? true}
-          (let [res (ingest/put-doc-with-rescue! node :hyperedges doc nil)]
+          (let [res (ingest/put-doc-with-rescue! node :hyperedges doc nil valid-from)]
             (if (present? node id)
               (do (graph/invalidate-hyperedge-query-cache!)
                   {:ok true :hx/id id :rescue (when (keyword? res) res)})
@@ -186,6 +194,21 @@
                   (when (and k v)
                     [k (URLDecoder/decode v "UTF-8")]))))
         (some-> (.getQuery (.getRequestURI ex)) (str/split #"&"))))
+
+(defn- parse-instant
+  [value]
+  (when (some? value)
+    (try
+      (cond
+        (instance? Instant value) value
+        (number? value) (Instant/ofEpochMilli (long value))
+        (re-matches #"-?\d+" (str value))
+        (Instant/ofEpochMilli (Long/parseLong (str value)))
+        :else (Instant/parse (str value)))
+      (catch Throwable t
+        (throw (ex-info "invalid temporal instant"
+                        {:value value :expected :epoch-millis-or-iso-8601}
+                        t))))))
 
 (defn- handler ^HttpHandler [route-fn]
   (reify HttpHandler
@@ -455,6 +478,12 @@
                                               :limit (parse-limit p)
                                               :repo (p "repo")
                                               :source-file (p "source-file")
+                                              :valid-as-of
+                                              (parse-instant
+                                               (or (p "valid-as-of")
+                                                   (p "as-of")))
+                                              :system-as-of
+                                              (parse-instant (p "system-as-of"))
                                               :include-total? (not= "false" (p "include-total"))
                                               :latest? (= "true" (p "latest"))}))))
       (respond! ex 400 (pr-str {:error "type or end parameter required"})))))
