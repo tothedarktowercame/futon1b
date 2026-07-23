@@ -40,7 +40,9 @@
         REL (str base "/api/alpha/relation")
         RELS (str base "/api/alpha/relations")
         HX (str base "/api/alpha/hyperedge")
-        HXS (str base "/api/alpha/hyperedges")]
+        HXS (str base "/api/alpha/hyperedges")
+        EV (str base "/api/alpha/evidence")
+        MEMORY-PROJECTION (str base "/api/alpha/memory/projection")]
 
     (println "— A3 entities: write path + gates")
     (let [r (req "POST" ENT {:name "Widget"} ph)]
@@ -258,6 +260,17 @@
               r))
     (let [r (req "GET" (str HXS "?end=a"))]
       (check! "?end=a -> 2 across types" (= 2 (:count (:body r))) r))
+    (let [r (req "GET" (str HXS "?end=a&type=test/edge"))]
+      (check! "?end=a&type=test/edge is conjunctive"
+              (and (= 1 (:count (:body r)))
+                   (= :test/edge
+                      (get-in r [:body :hyperedges 0 :hx/type])))
+              r))
+    (let [r (req "GET" (str HXS "?end=a&type=absent/edge"))]
+      (check! "?end=a&type=absent/edge returns empty"
+              (and (zero? (:count (:body r)))
+                   (empty? (get-in r [:body :hyperedges])))
+              r))
     (let [r (req "GET" (str HXS "?end=a&limit=1"))]
       (check! "?end limit is pushed down before full-doc hydration"
               (and (= 1 (:count (:body r)))
@@ -265,6 +278,99 @@
               r))
     (let [r (req "GET" HXS)]
       (check! "no params -> 400" (= 400 (:status r)) r))
+    (println "— bounded multi-endpoint memory projection")
+    (doseq [[memory-id hook]
+            [["memory-batch-1" "First hook"]
+             ["memory-batch-2" "Second hook"]]]
+      (req "POST" EV
+           {:evidence/id memory-id
+            :evidence/type :memory
+            :evidence/claim-type :observation
+            :evidence/author "memory-test"
+            :evidence/session-id "memory-session"
+            :evidence/at "2026-07-23T10:00:00Z"
+            :evidence/body {:hook hook :full-body "must not cross projection"}
+            :evidence/tags [:memory]}
+           ph))
+    (doseq [edge
+            [{:hx/id "hx:memory-batch-1"
+              :hx/type :memory/assert
+              :hx/endpoints ["memory-batch-1" "pattern/a" "pattern/b"]
+              :hx/props {:domain :mathematics
+                         :state :current
+                         :attachment-status :reviewed
+                         :roles {:entry "memory-batch-1"
+                                 :patterns ["pattern/a" "pattern/b"]}}}
+             {:hx/id "hx:memory-batch-2"
+              :hx/type :memory/assert
+              :hx/endpoints ["memory-batch-2" "pattern/a"]
+              :hx/props {:domain :mathematics
+                         :state :current
+                         :attachment-status :reviewed
+                         :roles {:entry "memory-batch-2"
+                                 :patterns ["pattern/a"]}}}]]
+      (req "POST" HX edge ph))
+    (let [r (req "POST" MEMORY-PROJECTION
+                 {:endpoints ["pattern/a" "pattern/b" "pattern/absent"]
+                  :limit 9}
+                 {"x-trace-id" "memory-test-trace"})
+          groups (get-in r [:body :groups])
+          revision (get-in r [:body :temporal-basis :projection-revision])]
+      (check! "one bounded projection groups every requested endpoint"
+              (and (= 200 (:status r))
+                   (= ["pattern/a" "pattern/b" "pattern/absent"]
+                      (mapv :endpoint groups))
+                   (= [2 1 0] (mapv (comp count :components) groups))
+                   (= 2 (get-in r [:body :audit :distinct-edge-count]))
+                   (= 2 (get-in r [:body :audit
+                                   :hydrated-component-count]))
+                   (= "memory-test-trace" (get-in r [:body :trace-id])))
+              r)
+      (check! "projection sends only compact evidence body fields"
+              (every?
+               #(= #{:hook}
+                   (set (keys (get-in % [:entry :evidence/body]))))
+               (mapcat :components (take 2 groups)))
+              groups)
+      (check! "projection reports named server stages"
+              (and (pos-int? revision)
+                   (every? number? (vals (get-in r [:body :timing]))))
+              (:body r)))
+    (req "POST" HX
+         {:hx/id "hx:memory-batch-1"
+          :hx/type :memory/assert
+          :hx/endpoints ["memory-batch-1" "pattern/a" "pattern/c"]
+          :hx/props {:domain :mathematics
+                     :state :current
+                     :attachment-status :reviewed
+                     :roles {:entry "memory-batch-1"
+                             :patterns ["pattern/a" "pattern/c"]}}}
+         ph)
+    (let [r (req "POST" MEMORY-PROJECTION
+                 {:endpoints ["pattern/a" "pattern/b" "pattern/c"] :limit 9}
+                 nil)]
+      (check! "verified memory overwrite synchronously advances projection"
+              (= [2 0 1]
+                 (mapv (comp count :components) (get-in r [:body :groups])))
+              r))
+    (req "POST" HX
+         {:hx/id "hx:memory-batch-1"
+          :hx/type :memory/assert
+          :hx/endpoints ["memory-batch-1" "pattern/a" "pattern/c"]
+          :hx/op "retract"}
+         ph)
+    (let [r (req "POST" MEMORY-PROJECTION
+                 {:endpoints ["pattern/a" "pattern/c"] :limit 9}
+                 nil)]
+      (check! "memory retraction synchronously removes projected component"
+              (= [1 0]
+                 (mapv (comp count :components) (get-in r [:body :groups])))
+              r))
+    (let [too-many (mapv #(str "pattern/" %) (range 21))
+          r (req "POST" MEMORY-PROJECTION
+                 {:endpoints too-many :limit 3} nil)]
+      (check! "projection rejects an oversized endpoint set"
+              (= 400 (:status r)) r))
     (let [r (req "POST" (str base "/api/alpha/graph/inhabited")
                  {:bindings [{:id :entity :kind :entity :type :gadget}
                              {:id :edge :kind :hyperedge :type :test/edge
