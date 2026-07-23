@@ -57,6 +57,45 @@
          clojure.lang.ExceptionInfo #"invalid temporal instant"
          (#'server/parse-instant "not-an-instant")))))
 
+(deftest current-projection-rebuilds-after-out-of-band-write
+  (let [endpoint "pattern/projection-watermark"
+        memory-id "e-projection-watermark"
+        edge-id "hx-projection-watermark"]
+    ;; Establish an indexed snapshot, then deliberately write below the server
+    ;; mutation hook. The next current read must notice XTDB progress and
+    ;; rebuild rather than serving the stale snapshot.
+    (graph/memory-projection-components
+     *node* {:endpoints [endpoint] :limit 3})
+    (is (= :ok
+           (graph/put-verified!
+            *node* :evidence
+            {:evidence/id memory-id
+             :evidence/type :memory
+             :evidence/claim-type :observation
+             :evidence/author "projection-watermark-test"
+             :evidence/session-id "projection-watermark-session"
+             :evidence/at "2026-07-23T12:00:00Z"
+             :evidence/body {:hook "Projection watermark hook"}
+             :evidence/tags [:memory]})))
+    (is (= :ok
+           (graph/put-verified!
+            *node* :hyperedges
+            {:hx/id edge-id
+             :hx/type :memory/assert
+             :hx/endpoints [memory-id endpoint]
+             :hx/props {:domain :mathematics
+                        :state :current
+                        :attachment-status :reviewed
+                        :roles {:entry memory-id
+                                :patterns [endpoint]}}})))
+    (let [result
+          (graph/memory-projection-components
+           *node* {:endpoints [endpoint] :limit 3})]
+      (is (= [memory-id]
+             (mapv #(get-in % [:entry :evidence/id])
+                   (get-in result [:groups 0 :components]))))
+      (is (>= (get-in result [:temporal-basis :projection-revision]) 2)))))
+
 (defn -main [& _]
   (with-open [node (xtn/start-node)]
     (binding [*node* node]

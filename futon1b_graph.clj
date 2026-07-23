@@ -664,7 +664,20 @@
 (def ^:private max-memory-projection-endpoints 20)
 (def ^:private max-memory-projection-limit 100)
 (def ^:private max-memory-projection-index-components 5000)
+(def ^:private max-memory-projection-build-attempts 5)
 (defonce ^:private !memory-projection-indexes (atom {}))
+
+(defn- node-watermark
+  "Return the XTDB progress coordinates that delimit a coherent current read.
+
+  A node can accept queries while replaying its durable log.  An index built
+  across two different coordinates is not a current projection, even when
+  every individual query succeeded."
+  [node]
+  (select-keys (xt/status node)
+               [:latest-completed-txs
+                :latest-submitted-msg-ids
+                :latest-processed-msg-ids]))
 
 (defn- any-equals
   [binding values]
@@ -743,7 +756,7 @@
      (map? body) (assoc :evidence/body (select-keys body [:hook])))})
 
 (defn- build-memory-projection-index
-  [revision components]
+  [revision components source-watermark]
   (let [components (if (map? components) (vals components) components)
         components-by-id (into {} (map (juxt :hyperedge-id identity)) components)
         by-endpoint
@@ -762,6 +775,7 @@
               {}))]
     {:revision revision
      :built-at (str (java.time.Instant/now))
+     :source-watermark source-watermark
      :components-by-id components-by-id
      :by-endpoint by-endpoint}))
 
@@ -771,45 +785,71 @@
   This is a materialized projection, not a TTL cache: successful memory/assert
   puts and retractions advance it synchronously. Historical reads bypass it."
   [node]
-  (let [started (System/nanoTime)
-        selected+
-        (fxt/safe-q
-         node
-         (list '->
-               '(from :hyperedges [xt/id hx/type])
-               (list 'where (list '= 'hx/type :memory/assert))
-               (list 'return 'xt/id)
-               (list 'order-by {:val 'xt/id :dir :asc})
-               (list 'limit (inc max-memory-projection-index-components))))]
-    (when (> (count selected+) max-memory-projection-index-components)
-      (throw (gates/layered-error
-              0 :memory-projection-index-bound-exceeded
-              {:maximum max-memory-projection-index-components
-               :observed-at-least (count selected+)})))
-    (let [rows (hydrate-memory-components node (mapv :xt/id selected+) {})
-          components (mapv hydrated-row->component rows)
-          prior-revision (get-in @!memory-projection-indexes [node :revision] 0)
-          index (build-memory-projection-index (inc prior-revision) components)]
-      (swap! !memory-projection-indexes assoc node index)
-      {:revision (:revision index)
-       :component-count (count components)
-       :endpoint-count (count (:by-endpoint index))
-       :build-ms (elapsed-ms started)})))
+  (locking !memory-projection-indexes
+    (let [started (System/nanoTime)]
+      (loop [attempt 1]
+        (let [source-watermark (node-watermark node)
+              selected+
+              (fxt/safe-q
+               node
+               (list '->
+                     '(from :hyperedges [xt/id hx/type])
+                     (list 'where (list '= 'hx/type :memory/assert))
+                     (list 'return 'xt/id)
+                     (list 'order-by {:val 'xt/id :dir :asc})
+                     (list 'limit
+                           (inc max-memory-projection-index-components))))]
+          (when (> (count selected+) max-memory-projection-index-components)
+            (throw (gates/layered-error
+                    0 :memory-projection-index-bound-exceeded
+                    {:maximum max-memory-projection-index-components
+                     :observed-at-least (count selected+)})))
+          (let [rows (hydrate-memory-components
+                      node (mapv :xt/id selected+) {})
+                components (mapv hydrated-row->component rows)
+                observed-watermark (node-watermark node)]
+            (if (= source-watermark observed-watermark)
+              (let [prior-revision
+                    (get-in @!memory-projection-indexes [node :revision] 0)
+                    index
+                    (build-memory-projection-index
+                     (inc prior-revision) components source-watermark)]
+                (swap! !memory-projection-indexes assoc node index)
+                {:revision (:revision index)
+                 :component-count (count components)
+                 :endpoint-count (count (:by-endpoint index))
+                 :build-attempts attempt
+                 :build-ms (elapsed-ms started)})
+              (if (< attempt max-memory-projection-build-attempts)
+                (recur (inc attempt))
+                (throw (gates/layered-error
+                        0 :memory-projection-source-not-quiescent
+                        {:attempts attempt
+                         :source-watermark source-watermark
+                         :observed-watermark observed-watermark}))))))))))
 
 (defn refresh-memory-projection-component!
   "Point-refresh one current memory/assert component after its verified put."
   [node edge-id]
   (when (contains? @!memory-projection-indexes node)
-    (let [row (first (hydrate-memory-components node [edge-id] {}))
-          component (when (= :memory/assert (:hx/type row))
-                      (hydrated-row->component row))]
-      (swap! !memory-projection-indexes
-             update node
-             (fn [{:keys [revision components-by-id]}]
-               (build-memory-projection-index
-                (inc revision)
-                (cond-> (dissoc components-by-id edge-id)
-                  component (assoc edge-id component)))))))
+    (locking !memory-projection-indexes
+      (let [source-watermark (node-watermark node)
+            row (first (hydrate-memory-components node [edge-id] {}))
+            component (when (= :memory/assert (:hx/type row))
+                        (hydrated-row->component row))
+            observed-watermark (node-watermark node)]
+        (if (= source-watermark observed-watermark)
+          (swap! !memory-projection-indexes
+                 update node
+                 (fn [{:keys [revision components-by-id]}]
+                   (build-memory-projection-index
+                    (inc revision)
+                    (cond-> (dissoc components-by-id edge-id)
+                      component (assoc edge-id component))
+                    observed-watermark)))
+          ;; Another transaction crossed the point-refresh window. Rebuild the
+          ;; whole bounded projection rather than certifying a mixed snapshot.
+          (initialize-memory-projection! node)))))
   nil)
 
 (defn- validate-memory-projection-request
@@ -925,7 +965,9 @@
     (let [started (System/nanoTime)
           endpoints (validate-memory-projection-request
                      {:endpoints endpoints :limit limit})
-          _ (when-not (contains? @!memory-projection-indexes node)
+          _ (when-not (= (node-watermark node)
+                         (get-in @!memory-projection-indexes
+                                 [node :source-watermark]))
               (initialize-memory-projection! node))
           index (get @!memory-projection-indexes node)
           lookup-start (System/nanoTime)
