@@ -368,3 +368,64 @@ the failure. A top-level IOException catch would not have prevented this OOM.
   GET. Investigate any recurrence of the transient zero-duration XTDB
   `RuntimeException` seen during controlled redelivery; request logs now retain
   the exception message for that purpose.
+
+## Third episode — malformed EDN producer identified and traced (2026-07-23)
+
+The later `[boundary] I-evidence-per-turn VIOLATION: persistence rejected`
+lines were not a Futon1b availability failure. Main and independent health
+remained 200, PSI was zero, and the Futon1b request journal recorded immediate
+500 responses with:
+
+```text
+class=java.lang.RuntimeException message="Invalid token: :"
+```
+
+The requests initially carried no trace header, so the rejected body was gone
+after parsing failed. The retry cadence nevertheless matched two durable Emacs
+outbox records exactly. They identify the current producer as `codex-4`
+`turn-commits` evidence in session
+`019f8b63-a009-79e0-9a22-e7402848c822`:
+
+- `emacs-7a24bbc7c4bf28eaafe208f93a3fbad8` (72 attempts when inspected);
+- `emacs-68256967396ff3f9d4fc583a9e19541b` (4 attempts when inspected).
+
+This is conclusive producer attribution, but not conclusive malformed-field
+attribution. The preserved JSON records are valid, and reconstructing them
+through the current checked-out normalizer produces readable EDN. The serving
+Futon3c JVM predates several same-day source changes and retains its original
+backend method body, so naming a specific value from the vanished wire body
+would exceed the evidence.
+
+At 22:38 BST both exact records were moved intact from the live pending queue
+to its private `failed/` directory. Pending is zero and failed is two. This is
+reversible containment, not acknowledgement or deletion: it stops the
+deterministic retry stream while preserving both payloads for a controlled
+post-deployment replay.
+
+Futon3c commit `0367415` (`Trace and preflight evidence appends`) closes that
+observability gap:
+
+- every Futon1b append carries stable
+  `x-trace-id: evidence-append:<evidence-id>`;
+- the producer serializes once and proves that Futon1b's EDN reader can consume
+  the exact wire representation before opening a socket;
+- an unreadable payload is a terminal `:store-serialization`/HTTP 400, not a
+  retryable store 503, so the outbox cannot amplify a deterministic producer
+  defect;
+- the boundary violation names trace id, evidence id, author, session, event,
+  HTTP status, and structural invalid-EDN paths while never logging the
+  evidence body;
+- both success and failure compatibility responses expose the trace id.
+
+Focused validation is 20 tests / 85 assertions for the backend and boundary,
+plus the transport status test (4 assertions), all passing. `check-parens.el`
+is clean and clj-kondo reports zero errors/warnings. The broad HTTP namespace
+still has the same seven unrelated expectation drifts recorded above.
+
+Deployment remains tied to the next safe Futon3c lifecycle: the existing
+backend object cannot acquire a recompiled record method in place, and the
+restart-safety invariant forbids restarting the Agency JVM from its own routed
+agent session. After a separate-session restart, replay one parked record and
+require either a 2xx/duplicate acknowledgement or a terminal diagnostic whose
+trace id appears in both the boundary and Futon1b journals. Continue the
+week-long vitality/latency monitoring independently.
