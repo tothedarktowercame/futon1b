@@ -97,16 +97,20 @@
 (defn put-doc-with-rescue!
   "Put one doc, escalating through rescue transforms on failure.
   Returns :ok, :rescued-1, :rescued-2, or {:error msg :id xt-id}."
-  [node table doc shape-log]
-  (letfn [(try-put [d] (try (xt/execute-tx node [[:put-docs table d]]) true
-                            (catch Exception _ false)))]
-    (cond
-      (try-put doc) :ok
-      (try-put (xf/stringify-risky-nils doc shape-log)) :rescued-1
-      (try-put (xf/stringify-deep-colls
-                 (xf/stringify-risky-nils doc nil) shape-log)) :rescued-2
-      :else {:error "unrescuable — failed all rescue stages"
-             :id (:xt/id doc)})))
+  ([node table doc shape-log]
+   (put-doc-with-rescue! node table doc shape-log nil))
+  ([node table doc shape-log valid-from]
+   (let [table-spec (cond-> {:into table}
+                      valid-from (assoc :valid-from valid-from))]
+     (letfn [(try-put [d] (try (xt/execute-tx node [[:put-docs table-spec d]]) true
+                               (catch Exception _ false)))]
+       (cond
+         (try-put doc) :ok
+         (try-put (xf/stringify-risky-nils doc shape-log)) :rescued-1
+         (try-put (xf/stringify-deep-colls
+                    (xf/stringify-risky-nils doc nil) shape-log)) :rescued-2
+         :else {:error "unrescuable — failed all rescue stages"
+                :id (:xt/id doc)})))))
 
 (defn rescue-batch!
   "Per-doc retry of a failed batch. Returns {:ok n :rescued-1 n :rescued-2 n
