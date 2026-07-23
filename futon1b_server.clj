@@ -108,33 +108,55 @@
                            parse-instant)
         doc (xf/transform-doc (build-hyperedge-doc payload))
         id (:xt/id doc)]
-    (if retract?
-      (do (xt/execute-tx node [[:delete-docs
-                                (cond-> {:from :hyperedges}
-                                  valid-from (assoc :valid-from valid-from))
-                                id]])
-          (graph/invalidate-hyperedge-query-cache!)
-          {:ok true :hx/id id :retracted? true})
-      ;; No-op guard: compare against stored (project the doc's own keys —
-      ;; [*] binds nothing in XTDB 2.0.0).
-      (let [stored (first (fxt/safe-q node
-                                (list '-> (list 'from :hyperedges
-                                                (into ['xt/id]
-                                                      (comp (remove #{:xt/id})
-                                                            (map #(symbol (namespace %) (name %))))
-                                                      (keys doc)))
-                                      (list 'where (list '= 'xt/id id)))))
-            ;; nil-valued keys are stored as absent (XTDB 2 semantics)
-            doc-cmp (into {} (filter (comp some? val)) doc)
-            stored-cmp (when stored (into {} (filter (comp some? val)) stored))]
-        (if (and (nil? valid-from) (= doc-cmp stored-cmp))
-          {:ok true :hx/id id :no-op? true}
-          (let [res (ingest/put-doc-with-rescue! node :hyperedges doc nil valid-from)]
-            (if (present? node id)
-              (do (graph/invalidate-hyperedge-query-cache!)
-                  {:ok true :hx/id id :rescue (when (keyword? res) res)})
-              {:ok false :hx/id id
-               :error "verified put: doc absent after rescue ladder"})))))))
+    (letfn [(mutate! []
+              (if retract?
+                (do (xt/execute-tx node [[:delete-docs
+                                          (cond-> {:from :hyperedges}
+                                            valid-from
+                                            (assoc :valid-from valid-from))
+                                          id]])
+                    (graph/invalidate-hyperedge-query-cache!)
+                    (when (= :memory/assert (:hx/type doc))
+                      (graph/refresh-memory-projection-component! node id))
+                    {:ok true :hx/id id :retracted? true})
+                ;; No-op guard: compare against stored (project the doc's own
+                ;; keys — [*] binds nothing in XTDB 2.0.0).
+                (let [stored
+                      (first
+                       (fxt/safe-q
+                        node
+                        (list '->
+                              (list 'from :hyperedges
+                                    (into ['xt/id]
+                                          (comp
+                                           (remove #{:xt/id})
+                                           (map #(symbol (namespace %)
+                                                         (name %))))
+                                          (keys doc)))
+                              (list 'where (list '= 'xt/id id)))))
+                      ;; nil-valued keys are stored as absent (XTDB 2 semantics)
+                      doc-cmp (into {} (filter (comp some? val)) doc)
+                      stored-cmp
+                      (when stored
+                        (into {} (filter (comp some? val)) stored))]
+                  (if (and (nil? valid-from) (= doc-cmp stored-cmp))
+                    {:ok true :hx/id id :no-op? true}
+                    (let [res
+                          (ingest/put-doc-with-rescue!
+                           node :hyperedges doc nil valid-from)]
+                      (if (present? node id)
+                        (do
+                          (graph/invalidate-hyperedge-query-cache!)
+                          (when (= :memory/assert (:hx/type doc))
+                            (graph/refresh-memory-projection-component! node id))
+                          {:ok true :hx/id id
+                           :rescue (when (keyword? res) res)})
+                        {:ok false :hx/id id
+                         :error
+                         "verified put: doc absent after rescue ladder"}))))))]
+      (if (= :memory/assert (:hx/type doc))
+        (graph/with-memory-projection-mutation node mutate!)
+        (mutate!)))))
 
 ;; ---------------------------------------------------------------------------
 ;; HTTP plumbing.
@@ -210,39 +232,52 @@
                         {:value value :expected :epoch-millis-or-iso-8601}
                         t))))))
 
+(defn- request-trace-id
+  [^HttpExchange ex]
+  (some-> (.getFirst (.getRequestHeaders ex) "x-trace-id")
+          (str/replace #"[^A-Za-z0-9._:-]" "_")
+          (#(subs % 0 (min 128 (count %))))
+          not-empty))
+
 (defn- handler ^HttpHandler [route-fn]
   (reify HttpHandler
     (handle [_ ex]
       (let [started (System/nanoTime)
             method (.getRequestMethod ex)
-            uri (str (.getRequestURI ex))]
-        (println (format "[futon1b-request] start method=%s uri=%s" method uri))
+            uri (str (.getRequestURI ex))
+            trace-id (or (request-trace-id ex) "-")]
+        (println (format "[futon1b-request] start method=%s uri=%s trace-id=%s"
+                         method uri trace-id))
         (flush)
         (binding [*json-response?* (wants-json? ex)]
           (try
             (route-fn ex)
-            (println (format "[futon1b-request] end method=%s uri=%s elapsed-ms=%d outcome=ok"
-                             method uri (quot (- (System/nanoTime) started) 1000000)))
+            (println (format "[futon1b-request] end method=%s uri=%s trace-id=%s elapsed-ms=%d outcome=ok"
+                             method uri trace-id
+                             (quot (- (System/nanoTime) started) 1000000)))
             (catch java.io.IOException e
               ;; A client may abandon a slow request before its response is
               ;; ready. The response write then throws; attempting a second
               ;; 500 response on the same closed exchange only throws again.
-              (println (format "[futon1b-request] end method=%s uri=%s elapsed-ms=%d outcome=client-disconnected class=%s"
-                               method uri (quot (- (System/nanoTime) started) 1000000)
+              (println (format "[futon1b-request] end method=%s uri=%s trace-id=%s elapsed-ms=%d outcome=client-disconnected class=%s"
+                               method uri trace-id
+                               (quot (- (System/nanoTime) started) 1000000)
                                (.getName (class e))))
               (.close ^HttpExchange ex))
             (catch Exception e
               ;; Layered gate errors keep futon1a's envelope + status mapping
               ;; (API-CONTRACT §0); anything else is the generic 500.
               (let [[status body] (gates/error->response e)]
-                (println (format "[futon1b-request] end method=%s uri=%s elapsed-ms=%d outcome=error status=%d class=%s message=%s"
-                                 method uri (quot (- (System/nanoTime) started) 1000000)
+                (println (format "[futon1b-request] end method=%s uri=%s trace-id=%s elapsed-ms=%d outcome=error status=%d class=%s message=%s"
+                                 method uri trace-id
+                                 (quot (- (System/nanoTime) started) 1000000)
                                  status (.getName (class e)) (pr-str (.getMessage e))))
                 (try
                   (respond! ex status body)
                   (catch java.io.IOException write-error
-                    (println (format "[futon1b-request] error-response-abandoned method=%s uri=%s class=%s"
-                                     method uri (.getName (class write-error))))
+                    (println (format "[futon1b-request] error-response-abandoned method=%s uri=%s trace-id=%s class=%s"
+                                     method uri trace-id
+                                     (.getName (class write-error))))
                     (.close ^HttpExchange ex)))))
             (finally (flush))))))))
 
@@ -523,6 +558,29 @@
     (with-expensive-read!
       ex #(respond! ex 200 (pr-str (zm/memory-search @!node opts))))))
 
+(defn- memory-projection-route
+  "POST a bounded read-only multi-endpoint memory projection.
+
+  This is POST because the bounded endpoint vector and temporal basis are a
+  structured query, not because it mutates the store."
+  [^HttpExchange ex]
+  (if (= "POST" (.getRequestMethod ex))
+    (let [payload (parse-payload ex)
+          opts {:endpoints (:endpoints payload)
+                :limit (or (:limit payload) 10)
+                :valid-as-of
+                (parse-instant (or (:valid-as-of payload)
+                                   (:as-of payload)))
+                :system-as-of
+                (parse-instant (:system-as-of payload))}]
+      (with-expensive-read!
+        ex
+        #(respond! ex 200
+                   (cond-> (graph/memory-projection-components @!node opts)
+                     (request-trace-id ex)
+                     (assoc :trace-id (request-trace-id ex))))))
+    (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
+
 (defn- text-search-route
   "GET /api/alpha/evidence/text-search?q=…&author=&session-id=&since=&before=
    &include-ephemeral=&limit= — D1 sidecar search (candidates + re-check).
@@ -591,6 +649,10 @@
 (defn start-server! [{:keys [store-dir port health-port node]}]
   (gates/seed-mission-contract!)
   (reset! !node (or node (zm/open-store store-dir)))
+  ;; Build the coherent current-memory projection before accepting traffic.
+  ;; A failed/bounded build is a startup failure, never a partially warm route.
+  (println "[memory-projection] current index"
+           (pr-str (graph/initialize-memory-projection! @!node)))
   ;; D1 sidecar: open/create the FTS5 db beside the store, then catch up in
   ;; the background (first boot = full build; steady state = the tail since
   ;; last-at). Failures here must not block serving.
@@ -631,6 +693,8 @@
     (.createContext server "/api/alpha/census" (handler census-route))
     (.createContext server "/api/alpha/types" (handler types-route))
     (.createContext server "/api/alpha/memory/search" (handler memory-search-route))
+    (.createContext server "/api/alpha/memory/projection"
+                    (handler memory-projection-route))
     (.setExecutor server executor)
     (when health-server
       (.createContext health-server "/health" (handler health))

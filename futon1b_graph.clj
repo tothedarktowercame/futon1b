@@ -83,6 +83,10 @@
         (string? t) (keyword t)
         :else nil))
 
+(defn- elapsed-ms
+  [started-ns]
+  (/ (double (- (System/nanoTime) started-ns)) 1000000.0))
+
 (defn types-mutate!
   "POST /types/parent and /types/merge (body-only penholder — contract §8).
   op = :parent | :merge."
@@ -141,7 +145,13 @@
 
 (def ^:private retractable-tables #{:entities :hyperedges})
 
-(declare invalidate-hyperedge-query-cache!)
+(declare invalidate-hyperedge-query-cache!
+         refresh-memory-projection-component!)
+
+(defn with-memory-projection-mutation
+  "Serialize a store mutation and its projection refresh for one node."
+  [node f]
+  (locking node (f)))
 
 (defn retract-documents!
   "Atomically retract entity/hyperedge documents after validating the whole
@@ -168,19 +178,25 @@
                          {:table table :id id})))
                distinct
                vec)]
-      (xt/execute-tx node
-                     (mapv (fn [{:keys [table id]}]
-                             [:delete-docs table id])
-                           documents))
-      (let [remaining (filterv (fn [{:keys [table id]}]
-                                 (fxt/present? node table id))
-                               documents)]
-        (when (seq remaining)
-          (throw (gates/layered-error 0 :postcommit-retraction-failed
-                                      {:remaining remaining}))))
-      (when (some #(= :hyperedges (:table %)) documents)
-        (invalidate-hyperedge-query-cache!))
-      {:ok true :count (count documents) :documents documents})))
+      (with-memory-projection-mutation
+        node
+        (fn []
+          (xt/execute-tx node
+                         (mapv (fn [{:keys [table id]}]
+                                 [:delete-docs table id])
+                               documents))
+          (let [remaining (filterv (fn [{:keys [table id]}]
+                                     (fxt/present? node table id))
+                                   documents)]
+            (when (seq remaining)
+              (throw (gates/layered-error 0 :postcommit-retraction-failed
+                                          {:remaining remaining}))))
+          (when (some #(= :hyperedges (:table %)) documents)
+            (invalidate-hyperedge-query-cache!))
+          (doseq [{:keys [table id]} documents
+                  :when (= :hyperedges table)]
+            (refresh-memory-projection-component! node id))
+          {:ok true :count (count documents) :documents documents})))))
 
 (defn entity-by-external
   "GET /api/alpha/entity?source=…&external-id=… (contract §5): both params
@@ -644,6 +660,303 @@
             (reset! !hyperedge-query-cache {}))
           (swap! !hyperedge-query-cache assoc cache-key result)
           result)))))
+
+(def ^:private max-memory-projection-endpoints 20)
+(def ^:private max-memory-projection-limit 100)
+(def ^:private max-memory-projection-index-components 5000)
+(defonce ^:private !memory-projection-indexes (atom {}))
+
+(defn- any-equals
+  [binding values]
+  (if (= 1 (count values))
+    (list '= binding (first values))
+    (cons 'or (map #(list '= binding %) values))))
+
+(defn- hydrate-memory-components
+  "Hydrate selected ids through bounded indexed point reads.
+
+  XTDB 2.1 turns both OR-filtered `[ * ]` queries and a rel/from join into
+  additional table scans on the live corpus. Point predicates use the fast id
+  path; the process-wide query semaphore keeps their concurrency bounded."
+  [node edge-ids temporal]
+  (if (seq edge-ids)
+    (->> edge-ids
+         (partition-all 4)
+         (mapcat
+          (fn [batch]
+            (->> batch
+                 (mapv
+                  (fn [edge-id]
+                    (future
+                      (when-let [edge (fetch-hyperedge-doc node edge-id temporal)]
+                        (let [memory-id
+                              (get-in edge [:hx/props :roles :entry])
+                              entry
+                              (when (string? memory-id)
+                                (fxt/q1
+                                 node
+                                 (list '->
+                                       '(from :evidence [*])
+                                       (list 'where
+                                             (list '= 'xt/id memory-id)))))]
+                          (when entry
+                            {:hyperedge-id edge-id
+                             :hx/type (:hx/type edge)
+                             :hx/endpoints (:hx/endpoints edge)
+                             :hx/props (:hx/props edge)
+                             :memory-id memory-id
+                             :evidence/id (:evidence/id entry)
+                             :evidence/type (:evidence/type entry)
+                             :evidence/claim-type
+                             (:evidence/claim-type entry)
+                             :evidence/author (:evidence/author entry)
+                             :evidence/session-id
+                             (:evidence/session-id entry)
+                             :evidence/body (:evidence/body entry)}))))))
+                 (mapv deref))))
+         (keep identity)
+         vec)
+    []))
+
+(defn- hydrated-row->component
+  [{:keys [hyperedge-id]
+    hyperedge-type :hx/type
+    hyperedge-endpoints :hx/endpoints
+    hyperedge-props :hx/props
+    evidence-id :evidence/id
+    evidence-type :evidence/type
+    claim-type :evidence/claim-type
+    author :evidence/author
+    session-id :evidence/session-id
+    body :evidence/body}]
+  {:hyperedge-id hyperedge-id
+   :edge {:hx/id hyperedge-id
+          :hx/type hyperedge-type
+          :hx/endpoints hyperedge-endpoints
+          :hx/props hyperedge-props}
+   :entry
+   (cond-> {:evidence/id evidence-id
+            :evidence/type evidence-type
+            :evidence/claim-type claim-type
+            :evidence/author author
+            :evidence/session-id session-id}
+     (map? body) (assoc :evidence/body (select-keys body [:hook])))})
+
+(defn- build-memory-projection-index
+  [revision components]
+  (let [components (if (map? components) (vals components) components)
+        components-by-id (into {} (map (juxt :hyperedge-id identity)) components)
+        by-endpoint
+        (->> components
+             (reduce
+              (fn [index component]
+                (reduce (fn [index' endpoint]
+                          (update index' endpoint (fnil conj []) component))
+                        index
+                        (get-in component [:edge :hx/endpoints])))
+              {})
+             (reduce-kv
+              (fn [index endpoint endpoint-components]
+                (assoc index endpoint
+                       (vec (sort-by :hyperedge-id endpoint-components))))
+              {}))]
+    {:revision revision
+     :built-at (str (java.time.Instant/now))
+     :components-by-id components-by-id
+     :by-endpoint by-endpoint}))
+
+(defn initialize-memory-projection!
+  "Build the bounded current-state memory index before the HTTP listener starts.
+
+  This is a materialized projection, not a TTL cache: successful memory/assert
+  puts and retractions advance it synchronously. Historical reads bypass it."
+  [node]
+  (let [started (System/nanoTime)
+        selected+
+        (fxt/safe-q
+         node
+         (list '->
+               '(from :hyperedges [xt/id hx/type])
+               (list 'where (list '= 'hx/type :memory/assert))
+               (list 'return 'xt/id)
+               (list 'order-by {:val 'xt/id :dir :asc})
+               (list 'limit (inc max-memory-projection-index-components))))]
+    (when (> (count selected+) max-memory-projection-index-components)
+      (throw (gates/layered-error
+              0 :memory-projection-index-bound-exceeded
+              {:maximum max-memory-projection-index-components
+               :observed-at-least (count selected+)})))
+    (let [rows (hydrate-memory-components node (mapv :xt/id selected+) {})
+          components (mapv hydrated-row->component rows)
+          prior-revision (get-in @!memory-projection-indexes [node :revision] 0)
+          index (build-memory-projection-index (inc prior-revision) components)]
+      (swap! !memory-projection-indexes assoc node index)
+      {:revision (:revision index)
+       :component-count (count components)
+       :endpoint-count (count (:by-endpoint index))
+       :build-ms (elapsed-ms started)})))
+
+(defn refresh-memory-projection-component!
+  "Point-refresh one current memory/assert component after its verified put."
+  [node edge-id]
+  (when (contains? @!memory-projection-indexes node)
+    (let [row (first (hydrate-memory-components node [edge-id] {}))
+          component (when (= :memory/assert (:hx/type row))
+                      (hydrated-row->component row))]
+      (swap! !memory-projection-indexes
+             update node
+             (fn [{:keys [revision components-by-id]}]
+               (build-memory-projection-index
+                (inc revision)
+                (cond-> (dissoc components-by-id edge-id)
+                  component (assoc edge-id component)))))))
+  nil)
+
+(defn- validate-memory-projection-request
+  [{:keys [endpoints limit]}]
+  (let [endpoints (vec (distinct endpoints))
+        endpoint-count (count endpoints)]
+    (when-not (and (pos? endpoint-count)
+                   (<= endpoint-count max-memory-projection-endpoints)
+                   (every? #(and (string? %) (not (str/blank? %))) endpoints))
+      (throw (gates/layered-error
+              4 :invalid-memory-projection-endpoints
+              {:minimum 1
+               :maximum max-memory-projection-endpoints
+               :provided endpoint-count})))
+    (when-not (and (int? limit)
+                   (pos? limit)
+                   (<= limit max-memory-projection-limit))
+      (throw (gates/layered-error
+              4 :invalid-memory-projection-limit
+              {:minimum 1
+               :maximum max-memory-projection-limit
+               :provided limit})))
+    endpoints))
+
+(defn- memory-projection-components-uncached
+  "Resolve several memory endpoints through one bounded membership scan.
+
+  The response carries compact edge/entry components rather than duplicating
+  the shared memory contract in Futon1b. Futon3c validates and projects these
+  components with futon2.aif.memory-contract/compact-memory. Every requested
+  endpoint gets a deterministic group; distinct edges and evidence entries are
+  hydrated once per request."
+  [node {:keys [endpoints limit valid-as-of system-as-of]}]
+  (let [started (System/nanoTime)
+        endpoints (validate-memory-projection-request
+                   {:endpoints endpoints :limit limit})
+        endpoint-count (count endpoints)
+        temporal {:valid-as-of valid-as-of :system-as-of system-as-of}
+        raw-limit (* endpoint-count limit)
+        selection-start (System/nanoTime)
+        selected+
+        (fxt/safe-q
+         node
+         (list '->
+               (hyperedge-from '[xt/id hx/type hx/endpoints] temporal)
+               (list 'unnest '{:matched-endpoint hx/endpoints})
+               (list 'where
+                     (list '= 'hx/type :memory/assert)
+                     (any-equals 'matched-endpoint endpoints))
+               (list 'return 'xt/id 'matched-endpoint)
+               (list 'order-by
+                     {:val 'matched-endpoint :dir :asc}
+                     {:val 'xt/id :dir :asc})
+               (list 'limit (inc raw-limit))))
+        selection-ms (elapsed-ms selection-start)]
+      (when (> (count selected+) raw-limit)
+        (throw (gates/layered-error
+                4 :memory-projection-result-bound-exceeded
+                {:endpoint-count endpoint-count
+                 :per-endpoint-limit limit
+                 :maximum raw-limit})))
+      (let [selected (vec selected+)
+            edge-ids (->> selected (map :xt/id) distinct vec)
+            hydration-start (System/nanoTime)
+            hydrated (hydrate-memory-components node edge-ids temporal)
+            hydration-ms (elapsed-ms hydration-start)
+            entry-ids (->> hydrated (map :memory-id) distinct vec)
+            hydrated-by-id
+            (into {} (map (juxt :hyperedge-id identity)) hydrated)
+            projection-start (System/nanoTime)
+            selected-by-endpoint (group-by :matched-endpoint selected)
+            groups
+            (mapv
+             (fn [endpoint]
+               (let [selected-rows
+                     (take limit (get selected-by-endpoint endpoint []))
+                     rows (into [] (keep #(get hydrated-by-id (:xt/id %)))
+                     selected-rows)
+                     components (mapv hydrated-row->component rows)]
+                 {:endpoint endpoint
+                  :components components
+                  :audit {:selected-count (count rows)
+                          :missing-edge-or-entry-count
+                          (- (count selected-rows)
+                             (count rows))}}))
+             endpoints)
+            projection-ms (elapsed-ms projection-start)]
+        {:ok true
+         :endpoints endpoints
+         :limit limit
+         :temporal-basis
+         (cond-> {:mode (if (or valid-as-of system-as-of) :as-of :current)}
+           valid-as-of (assoc :valid-as-of (str valid-as-of))
+           system-as-of (assoc :system-as-of (str system-as-of)))
+         :groups groups
+         :audit {:selected-row-count (count selected)
+                 :distinct-edge-count (count edge-ids)
+                 :distinct-entry-count (count entry-ids)
+                 :hydrated-component-count (count hydrated)
+                 :dropped-component-count (- (count edge-ids)
+                                             (count hydrated))}
+         :timing {:endpoint-selection-ms selection-ms
+                  :component-hydration-ms hydration-ms
+                  :projection-ms projection-ms
+                  :service-total-ms (elapsed-ms started)}})))
+
+(defn memory-projection-components
+  "Resolve current memory endpoints from the synchronously maintained
+  projection. Explicit bitemporal reads retain the bounded XTDB path."
+  [node {:keys [endpoints limit valid-as-of system-as-of] :as request}]
+  (if (or valid-as-of system-as-of)
+    (memory-projection-components-uncached node request)
+    (let [started (System/nanoTime)
+          endpoints (validate-memory-projection-request
+                     {:endpoints endpoints :limit limit})
+          _ (when-not (contains? @!memory-projection-indexes node)
+              (initialize-memory-projection! node))
+          index (get @!memory-projection-indexes node)
+          lookup-start (System/nanoTime)
+          groups
+          (mapv
+           (fn [endpoint]
+             (let [components (vec (take limit
+                                         (get-in index [:by-endpoint endpoint] [])))]
+               {:endpoint endpoint
+                :components components
+                :audit {:selected-count (count components)
+                        :missing-edge-or-entry-count 0}}))
+           endpoints)
+          components (mapcat :components groups)
+          edge-ids (set (map :hyperedge-id components))
+          entry-ids (set (map #(get-in % [:entry :evidence/id]) components))
+          lookup-ms (elapsed-ms lookup-start)]
+      {:ok true
+       :endpoints endpoints
+       :limit limit
+       :temporal-basis {:mode :current
+                        :projection-revision (:revision index)
+                        :projection-built-at (:built-at index)}
+       :groups groups
+       :audit {:selected-row-count (count components)
+               :distinct-edge-count (count edge-ids)
+               :distinct-entry-count (count entry-ids)
+               :hydrated-component-count (count edge-ids)
+               :dropped-component-count 0}
+       :timing {:projection-lookup-ms lookup-ms
+                :service-total-ms (elapsed-ms started)}})))
 
 ;; ---------------------------------------------------------------------------
 ;; Census (A5) — §7. Bound-type count, no doc materialization.

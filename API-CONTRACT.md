@@ -349,6 +349,41 @@ projection. A malformed temporal parameter is rejected rather than ignored.
   query. Sorted by `:hx/id`, limit applied before full-doc hydration.
   **200** `{:hyperedges [...] :count <returned-count>}`.
 
+### POST /api/alpha/memory/projection
+
+Read-only bounded multi-endpoint memory projection. POST is used because the
+endpoint vector and temporal basis are a structured query; this route never
+mutates the store and does not require a penholder.
+
+Request:
+
+```clojure
+{:endpoints ["pattern/a" "pattern/b"] ; 1..20 distinct nonblank strings
+ :limit 9                             ; 1..100 per endpoint
+ :valid-as-of "..."                   ; optional strict instant
+ :system-as-of "..."}                 ; optional strict instant
+```
+
+For the current basis, the server reads a revisioned materialized projection
+of all current `:memory/assert` components. The projection is built (with a
+hard 5000-component ceiling) before the listener starts and is advanced
+synchronously after every verified memory assertion overwrite or retraction;
+it is not TTL-based and cannot expose a partially warmed route. Explicit
+`:valid-as-of` or `:system-as-of` requests bypass the current projection and
+perform the bounded bitemporal membership scan plus indexed point hydration.
+
+Each distinct selected component is realized once and results are grouped in
+request order. Evidence components contain only identity/provenance fields and
+`:evidence/body {:hook ...}`; the full body remains a selection-time concern.
+
+The response includes `:groups`, boundedness/hydration `:audit`, and named
+`:timing` stages. Current responses also expose the projection revision and
+build time in `:temporal-basis`. `X-Trace-Id`, when supplied, is echoed and
+written to request logs. An invalid bound returns 400; expensive-read
+contention remains an explicit retryable 503. On the historical path, if
+matching cardinality exceeds the request's global bound, the server rejects
+the projection rather than returning a silently starved group.
+
 ---
 
 ## 5. Entities
