@@ -188,6 +188,11 @@
           (when-not (.await entered 2 java.util.concurrent.TimeUnit/SECONDS)
             (throw (ex-info "two scan workers did not enter admission gate" {})))
           (let [rejected-scan (req "GET" (str E "/count"))
+                projection
+                (req "POST" (str base "/api/alpha/memory/projection")
+                     {:endpoints ["p4ng/R9-independent-witness"]
+                      :limit 1}
+                     nil)
                 write (req "POST" E
                            {:evidence/id "admission-write"
                             :evidence/type :claim
@@ -199,6 +204,10 @@
                          (= :expensive-read-busy
                             (get-in rejected-scan [:body :error])))
                     rejected-scan)
+            (check! "current memory projection bypasses corpus-scan admission"
+                    (and (= 200 (:status projection))
+                         (true? (:ok (:body projection))))
+                    projection)
             (check! "write succeeds while two corpus scans are occupied"
                     (= 201 (:status write))
                     write))
