@@ -558,6 +558,14 @@
     (with-expensive-read!
       ex #(respond! ex 200 (pr-str (zm/memory-search @!node opts))))))
 
+(defn- respond-memory-projection!
+  [^HttpExchange ex opts]
+  (respond! ex 200
+            (pr-str
+             (cond-> (graph/memory-projection-components @!node opts)
+               (request-trace-id ex)
+               (assoc :trace-id (request-trace-id ex))))))
+
 (defn- memory-projection-route
   "POST a bounded read-only multi-endpoint memory projection.
 
@@ -573,12 +581,13 @@
                                    (:as-of payload)))
                 :system-as-of
                 (parse-instant (:system-as-of payload))}]
-      (with-expensive-read!
-        ex
-        #(respond! ex 200
-                   (cond-> (graph/memory-projection-components @!node opts)
-                     (request-trace-id ex)
-                     (assoc :trace-id (request-trace-id ex))))))
+      ;; Current projection is a synchronously maintained in-memory index,
+      ;; not a corpus scan. It must remain available while the heavyweight
+      ;; WM census holds both expensive-read permits. Explicit bitemporal
+      ;; projection still reaches XTDB and therefore retains admission.
+      (if (or (:valid-as-of opts) (:system-as-of opts))
+        (with-expensive-read! ex #(respond-memory-projection! ex opts))
+        (respond-memory-projection! ex opts)))
     (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
 
 (defn- text-search-route

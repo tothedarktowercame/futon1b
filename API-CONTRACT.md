@@ -232,6 +232,9 @@ projection; full bodies are hydrated only after the exact window is selected.
 - Corpus-wide read routes share two admission permits. A contending scan gets
   **503** `{:error :expensive-read-busy :retry-after-seconds 1}` while write,
   point-read, and `/health` workers remain available.
+- Current `/api/alpha/memory/projection` reads use the synchronously maintained
+  in-memory index and do not consume or contend for a corpus-scan permit.
+  Explicit bitemporal projection still uses the expensive-read admission gate.
 - The HTTP executor admits at most four running requests plus sixteen queued
   exchanges. This bounds abandoned client connections in heap. Endpoint
   hyperedge searches apply membership and limit inside XTDB before full-body
