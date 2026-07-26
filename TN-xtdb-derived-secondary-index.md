@@ -118,5 +118,75 @@ A native **derived secondary-index facility**:
 - The D2 packet (#5637) remains Joe-gated; this technote is the material
   that would extend it into the #3663 frame.
 
+## Write-path authorization gap
+
+The same missing-facility problem has a write-side consequence. XTDB 2.1.0
+must expose its pgwire server because the ordinary Clojure `xt/q` and
+`xt/execute-tx` API reaches the node through
+`Xtdb.createConnectionBuilder`; `xtdb.node.impl/createConnectionBuilder`
+delegates to the loopback pgwire `DataSource`. The direct Java
+`Xtdb.executeTx` method bypasses pgwire, but futon1b does not use that API.
+Consequently a pgwire password gate must authenticate both futon1b and
+external diagnostic clients.
+
+The apparent user-table solution is not safe to ship in XTDB 2.1.0:
+
+- `xtdb/authn.clj:17-29` verifies a password by selecting
+  `SELECT passwd ... FROM pg_user WHERE username = ?` and taking the first
+  row. Rules in `xtdb/authn.clj:31-55` can choose trust or password by user
+  and remote address, but have no deny/read-only method. Remote address
+  cannot distinguish local clients here.
+- `xtdb/pgwire.clj:72-73` constructs the node's own connection builder with
+  only localhost and port. `xtdb.api.ServerConfig` has host, ports, thread
+  count, and TLS settings but no internal-client username/password.
+- The built-in `xtdb` account is recreated as a template row with the known
+  password `xtdb` on every node start
+  (`xtdb/information_schema.clj:334-359`). `ALTER USER` writes another
+  live-index row (`xtdb/indexer.clj:519-580`) rather than replacing that
+  template across restart.
+
+A bounded local reproduction confirmed the failure rather than merely
+inferring it. A node was bootstrapped with pgwire disabled, its built-in
+password changed through direct `Xtdb.executeTx`, then reopened with a
+catch-all `{:method :password}` rule. On the first opening, no-password
+connections were refused and the generated password could run `EXPLAIN`
+and application writes. After close/reopen, authentication with the same
+secret failed. A trusted diagnostic query then returned two `pg_user` rows
+for username `xtdb`: one hash verified the generated secret and the other
+verified the known default. Password authentication chooses one with no
+ordering. Reapplying `ALTER USER` before every pgwire start still failed
+the restart acceptance test. This can both lock out futon1b and retain an
+impersonable default credential, so it is not a real gate.
+
+This is a second native request beside the derived-index facility:
+**pgwire write authorization**. Minimally, XTDB needs either:
+
+1. server rules that can deny writes (and ideally distinguish read-only
+   from read-write) independently of authentication, including a way for
+   the embedded node client to carry credentials; or
+2. a persistent user-table implementation in which the bootstrap account
+   is replaced deterministically, plus internal-client credential fields
+   in node/server configuration.
+
+The strongest available mitigation today is OS isolation, not an XTDB
+configuration illusion: run futon1b under a dedicated Unix account, pin
+the pgwire port, and install an owner-aware loopback firewall rule that
+permits that account only. Merely binding to `127.0.0.1`, or a firewall
+rule without process-owner separation, does not protect against other
+local processes running as Joe. This operational change needs Joe/root
+coordination and should be tested against the server's own loopback calls
+before activation.
+
+A tx-count tripwire was considered but is not a small sound patch in the
+current server. There is no durable server write log, and write
+transactions are issued at several independent call sites in
+`futon1b_graph.clj`, `futon1b_server.clj`, and the shared rescue-ingest
+helpers used by `futon1b_evidence.clj`.
+Comparing `xt.txs` with an in-memory counter would false-alarm after
+restart and can miss or misclassify multi-operation transactions. A useful
+tripwire therefore requires first centralizing transaction submission and
+persisting an application-issued transaction ledger; it should not be
+presented as authorization.
+
 [#3663]: https://github.com/xtdb/xtdb/issues/3663
 [#5637]: https://github.com/xtdb/xtdb/issues/5637
