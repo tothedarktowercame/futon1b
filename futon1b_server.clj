@@ -188,7 +188,20 @@
     (cond
       (str/blank? body) {}
       (json-request? ex) (json/parse-string body keyword)
-      :else (edn/read-string body))))
+      :else (try
+              (edn/read-string body)
+              (catch Exception e
+                ;; A recurring client has been posting JSON without a JSON
+                ;; Content-Type since 2026-07-25, losing every write as
+                ;; "Invalid token: :" with no way to attribute it. Log a
+                ;; bounded preview + headers so the sender is identifiable
+                ;; from the journal, then rethrow (contract unchanged).
+                (println (format "[futon1b-request] payload-parse-failed ctype=%s ua=%s body-preview=%s"
+                                 (pr-str (.getFirst (.getRequestHeaders ex) "Content-Type"))
+                                 (pr-str (.getFirst (.getRequestHeaders ex) "User-Agent"))
+                                 (pr-str (subs body 0 (min 220 (count body))))))
+                (flush)
+                (throw e))))))
 
 (defn- respond-str! [^HttpExchange ex status ^String body ^String ctype]
   (let [bytes (.getBytes body StandardCharsets/UTF_8)]
