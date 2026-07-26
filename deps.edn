@@ -35,16 +35,18 @@
   ;; the repo and reproduces on every box (chicago, lucy) without a per-box
   ;; systemd -J override.
   ;;
-  ;; Right-sized 2026-07-14 (was -Xmx4g, never actually run — the unit used
-  ;; -M:node + a stale -J-Xmx2048m override): gc.log on lucy's full corpus
-  ;; shows the live set after every G1 collection is only ~800-850M. 1536m
-  ;; gives ~44% headroom on the 3.8G box; 1g was too tight (~150M over live
-  ;; -> GC death-spiral + swap = the pool-2 OOM cascade of 2026-07-12/13).
-  ;; Direct memory (Arrow off-heap) 768m. Adjust both if the target box has
-  ;; materially different RAM than lucy's 3.8G.
+  ;; Right-sized 2026-07-14 for lucy (3.8G box; live set ~800-850M): 1536m
+  ;; heap / 768m direct. That comment said "adjust both if the target box has
+  ;; materially different RAM" — Dionysus has 31G, and under the learning-loop
+  ;; workload of 2026-07-25/26 the 1536m heap pinned G1 concurrent threads at
+  ;; 99.9% (deep-health 8-25s, type sweeps 5-20s) while the box sat on ~15G
+  ;; available. 4g heap + 1536m direct (Arrow off-heap; XTDB2 scans are
+  ;; Arrow-buffer-heavy) fits comfortably under the unit's MemoryMax=12G.
+  ;; History: 1g was too tight (~150M over live -> GC death-spiral + swap =
+  ;; the pool-2 OOM cascade of 2026-07-12/13).
   :server {:jvm-opts ["--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
                       "-Dio.netty.tryReflectionSetAccessible=true"
                       "-Djava.net.preferIPv4Stack=true"
-                      "-Xmx1536m" "-XX:MaxDirectMemorySize=768m"
+                      "-Xmx4g" "-XX:MaxDirectMemorySize=1536m"
                       "-XX:+ExitOnOutOfMemoryError"
                       "-XX:NativeMemoryTracking=summary"]}}}
