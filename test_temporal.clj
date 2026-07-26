@@ -5,6 +5,7 @@
   (:require [clojure.test :refer [deftest is run-tests testing]]
             [futon1b-graph :as graph]
             [futon1b-server :as server]
+            [futon1b-xt :as fxt]
             [xtdb.node :as xtn])
   (:import [java.time Instant]))
 
@@ -135,6 +136,51 @@
               :limit 3
               :valid-as-of (.minusSeconds (Instant/now) 30)})
             [:temporal-basis :mode])))))
+
+(deftest typed-entity-limit-is-pushed-into-xtdb
+  (let [captured (atom nil)
+        returned [{:xt/id "entity-a"
+                   :entity/id "entity-a"
+                   :entity/name "A"
+                   :entity/type :generation-test}
+                  {:xt/id "entity-b"
+                   :entity/id "entity-b"
+                   :entity/name "B"
+                   :entity/type :generation-test}]
+        expected (mapv #(dissoc % :xt/id) returned)]
+    (with-redefs [fxt/safe-q (fn [_ form]
+                               (reset! captured form)
+                               returned)]
+      (is (= {:entities expected :count 2}
+             (graph/entities-query
+              ::capturing-node {:type :generation-test :limit 2}))))
+    (is (= (list 'order-by
+                 {:val 'entity/id :dir :asc}
+                 {:val 'xt/id :dir :asc})
+           (nth @captured 3)))
+    (is (= '(limit 2) (last @captured))))
+  (let [docs [{:xt/id "entity-limit-c"
+               :entity/id "entity-limit-c"
+               :entity/name "C"
+               :entity/type :entity-limit-test}
+              {:xt/id "entity-limit-a"
+               :entity/id "entity-limit-a"
+               :entity/name "A"
+               :entity/type :entity-limit-test}
+              {:xt/id "entity-limit-b"
+               :entity/id "entity-limit-b"
+               :entity/name "B"
+               :entity/type :entity-limit-test}]
+        expected
+        (->> docs
+             (sort-by #(str (or (:entity/id %) (:xt/id %))))
+             (take 2)
+             (mapv #(dissoc % :xt/id)))]
+    (doseq [doc docs]
+      (is (= :ok (graph/put-verified! *node* :entities doc))))
+    (is (= {:entities expected :count 2}
+           (graph/entities-query
+            *node* {:type :entity-limit-test :limit 2})))))
 
 (defn -main [& _]
   (with-open [node (xtn/start-node)]
