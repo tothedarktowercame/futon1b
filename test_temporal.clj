@@ -57,44 +57,84 @@
          clojure.lang.ExceptionInfo #"invalid temporal instant"
          (#'server/parse-instant "not-an-instant")))))
 
-(deftest current-projection-rebuilds-after-out-of-band-write
-  (let [endpoint "pattern/projection-watermark"
-        memory-id "e-projection-watermark"
-        edge-id "hx-projection-watermark"]
-    ;; Establish an indexed snapshot, then deliberately write below the server
-    ;; mutation hook. The next current read must notice XTDB progress and
-    ;; rebuild rather than serving the stale snapshot.
-    (graph/memory-projection-components
-     *node* {:endpoints [endpoint] :limit 3})
+(deftest evidence-append-does-not-invalidate-current-projection
+  (let [endpoint "pattern/projection-generation-evidence"
+        before (graph/memory-projection-components
+                *node* {:endpoints [endpoint] :limit 3})]
     (is (= :ok
            (graph/put-verified!
             *node* :evidence
-            {:evidence/id memory-id
-             :evidence/type :memory
+            {:xt/id "e-unrelated-projection-generation"
+             :evidence/id "e-unrelated-projection-generation"
+             :evidence/type :observation
              :evidence/claim-type :observation
-             :evidence/author "projection-watermark-test"
-             :evidence/session-id "projection-watermark-session"
-             :evidence/at "2026-07-23T12:00:00Z"
-             :evidence/body {:hook "Projection watermark hook"}
-             :evidence/tags [:memory]})))
+             :evidence/author "projection-generation-test"
+             :evidence/at "2026-07-26T12:00:00Z"
+             :evidence/body {:note "unrelated evidence append"}
+             :evidence/tags [:test]})))
+    (with-redefs [graph/initialize-memory-projection!
+                  (fn [_]
+                    (throw (ex-info "unexpected projection rebuild" {})))]
+      (let [after (graph/memory-projection-components
+                   *node* {:endpoints [endpoint] :limit 3})]
+        (is (= (get-in before [:temporal-basis :projection-revision])
+               (get-in after [:temporal-basis :projection-revision])))
+        (is (= (get-in before [:temporal-basis :projection-generation])
+               (get-in after [:temporal-basis :projection-generation])))))))
+
+(deftest memory-edge-write-advances-projection-generation
+  (let [endpoint "pattern/projection-generation-memory"
+        memory-id "e-projection-generation-memory"
+        edge-id "hx-projection-generation-memory"
+        before (graph/memory-projection-components
+                *node* {:endpoints [endpoint] :limit 3})]
     (is (= :ok
            (graph/put-verified!
-            *node* :hyperedges
-            {:hx/id edge-id
-             :hx/type :memory/assert
-             :hx/endpoints [memory-id endpoint]
-             :hx/props {:domain :mathematics
-                        :state :current
-                        :attachment-status :reviewed
-                        :roles {:entry memory-id
-                                :patterns [endpoint]}}})))
+            *node* :evidence
+            {:xt/id memory-id
+             :evidence/id memory-id
+             :evidence/type :memory
+             :evidence/claim-type :observation
+             :evidence/author "projection-generation-test"
+             :evidence/session-id "projection-generation-session"
+             :evidence/at "2026-07-26T12:01:00Z"
+             :evidence/body {:hook "Projection generation hook"}
+             :evidence/tags [:memory]})))
+    (is (:ok
+         (server/upsert-hyperedge!
+          *node*
+          {:hx/id edge-id
+           :hx/type :memory/assert
+           :hx/endpoints [memory-id endpoint]
+           :hx/props {:domain :mathematics
+                      :state :current
+                      :attachment-status :reviewed
+                      :roles {:entry memory-id
+                              :patterns [endpoint]}}})))
     (let [result
           (graph/memory-projection-components
            *node* {:endpoints [endpoint] :limit 3})]
       (is (= [memory-id]
              (mapv #(get-in % [:entry :evidence/id])
                    (get-in result [:groups 0 :components]))))
-      (is (>= (get-in result [:temporal-basis :projection-revision]) 2)))))
+      (is (= (inc (get-in before
+                          [:temporal-basis :projection-generation]))
+             (get-in result
+                     [:temporal-basis :projection-generation]))))))
+
+(deftest historical-projection-bypasses-current-index
+  (with-redefs [graph/initialize-memory-projection!
+                (fn [_]
+                  (throw (ex-info "historical projection touched current index"
+                                  {})))]
+    (is (= :as-of
+           (get-in
+            (graph/memory-projection-components
+             *node*
+             {:endpoints ["pattern/historical-generation-bypass"]
+              :limit 3
+              :valid-as-of (.minusSeconds (Instant/now) 30)})
+            [:temporal-basis :mode])))))
 
 (defn -main [& _]
   (with-open [node (xtn/start-node)]
