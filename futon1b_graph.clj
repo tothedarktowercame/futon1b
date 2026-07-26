@@ -282,10 +282,14 @@
   equivalent fields carried in :entity/props by post-cutover writes."
   [node {:keys [type limit]}]
   (let [t (normalize-type type)
-        docs (fxt/safe-q node (list '-> '(from :entities [*])
-                                    (list 'where (list '= 'entity/type t))))
-        docs (sort-by #(str (or (:entity/id %) (:xt/id %))) docs)
-        docs (if (and (int? limit) (pos? limit)) (take limit docs) docs)]
+        query-tail (cond-> [(list 'where (list '= 'entity/type t))
+                            (list 'order-by
+                                  {:val 'entity/id :dir :asc}
+                                  {:val 'xt/id :dir :asc})]
+                     (and (int? limit) (pos? limit))
+                     (conj (list 'limit limit)))
+        docs (fxt/safe-q node
+                         (cons '-> (cons '(from :entities [*]) query-tail)))]
     {:entities (mapv #(dissoc % :xt/id) docs)
      :count (count docs)}))
 
