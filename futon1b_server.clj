@@ -327,6 +327,22 @@
               {:provided raw :minimum 1 :maximum max-result-limit})))
     parsed))
 
+(defn- parse-text-offset
+  "Validated FTS5 candidate-window offset. Offset pagination is deliberately
+  capped so one request cannot force an unbounded SQLite skip."
+  [p]
+  (let [raw (p "offset")
+        parsed (if raw
+                 (try (Long/parseLong raw) (catch Exception _ ::invalid))
+                 0)]
+    (when (or (= ::invalid parsed)
+              (neg? parsed)
+              (> parsed text/max-offset))
+      (throw (gates/layered-error
+              4 :invalid-offset
+              {:provided raw :minimum 0 :maximum text/max-offset})))
+    parsed))
+
 (defonce ^:private expensive-read-permit
   ;; Corpus scans are admitted globally, not once per route or request. Two
   ;; scans at a time leave two HTTP workers available for writes, point reads,
@@ -605,7 +621,8 @@
 
 (defn- text-search-route
   "GET /api/alpha/evidence/text-search?q=…&author=&session-id=&since=&before=
-   &include-ephemeral=&limit= — D1 sidecar search (candidates + re-check).
+   &include-ephemeral=&limit=&offset=&hydrate= — D1 sidecar search
+   (candidates + re-check). ?df=t1,t2 returns index-only document frequencies;
    ?stats=true returns index stats instead. POST {:op :catch-up} (penholder-
    gated) starts a background catch-up/rebuild."
   [^HttpExchange ex]
@@ -626,6 +643,17 @@
       (= "true" (p "stats"))
       (respond! ex 200 (pr-str (text/stats)))
 
+      (not (str/blank? (str (p "df"))))
+      (let [terms (->> (str/split (p "df") #",")
+                       (map str/trim)
+                       (remove str/blank?)
+                       vec)]
+        (if (> (count terms) text/max-df-terms)
+          (respond! ex 400
+                    (pr-str {:error "too many df terms"
+                             :maximum text/max-df-terms}))
+          (respond! ex 200 (pr-str (text/document-frequencies terms)))))
+
       (str/blank? (str (p "q")))
       (respond! ex 400 (pr-str {:error "q parameter required"}))
 
@@ -635,7 +663,11 @@
         #(respond! ex 200
                    (pr-str (text/search @!node
                                         (cond-> {:q (p "q")
-                                                 :limit (parse-limit p)}
+                                                 :limit (parse-limit p)
+                                                 :offset (parse-text-offset p)
+                                                 :hydrate (not= "false"
+                                                                 (str/lower-case
+                                                                  (str (p "hydrate"))))}
                                           (p "author") (assoc :author (p "author"))
                                           (p "session-id") (assoc :session-id (p "session-id"))
                                           (p "since") (assoc :since (p "since"))

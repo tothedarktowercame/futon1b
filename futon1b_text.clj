@@ -29,6 +29,10 @@
 (defonce !ds (atom nil))
 (defonce !stats (atom {:indexed 0 :errors 0 :last-at nil}))
 
+(def hydration-width 4)
+(def max-df-terms 32)
+(def max-offset 10000)
+
 ;; ---------------------------------------------------------------------------
 ;; Schema + init.
 ;; ---------------------------------------------------------------------------
@@ -167,8 +171,9 @@
 (defn- candidates
   "Ranked candidate ids from FTS5. Over-fetches so the re-check can drop
    stale/filtered rows without starving k."
-  [ds {:keys [q author session-id since before limit]}]
+  [ds {:keys [q author session-id since before limit offset]}]
   (let [k (or limit 10)
+        offset (or offset 0)
         overfetch (max 50 (* 4 k))
         clauses (cond-> ["ev_fts MATCH ?"]
                   author (conj "author = ?")
@@ -182,44 +187,110 @@
                  before (conj (str before)))
         sql (str "SELECT id, bm25(ev_fts) AS score FROM ev_fts WHERE "
                  (str/join " AND " clauses)
-                 " ORDER BY bm25(ev_fts) LIMIT " overfetch)]
-    (jdbc/execute! ds (into [sql] params) unqualified)))
+                 " ORDER BY bm25(ev_fts) LIMIT ? OFFSET ?")]
+    (jdbc/execute! ds (into [sql] (conj params overfetch offset)) unqualified)))
 
-(defn- fetch-doc [node id]
-  (first (fxt/safe-q node (list '-> '(from :evidence [*])
+(def ^:private recheck-cols
+  '[xt/id evidence/id evidence/at evidence/author evidence/session-id
+    evidence/type evidence/ephemeral?])
+
+(defn- fetch-doc
+  [node id cols]
+  (first (fxt/safe-q node (list '-> (list 'from :evidence cols)
                                 (list 'where (list '= 'xt/id id))))))
 
+(defn- fetch-wave
+  "Fetch one candidate wave with four queries in flight. `safe-q` owns the
+  process-wide four-permit budget, so concurrent HTTP requests cannot
+  multiply this width."
+  [node ids cols]
+  (->> ids
+       (partition-all hydration-width)
+       (mapcat (fn [batch]
+                 (->> batch
+                      (mapv #(future (fetch-doc node % cols)))
+                      (mapv deref))))
+       vec))
+
+(defn- passes-recheck?
+  [doc {:keys [author session-id since before include-ephemeral]}]
+  (and (or (nil? author) (= (str author) (str (:evidence/author doc))))
+       (or (nil? session-id) (= (str session-id) (str (:evidence/session-id doc))))
+       (or (nil? since) (>= (compare (str (:evidence/at doc)) (str since)) 0))
+       (or (nil? before) (neg? (compare (str (:evidence/at doc)) (str before))))
+       ;; contract semantics: param absent = no filtering
+       (or (not (false? include-ephemeral))
+           (not (true? (:evidence/ephemeral? doc))))))
+
+(defn- recheck-candidates
+  "Re-check candidates in waves of k and stop once k survive. This preserves
+  the old short-circuit while replacing serial point reads with bounded
+  concurrency. Only the filter/result projection is fetched here."
+  [node cands k params]
+  (loop [remaining cands
+         survivors []]
+    (if (or (>= (count survivors) k) (empty? remaining))
+      (vec (take k survivors))
+      (let [wave (vec (take k remaining))
+            docs (fetch-wave node (mapv :id wave) recheck-cols)
+            accepted (into []
+                           (keep (fn [[cand doc]]
+                                   (when (and doc (passes-recheck? doc params))
+                                     {:score (:score cand) :doc doc})))
+                           (map vector wave docs))]
+        (recur (drop k remaining) (into survivors accepted))))))
+
+(defn document-frequencies
+  "Index-only document frequencies for sanitized terms. Never reads XTDB."
+  [terms]
+  (when (> (count terms) max-df-terms)
+    (throw (IllegalArgumentException.
+            (str "at most " max-df-terms " df terms are allowed"))))
+  (let [ds @!ds
+        terms (vec (distinct terms))
+        frequencies
+        (into {}
+              (map (fn [term]
+                     [term
+                      (:n (jdbc/execute-one!
+                           ds
+                           ["SELECT count(*) AS n FROM ev_fts WHERE ev_fts MATCH ?"
+                            (match-string term)]
+                           unqualified))]))
+              terms)
+        indexed (:n (jdbc/execute-one! ds
+                                      ["SELECT count(*) AS n FROM ev_fts"]
+                                      unqualified))]
+    {:df frequencies :indexed indexed}))
+
 (defn search
-  "Free-text search: FTS5 pre-filter + per-candidate XTDB re-check.
+  "Free-text search: FTS5 pre-filter + bounded-concurrency XTDB re-check.
    A candidate survives only if the doc exists in the store AND still
    passes the structured filters (author/session/since/before/ephemeral)
    read from the STORE's copy, not the index's. Returns
    {:results [{:score f :entry doc} ...] :count n :checked n :index-as-of s}."
-  [node {:keys [author session-id since before include-ephemeral limit] :as params}]
+  [node {:keys [limit hydrate] :as params}]
   (let [ds @!ds
         k (or limit 10)
         cands (candidates ds params)
-        checked
-        (into []
-              (comp
-               (map (fn [{:keys [id score]}]
-                      (when-let [doc (fetch-doc node id)]
-                        {:score score :doc doc})))
-               (filter some?)
-               (filter (fn [{:keys [doc]}]
-                         (and (or (nil? author) (= (str author) (str (:evidence/author doc))))
-                              (or (nil? session-id) (= (str session-id) (str (:evidence/session-id doc))))
-                              (or (nil? since) (>= (compare (str (:evidence/at doc)) (str since)) 0))
-                              (or (nil? before) (neg? (compare (str (:evidence/at doc)) (str before))))
-                              ;; contract semantics: param absent = no filtering
-                              (or (not (false? include-ephemeral))
-                                  (not (true? (:evidence/ephemeral? doc)))))))
-               (take k))
-              cands)]
-    {:results (mapv (fn [{:keys [score doc]}]
-                      {:score score :entry (dissoc doc :xt/id)})
-                    checked)
-     :count (count checked)
+        survivors (recheck-candidates node cands k params)
+        hydrate? (not (false? hydrate))
+        results
+        (if hydrate?
+          (let [full-docs (fetch-wave node (mapv (comp :xt/id :doc) survivors) '[*])]
+            (into []
+                  (keep (fn [[{:keys [score]} doc]]
+                          (when doc {:score score :entry (dissoc doc :xt/id)})))
+                  (map vector survivors full-docs)))
+          (mapv (fn [{:keys [score doc]}]
+                  {:score score
+                   :evidence/id (:evidence/id doc)
+                   :evidence/at (:evidence/at doc)
+                   :evidence/author (:evidence/author doc)
+                   :evidence/type (:evidence/type doc)})
+                survivors))]
+    {:results results
+     :count (count results)
      :checked (count cands)
      :index-as-of (meta-get ds "last-at")}))
 
