@@ -240,6 +240,33 @@ projection; full bodies are hydrated only after the exact window is selected.
   hyperedge searches apply membership and limit inside XTDB before full-body
   hydration; `limit` is not a post-realization truncation.
 
+### GET /api/alpha/evidence/text-search
+
+Futon1b extension backed by the derived FTS5 sidecar. FTS5 selects candidates;
+the current XTDB evidence projection remains authoritative. Re-checks run in
+waves of the requested `limit`, with at most four XTDB queries in flight inside
+the process-wide four-query budget. A later wave is read only when the current
+wave does not contain enough surviving documents.
+
+- `q` is tokenized and quoted before being passed to FTS5. `AND` and `OR` are
+  the only accepted operators.
+- `author`, `session-id`, `since`, `before`, and `include-ephemeral` retain the
+  evidence-route filtering semantics.
+- `limit` is the returned-result bound.
+- `offset` skips that many rows in the ranked FTS5 candidate window. It
+  defaults to zero and is capped at **10000**; invalid values return **400**.
+- `hydrate` defaults to `true`, preserving the existing response:
+  `{:results [{:score <bm25> :entry <full evidence doc>} ...] ...}`.
+  `hydrate=false` performs the same candidate selection and XTDB re-check but
+  returns only `:score`, `:evidence/id`, `:evidence/at`, `:evidence/author`,
+  and `:evidence/type`. For the same request its ids and order are identical to
+  hydrated mode.
+- `df=t1,t2,...` selects an index-only mode and does not read XTDB. Each term
+  is sanitized by the same quoting function as `q`. At most **32** terms are
+  accepted. Response:
+  `{:df {"t1" <document-frequency> ...} :indexed <indexed-row-count>}`.
+- `stats=true` returns sidecar statistics as before.
+
 ### GET /api/alpha/evidence/count
 **Does not exist in futon1a** (falls through to the `{id}` handler → 404).
 futon1b SHOULD add it (protocol `-count`, `{:count <n>}`, same query params
