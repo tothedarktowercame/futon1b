@@ -926,7 +926,7 @@
         temporal {:valid-as-of valid-as-of :system-as-of system-as-of}
         raw-limit (* endpoint-count limit)
         selection-start (System/nanoTime)
-        selected+
+        selected-rows+
         (fxt/safe-q
          node
          (list '->
@@ -936,10 +936,19 @@
                      (list '= 'hx/type :memory/assert)
                      (any-equals 'matched-endpoint endpoints))
                (list 'return 'xt/id 'matched-endpoint)
+               ;; A temporal scan can expose several system-time versions of
+               ;; one edge. Collapse those versions before applying the
+               ;; bounded-window sentinel, so the guard counts endpoint-edge
+               ;; results rather than physical history rows.
+               (list 'aggregate 'xt/id 'matched-endpoint)
                (list 'order-by
                      {:val 'matched-endpoint :dir :asc}
                      {:val 'xt/id :dir :asc})
                (list 'limit (inc raw-limit))))
+        ;; Keep the invariant explicit at the application boundary as well:
+        ;; XTDB should already have grouped these rows, but repeated identical
+        ;; projections must never consume the distinct-result budget.
+        selected+ (vec (distinct selected-rows+))
         selection-ms (elapsed-ms selection-start)]
       (when (> (count selected+) raw-limit)
         (throw (gates/layered-error

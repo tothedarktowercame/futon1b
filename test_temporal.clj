@@ -137,6 +137,156 @@
               :valid-as-of (.minusSeconds (Instant/now) 30)})
             [:temporal-basis :mode])))))
 
+(defn- fake-hydrated-memory
+  [edge-id]
+  {:hyperedge-id edge-id
+   :hx/type :memory/assert
+   :hx/endpoints [(str "e-" edge-id) "pattern/versioned"]
+   :hx/props {:roles {:entry (str "e-" edge-id)}}
+   :memory-id (str "e-" edge-id)
+   :evidence/id (str "e-" edge-id)
+   :evidence/type :memory
+   :evidence/claim-type :observation
+   :evidence/author "temporal-test"
+   :evidence/session-id "temporal-test"
+   :evidence/body {:hook "Version-aware projection test"}})
+
+(deftest historical-version-rows-count-once
+  (let [captured (atom nil)
+        version-rows
+        [{:xt/id "hx-versioned-a" :matched-endpoint "pattern/versioned"}
+         {:xt/id "hx-versioned-a" :matched-endpoint "pattern/versioned"}
+         {:xt/id "hx-versioned-a" :matched-endpoint "pattern/versioned"}]]
+    (with-redefs-fn
+      {#'fxt/safe-q
+       (fn [_ query]
+         (reset! captured query)
+         version-rows)
+       #'graph/hydrate-memory-components
+       (fn [_ edge-ids _]
+         (mapv fake-hydrated-memory edge-ids))}
+      (fn []
+        (let [result
+              (graph/memory-projection-components
+               ::versioned-node
+               {:endpoints ["pattern/versioned"]
+                :limit 1
+                :system-as-of (Instant/now)})]
+          (is (= ["hx-versioned-a"]
+                 (mapv :hyperedge-id
+                       (get-in result [:groups 0 :components]))))
+          (is (= 1 (get-in result [:audit :selected-row-count])))
+          (is (= '(aggregate xt/id matched-endpoint)
+                 (nth @captured 5)))
+          (is (= '(limit 2) (last @captured))))))))
+
+(deftest system-time-versions-of-one-memory-count-once
+  (let [endpoint "pattern/system-version-history"
+        memory-id "e-system-version-history"
+        edge-id "hx-system-version-history"]
+    (is (= :ok
+           (graph/put-verified!
+            *node* :evidence
+            {:xt/id memory-id
+             :evidence/id memory-id
+             :evidence/type :memory
+             :evidence/claim-type :observation
+             :evidence/author "temporal-test"
+             :evidence/session-id "temporal-test"
+             :evidence/at "2026-07-31T12:00:00Z"
+             :evidence/body {:hook "System-time version history"}
+             :evidence/tags [:memory :test]})))
+    (doseq [state [:first :second :third]]
+      (is (:ok
+           (server/upsert-hyperedge!
+            *node*
+            {:hx/id edge-id
+             :hx/type :memory/assert
+             :hx/endpoints [memory-id endpoint]
+             :hx/props {:state state
+                        :attachment-status :reviewed
+                        :roles {:entry memory-id
+                                :patterns [endpoint]}}}))))
+    (let [result
+          (graph/memory-projection-components
+           *node*
+           {:endpoints [endpoint]
+            :limit 1
+            :system-as-of (Instant/now)})]
+      (is (= [edge-id]
+             (mapv :hyperedge-id
+                   (get-in result [:groups 0 :components]))))
+      (is (= 1 (get-in result [:audit :distinct-edge-count]))))))
+
+(deftest out-of-range-system-time-projection-is-empty
+  (let [result
+        (graph/memory-projection-components
+         *node*
+         {:endpoints ["pattern/versioned"]
+          :limit 1
+          :system-as-of (Instant/parse "2020-01-01T00:00:00Z")})]
+    (is (= :as-of (get-in result [:temporal-basis :mode])))
+    (is (empty? (get-in result [:groups 0 :components])))))
+
+(deftest distinct-projection-results-still-trip-bound
+  (let [selection-rows
+        [{:xt/id "hx-distinct-a" :matched-endpoint "pattern/versioned"}
+         {:xt/id "hx-distinct-b" :matched-endpoint "pattern/versioned"}]
+        error
+        (with-redefs [fxt/safe-q (fn [_ _] selection-rows)]
+          (try
+            (graph/memory-projection-components
+             ::bounded-node
+             {:endpoints ["pattern/versioned"]
+              :limit 1
+              :system-as-of (Instant/now)})
+            nil
+            (catch clojure.lang.ExceptionInfo e
+              e)))]
+    (is (= :memory-projection-result-bound-exceeded
+           (get-in (ex-data error) [:error :reason])))
+    (is (= {:endpoint-count 1
+            :per-endpoint-limit 1
+            :maximum 1}
+           (get-in (ex-data error) [:error :context])))))
+
+(defn- put-test-memory!
+  [endpoint suffix]
+  (let [memory-id (str "e-current-limit-" suffix)
+        edge-id (str "hx-current-limit-" suffix)]
+    (is (= :ok
+           (graph/put-verified!
+            *node* :evidence
+            {:xt/id memory-id
+             :evidence/id memory-id
+             :evidence/type :memory
+             :evidence/claim-type :observation
+             :evidence/author "temporal-test"
+             :evidence/session-id "temporal-test"
+             :evidence/at "2026-07-31T12:00:00Z"
+             :evidence/body {:hook "Current projection limit test"}
+             :evidence/tags [:memory :test]})))
+    (is (:ok
+         (server/upsert-hyperedge!
+          *node*
+          {:hx/id edge-id
+           :hx/type :memory/assert
+           :hx/endpoints [memory-id endpoint]
+           :hx/props {:attachment-status :reviewed
+                      :roles {:entry memory-id
+                              :patterns [endpoint]}}})))))
+
+(deftest current-projection-limit-behaviour-is-unchanged
+  (let [endpoint "pattern/current-limit"]
+    (doseq [suffix ["a" "b" "c"]]
+      (put-test-memory! endpoint suffix))
+    (let [result
+          (graph/memory-projection-components
+           *node* {:endpoints [endpoint] :limit 2})]
+      (is (= :current (get-in result [:temporal-basis :mode])))
+      (is (= 2 (count (get-in result [:groups 0 :components]))))
+      (is (= 2 (get-in result [:groups 0 :audit :selected-count]))))))
+
 (deftest typed-entity-limit-is-pushed-into-xtdb
   (let [captured (atom nil)
         returned [{:xt/id "entity-a"
