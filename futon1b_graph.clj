@@ -528,47 +528,48 @@
   (fxt/q1 node (list '-> (hyperedge-from '[*] temporal)
                      (list 'where (list '= 'xt/id id)))))
 
-;; Maximum id-equality clauses in one membership predicate.
+;; PER-DOC HYDRATION, deliberately. Restored 2026-08-02 after the batched form
+;; measured as a large regression on the live store.
 ;;
-;; XTDB 2.1 rejects SQL-style `in` over a list, so the predicate is a variadic
-;; `or` of id equalities — and XTDB compiles that expression to bytecode via
-;; `reify`, so a large disjunction overruns the JVM method-size limit. Measured
-;; on a 6000-doc fixture (scale_probe_bisect / scale_probe_chunk): a single
-;; window of 100 clauses compiles, 200 and 250 raise
-;; "Syntax error compiling reify* at (0:0)", and 500+ raise `xtdb.error.Fault`.
-;; Worse, when the failure text happens to match `safe-q`'s tolerated patterns
-;; it is swallowed and the read returns EMPTY rather than throwing — a 200 with
-;; silent data loss. So the window must be chunked, not merely large.
+;; The batched attempt (2b887d3, chunked in 71b7c1e) replaced these point
+;; lookups with a variadic `or` of id equalities, because XTQL has no working
+;; set-membership predicate over a list — `in`, `contains?` and `any` are all
+;; rejected on type grounds, though SQL `WHERE _id IN (?,?)` works
+;; (probe_in_predicate.clj).
 ;;
-;; 50, not the measured 100 ceiling: the real constraint is expression SIZE, and
-;; size scales with id LENGTH as well as clause count. The probe's synthetic ids
-;; are ~26 chars; real ones run 60-70
-;; (`hx|mission-scope|E-memory-latency/pattern/tactic-algebra-interference`), so
-;; a count tuned at the synthetic ceiling would still overrun on live data. 50
-;; leaves ~2x margin and measured marginally FASTER than 100 anyway
-;; (19.7s vs 22.4s to hydrate 5000 docs).
-(def ^:private hydration-chunk-size 50)
-
+;; Two things went wrong, in order of severity:
+;;
+;;   1. A disjunction of id equalities is NOT index-backed. Measured on the live
+;;      34,480-doc `code/v05/var` type: a single `(= xt/id x)` costs ~50ms, but
+;;      ONE 50-clause `or` costs ~40s — 50 rows in 40.4s, 100 rows in 76.8s,
+;;      linear in chunks at ~40s each. The same shape on a 6,000-doc fixture ran
+;;      5000 rows in 15.5s, which is why the fixture hid it entirely.
+;;      Against that, this per-doc loop costs ~50ms/row: ~2.5s for those 50 rows.
+;;      The batched form was therefore ~16x SLOWER on real data, while holding an
+;;      expensive-read permit throughout and starving every other reader.
+;;
+;;   2. The disjunction also overruns the JVM method-size limit past ~250
+;;      clauses ("Syntax error compiling reify*", then `xtdb.error.Fault`), and
+;;      when the failure text matches `safe-q`'s tolerated patterns it is
+;;      swallowed and the read returns EMPTY — a 200 with silent data loss.
+;;
+;; So this is slow-but-honest: O(n) point lookups at ~50ms each, 4 in flight.
+;; Do NOT "optimise" it back into a disjunction without re-measuring on the LIVE
+;; store — a fixture will report the opposite result. If a batched form is
+;; wanted, test the SQL surface (`WHERE _id IN (…)`) first and check whether it
+;; plans as index lookups; that is the open question for JUXT recorded in
+;; TN-xtdb2-query-ceilings-and-ingest-memory-2026-08-02.md.
 (defn- hydrate-hyperedge-window
-  "Hydrate an ordered projected window in O(n/chunk) XTDB queries, then restore
-  the projected order client-side. Full bodies never participate in the
-  corpus-wide sort, and no single query carries more than
-  `hydration-chunk-size` id-equality clauses (see the note above — an
-  unbounded disjunction fails, sometimes silently)."
+  "Hydrate an ordered projected window with bounded concurrency, preserving
+  order. Full hyperedge bodies never participate in the corpus-wide sort."
   [node projected temporal]
-  (if-not (seq projected)
-    []
-    (let [docs (into []
-                     (mapcat
-                      (fn [batch]
-                        (fxt/safe-q
-                         node
-                         (list '-> (hyperedge-from '[*] temporal)
-                               (list 'where
-                                     (cons 'or (map #(list '= 'xt/id %) batch)))))))
-                     (partition-all hydration-chunk-size (map :xt/id projected)))
-          by-id (into {} (map (juxt :xt/id identity)) docs)]
-      (into [] (keep #(get by-id (:xt/id %))) projected))))
+  (->> projected
+       (partition-all 4)
+       (mapcat (fn [batch]
+                 (->> batch
+                      (mapv #(future (fetch-hyperedge-doc node (:xt/id %) temporal)))
+                      (mapv deref))))
+       (keep identity)))
 
 (defn- hyperedges-query-uncached
   "GET /api/alpha/hyperedges?type=… and/or end=… (+limit/latest/after,

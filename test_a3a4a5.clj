@@ -258,13 +258,16 @@
                                          (swap! calls inc)
                                          (apply safe-q args))]
                 (req "GET" (str HXS "?type=test/edge&limit=2&include-total=false")))]
-        ;; 2 = one projection + one hydration chunk. Hydration is chunked at
-        ;; `hydration-chunk-size` (50), so a window larger than that costs one
-        ;; query per chunk, not one overall — this fixture's 2 rows fit in one.
-        (check! "bounded type read uses one projection and one hydration chunk"
+        ;; 3 = one projection + one point lookup PER DOC. The per-doc fan-out is
+        ;; deliberate (see hydrate-hyperedge-window): a batched `or` of id
+        ;; equalities is not index-backed and measured ~16x slower on the live
+        ;; store, so N+1 point lookups at ~50ms each is the honest shape. This
+        ;; assertion exists to make a silent return to batching visible — if it
+        ;; drops to 2, someone has reintroduced the disjunction.
+        (check! "bounded type read uses one projection plus per-doc lookups"
                 (and (= 200 (:status r))
                      (= 2 (count (get-in r [:body :hyperedges])))
-                     (= 2 @calls))
+                     (= 3 @calls))
                 {:response r :safe-q-calls @calls})))
     (let [page-1 (req "GET" (str HXS "?type=test/edge&limit=1&include-total=false"))
           cursor-1 (get-in page-1 [:body :next-cursor])
