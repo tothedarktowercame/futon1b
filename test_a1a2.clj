@@ -9,6 +9,7 @@
             [futon1b-evidence :as ev]
             [futon1b-gates :as gates]
             [futon1b-server :as srv]
+            [xtdb.api :as xt]
             [xtdb.node :as xtn])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
@@ -38,7 +39,7 @@
 
 (def ph {"x-penholder" "joe"})
 
-(defn run-tests [base]
+(defn run-tests [base node]
   (let [E (str base "/api/alpha/evidence")]
 
     (println "— A2 gates: penholder")
@@ -175,6 +176,34 @@
           ids (mapv :evidence/id (get-in r [:body :chain]))]
       (check! "chain oldest-first" (= ["e1" "e2" "e3"] ids) r))
 
+    (println "— A1 evidence: realistic-size bounded hydration")
+    (let [docs (mapv (fn [i]
+                       {:xt/id (str "scale-evidence-" i)
+                        :evidence/id (str "scale-evidence-" i)
+                        :evidence/type :scale/probe
+                        :evidence/claim-type :observation
+                        :evidence/author "scale-test"
+                        :evidence/at (format "2026-08-01T00:%02d:%02dZ"
+                                             (mod (quot i 60) 60) (mod i 60))
+                        :evidence/body {:ordinal i :payload (str "body-" i)}
+                        :evidence/tags [:realistic-scale]})
+                     (range 1200))
+          _ (xt/execute-tx node
+                           (mapv (fn [doc] [:put-docs :evidence doc]) docs))
+          projected (mapv #(select-keys % [:xt/id]) (take 1000 (reverse docs)))
+          started (System/nanoTime)
+          batched (#'ev/hydrate-projected node projected)
+          elapsed-ms (quot (- (System/nanoTime) started) 1000000)
+          pointwise (#'ev/hydrate-projected-pointwise node projected)]
+      (println (format "  realistic fixture: docs=%d rows=%d batched-ms=%d"
+                       (count docs) (count batched) elapsed-ms))
+      (check! "1,000-row SQL hydration equals historical point reads"
+              (= pointwise batched)
+              {:batched (count batched) :pointwise (count pointwise)})
+      (check! "1,000-row bounded hydration completes under 2s on 1,200 docs"
+              (< elapsed-ms 2000)
+              {:elapsed-ms elapsed-ms :fixture-docs (count docs)}))
+
     (println "— admission control: scans cannot occupy the write path")
     (let [entered (java.util.concurrent.CountDownLatch. 2)
           release (promise)]
@@ -281,7 +310,7 @@
                                 [server :companions 0 :server])
           health-port (.getPort (.getAddress health-server))]
       (try
-        (run-tests base)
+        (run-tests base node)
         (let [r (req "GET" (str "http://127.0.0.1:" health-port "/health"))]
           (check! "independent liveness acceptor responds"
                   (and (= 200 (:status r)) (true? (get-in r [:body :ok])))

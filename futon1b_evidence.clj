@@ -88,26 +88,33 @@
 (defn- public-doc [doc]
   (dissoc doc :xt/id))
 
-(def ^:private hydration-width 4)
 (def ^:private default-page-size 100)
 (def ^:private max-page-size 1000)
 (def ^:private scan-page-size 1000)
 
-(defn- hydrate-projected
-  "Hydrate projected identities with bounded concurrency while preserving
-  their order. A 1,000-entry watcher page otherwise performs 1,000 serial
-  local XTDB round trips (~86s on the live store). Four in flight matches the
-  server's deliberately small concurrency budget and bounds the number of full
-  evidence bodies resident at once. `futon1b-xt/safe-q` supplies the global
-  four-query budget, so concurrency cannot multiply across HTTP requests."
+#_{:clj-kondo/ignore [:unused-private-var]}
+(defn- hydrate-projected-pointwise
+  "Historical N+1 hydrator retained only as an equality oracle in A1 tests."
   [node projected]
-  (->> projected
-       (partition-all hydration-width)
-       (mapcat (fn [batch]
-                 (->> batch
-                      (mapv #(future (fetch-by-id node (:xt/id %))))
-                      (mapv deref))))
-       (keep identity)))
+  (keep #(fetch-by-id node (:xt/id %)) projected))
+
+(defn- hydrate-projected
+  "Hydrate a bounded projected page in one parameterised SQL membership query.
+
+  XTDB 2.1 has no working XTQL list-membership predicate. A variadic XTQL `or`
+  also compiles into an oversized JVM method at realistic page sizes. The SQL
+  surface supports `IN` natively, so the selected ids remain parameters rather
+  than generated query code. Restore projected order after hydration because
+  SQL `IN` does not define row order. The HTTP limit caps this at 1,000 ids."
+  [node projected]
+  (if-not (seq projected)
+    []
+    (let [ids (mapv :xt/id projected)
+          placeholders (str/join "," (repeat (count ids) "?"))
+          sql (str "SELECT * FROM evidence WHERE _id IN (" placeholders ")")
+          docs (fxt/safe-q node (into [sql] ids))
+          by-id (into {} (map (juxt :xt/id identity)) docs)]
+      (into [] (keep #(get by-id (:xt/id %))) projected))))
 
 ;; ---------------------------------------------------------------------------
 ;; Write path: append-only, duplicate-id 409, transform + rescue + verify.
@@ -213,6 +220,11 @@
 
 (declare apply-post-filters)
 
+(defn- requires-post-filtering?
+  [{:keys [tags subject-type subject-id pattern-id include-ephemeral]}]
+  (or (seq tags) subject-type subject-id pattern-id
+      (false? include-ephemeral)))
+
 (defn- row-cursor [row]
   [(str (:evidence/at row)) (str (:xt/id row))])
 
@@ -230,7 +242,10 @@
   [node q limit initial-cursor]
   (loop [cursor initial-cursor
          selected []]
-    (let [page (vec (fetch-newest-projected-page node q cursor scan-page-size))
+    (let [page-size (if (requires-post-filtering? q)
+                      scan-page-size
+                      (max 1 (- limit (count selected))))
+          page (vec (fetch-newest-projected-page node q cursor page-size))
           matches (vec (apply-post-filters page q))
           selected' (into selected matches)]
       (cond
@@ -242,7 +257,7 @@
            ;; the next request proves exhaustion with an empty page.
            :next-cursor next-cursor})
 
-        (< (count page) scan-page-size)
+        (< (count page) page-size)
         {:entries (mapv public-doc (hydrate-projected node selected'))
          :next-cursor nil}
 
