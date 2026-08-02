@@ -529,24 +529,29 @@
                      (list 'where (list '= 'xt/id id)))))
 
 (defn- hydrate-hyperedge-window
-  "Hydrate an ordered projected window with bounded concurrency, preserving
-  order. Full hyperedge bodies never participate in the corpus-wide sort."
+  "Hydrate an ordered projected window in one XTDB query, then restore the
+  projected order client-side. Full bodies never participate in the corpus-wide
+  sort. XTDB 2.1 rejects SQL-style `in` over a list, so the membership predicate
+  is the equivalent variadic `or` of id equalities."
   [node projected temporal]
-  (->> projected
-       (partition-all 4)
-       (mapcat (fn [batch]
-                 (->> batch
-                      (mapv #(future (fetch-hyperedge-doc node (:xt/id %) temporal)))
-                      (mapv deref))))
-       (keep identity)))
+  (if-not (seq projected)
+    []
+    (let [ids (mapv :xt/id projected)
+          docs (fxt/safe-q
+                node
+                (list '-> (hyperedge-from '[*] temporal)
+                      (list 'where
+                            (cons 'or (map #(list '= 'xt/id %) ids)))))
+          by-id (into {} (map (juxt :xt/id identity)) docs)]
+      (into [] (keep #(get by-id (:xt/id %))) projected))))
 
 (defn- hyperedges-query-uncached
-  "GET /api/alpha/hyperedges?type=… and/or end=… (+limit/latest,
+  "GET /api/alpha/hyperedges?type=… and/or end=… (+limit/latest/after,
   +repo/source-file for type-only queries). When end is present, type is an
   optional pushed-down filter rather than a competing branch. :count is the
   true type total when unfiltered even if limit truncates; returned-count
   otherwise (contract §4)."
-  [node {:keys [type end limit repo source-file latest? include-total?]
+  [node {:keys [type end limit repo source-file after latest? include-total?]
          :or {include-total? true}
          :as opts}]
   (let [temporal (select-keys opts [:valid-as-of :system-as-of])]
@@ -589,7 +594,8 @@
                     ;; push down — the [*] whole-type pull timed out live on
                     ;; the 259k-doc edits type (2026-07-11)
                     repo (conj (list '= 'prop/repo repo))
-                    source-file (conj (list '= 'prop/source-file source-file)))
+                    source-file (conj (list '= 'prop/source-file source-file))
+                    after (conj (list '> 'xt/id after)))
           query-tail (cond-> [(cons 'where clauses)]
                        latest? (conj (list 'order-by
                                            {:val 'prop/timestamp :dir :desc})
@@ -630,15 +636,21 @@
           sorted (if (or latest? (and (int? limit) (pos? limit)))
                    filtered
                    (sort-by #(str (:xt/id %)) filtered))
-          limited (if (and (not latest?) (int? limit) (pos? limit))
-                    (take limit sorted)
-                    sorted)
-          out (mapv #(dissoc % :xt/id) limited)]
-      {:hyperedges out
-       :count (if (or (not include-total?) latest? repo source-file)
-                (count out)
-                total)
-       :count-exact? (boolean include-total?)}))))
+          limited-seq (if (and (not latest?) (int? limit) (pos? limit))
+                        (take limit sorted)
+                        sorted)
+          limited (vec limited-seq)
+          out (mapv #(dissoc % :xt/id) limited)
+          next-cursor (when (and (not latest?)
+                                 (int? limit) (pos? limit)
+                                 (= limit (count limited)))
+                        (:xt/id (peek limited)))]
+      (cond-> {:hyperedges out
+               :count (if (or (not include-total?) latest? repo source-file)
+                        (count out)
+                        total)
+               :count-exact? (boolean include-total?)}
+        next-cursor (assoc :next-cursor next-cursor))))))
 
 (defonce ^:private !hyperedge-query-cache (atom {}))
 

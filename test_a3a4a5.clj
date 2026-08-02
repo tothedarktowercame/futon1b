@@ -7,9 +7,12 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as cstr]
             [futon1b-gates :as gates]
+            [futon1b-graph :as graph]
             [futon1b-server :as srv]
+            [futon1b-xt :as fxt]
             [xtdb.node :as xtn])
   (:import [java.net URI]
+           [java.net URLEncoder]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
             HttpResponse$BodyHandlers]))
 
@@ -248,6 +251,38 @@
                    (false? (:count-exact? (:body r)))
                    (= 1 (count (get-in r [:body :hyperedges]))))
               r))
+    (let [calls (atom 0)
+          safe-q fxt/safe-q]
+      (graph/invalidate-hyperedge-query-cache!)
+      (let [r (with-redefs [fxt/safe-q (fn [& args]
+                                         (swap! calls inc)
+                                         (apply safe-q args))]
+                (req "GET" (str HXS "?type=test/edge&limit=2&include-total=false")))]
+        (check! "bounded type read uses one projection and one hydration query"
+                (and (= 200 (:status r))
+                     (= 2 (count (get-in r [:body :hyperedges])))
+                     (= 2 @calls))
+                {:response r :safe-q-calls @calls})))
+    (let [page-1 (req "GET" (str HXS "?type=test/edge&limit=1&include-total=false"))
+          cursor-1 (get-in page-1 [:body :next-cursor])
+          page-2 (req "GET" (str HXS "?type=test/edge&limit=1&after="
+                                     (URLEncoder/encode cursor-1 "UTF-8")))
+          cursor-2 (get-in page-2 [:body :next-cursor])
+          page-3 (req "GET" (str HXS "?type=test/edge&limit=1&include-total=false&after="
+                                     (URLEncoder/encode cursor-2 "UTF-8")))
+          ids (mapv #(get-in % [:hx/id])
+                    (concat (get-in page-1 [:body :hyperedges])
+                            (get-in page-2 [:body :hyperedges])))]
+      (check! "after cursor walks ordered type without duplicates or gaps"
+              (and (= 2 (count (distinct ids)))
+                   (= 2 (count ids))
+                   (= 2 (get-in page-2 [:body :count]))
+                   (true? (get-in page-2 [:body :count-exact?]))
+                   (string? cursor-1)
+                   (string? cursor-2)
+                   (empty? (get-in page-3 [:body :hyperedges]))
+                   (nil? (get-in page-3 [:body :next-cursor])))
+              [page-1 page-2 page-3]))
     (let [r (req "GET" (str HXS "?type=test/edge&repo=r1"))]
       (check! "repo props filter -> 1, filtered count"
               (and (= 1 (:count (:body r)))
