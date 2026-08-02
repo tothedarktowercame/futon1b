@@ -528,20 +528,45 @@
   (fxt/q1 node (list '-> (hyperedge-from '[*] temporal)
                      (list 'where (list '= 'xt/id id)))))
 
+;; Maximum id-equality clauses in one membership predicate.
+;;
+;; XTDB 2.1 rejects SQL-style `in` over a list, so the predicate is a variadic
+;; `or` of id equalities — and XTDB compiles that expression to bytecode via
+;; `reify`, so a large disjunction overruns the JVM method-size limit. Measured
+;; on a 6000-doc fixture (scale_probe_bisect / scale_probe_chunk): a single
+;; window of 100 clauses compiles, 200 and 250 raise
+;; "Syntax error compiling reify* at (0:0)", and 500+ raise `xtdb.error.Fault`.
+;; Worse, when the failure text happens to match `safe-q`'s tolerated patterns
+;; it is swallowed and the read returns EMPTY rather than throwing — a 200 with
+;; silent data loss. So the window must be chunked, not merely large.
+;;
+;; 50, not the measured 100 ceiling: the real constraint is expression SIZE, and
+;; size scales with id LENGTH as well as clause count. The probe's synthetic ids
+;; are ~26 chars; real ones run 60-70
+;; (`hx|mission-scope|E-memory-latency/pattern/tactic-algebra-interference`), so
+;; a count tuned at the synthetic ceiling would still overrun on live data. 50
+;; leaves ~2x margin and measured marginally FASTER than 100 anyway
+;; (19.7s vs 22.4s to hydrate 5000 docs).
+(def ^:private hydration-chunk-size 50)
+
 (defn- hydrate-hyperedge-window
-  "Hydrate an ordered projected window in one XTDB query, then restore the
-  projected order client-side. Full bodies never participate in the corpus-wide
-  sort. XTDB 2.1 rejects SQL-style `in` over a list, so the membership predicate
-  is the equivalent variadic `or` of id equalities."
+  "Hydrate an ordered projected window in O(n/chunk) XTDB queries, then restore
+  the projected order client-side. Full bodies never participate in the
+  corpus-wide sort, and no single query carries more than
+  `hydration-chunk-size` id-equality clauses (see the note above — an
+  unbounded disjunction fails, sometimes silently)."
   [node projected temporal]
   (if-not (seq projected)
     []
-    (let [ids (mapv :xt/id projected)
-          docs (fxt/safe-q
-                node
-                (list '-> (hyperedge-from '[*] temporal)
-                      (list 'where
-                            (cons 'or (map #(list '= 'xt/id %) ids)))))
+    (let [docs (into []
+                     (mapcat
+                      (fn [batch]
+                        (fxt/safe-q
+                         node
+                         (list '-> (hyperedge-from '[*] temporal)
+                               (list 'where
+                                     (cons 'or (map #(list '= 'xt/id %) batch)))))))
+                     (partition-all hydration-chunk-size (map :xt/id projected)))
           by-id (into {} (map (juxt :xt/id identity)) docs)]
       (into [] (keep #(get by-id (:xt/id %))) projected))))
 
@@ -641,10 +666,18 @@
                         sorted)
           limited (vec limited-seq)
           out (mapv #(dissoc % :xt/id) limited)
+          ;; The cursor advances over the SERVER window (`docs`), not the
+          ;; client-filtered one. repo/source-file are re-filtered in Clojure
+          ;; after the bounded read, so deriving the cursor from `limited` ended
+          ;; a walk the moment any row was dropped — silently returning partial
+          ;; results, and precisely on the repo+cursor path callers page with.
+          ;; Emit whenever the SERVER returned a full window; the last projected
+          ;; id is the correct resume point regardless of what survived filtering.
+          server-window (vec docs)
           next-cursor (when (and (not latest?)
                                  (int? limit) (pos? limit)
-                                 (= limit (count limited)))
-                        (:xt/id (peek limited)))]
+                                 (= limit (count server-window)))
+                        (:xt/id (peek server-window)))]
       (cond-> {:hyperedges out
                :count (if (or (not include-total?) latest? repo source-file)
                         (count out)
