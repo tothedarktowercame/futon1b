@@ -540,6 +540,7 @@
         ex #(respond! ex 200 (pr-str (graph/hyperedges-query
                                       @!node {:type (p "type") :end (p "end")
                                               :limit (parse-limit p)
+                                              :after (p "after")
                                               :repo (p "repo")
                                               :source-file (p "source-file")
                                               :valid-as-of
