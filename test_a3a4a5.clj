@@ -258,7 +258,10 @@
                                          (swap! calls inc)
                                          (apply safe-q args))]
                 (req "GET" (str HXS "?type=test/edge&limit=2&include-total=false")))]
-        (check! "bounded type read uses one projection and one hydration query"
+        ;; 2 = one projection + one hydration chunk. Hydration is chunked at
+        ;; `hydration-chunk-size` (50), so a window larger than that costs one
+        ;; query per chunk, not one overall — this fixture's 2 rows fit in one.
+        (check! "bounded type read uses one projection and one hydration chunk"
                 (and (= 200 (:status r))
                      (= 2 (count (get-in r [:body :hyperedges])))
                      (= 2 @calls))
