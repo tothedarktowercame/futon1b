@@ -349,9 +349,29 @@
   ;; and liveness. Contending scans fail fast with a retryable 503.
   (Semaphore. 2 true))
 
+;; How long a scan will wait for a permit before shedding.
+;;
+;; The untimed `.tryAcquire` this replaces did NO queueing: a request arriving
+;; while both permits were held failed instantly, even if one would free up
+;; milliseconds later. Worse, Java's UNTIMED tryAcquire barges — it takes a free
+;; permit "even if other threads are currently waiting" — so the `true` fairness
+;; flag on the semaphore was inert, and only the TIMED form honours the FIFO
+;; queue. Together those starved whichever route asked least often.
+;;
+;; Measured 2026-08-02: /api/alpha/evidence arrives ~30/min with multi-week
+;; windows and holds a permit for 2.8s, 5.3s, 11.2s, 43.7s; against that,
+;; /api/alpha/hyperedges was rejected 61 times out of 61 while evidence still
+;; succeeded ~40% of the time. Since mission-scope ingest READS /hyperedges
+;; before it writes, that starve made the reingest lane self-blocking whenever
+;; the evidence pollers were busy.
+;;
+;; 3s is chosen to cover the common short scans without letting a queue build
+;; behind a pathological one; genuine overload still sheds, just not instantly.
+(def ^:private expensive-read-wait-ms 3000)
+
 (defn- with-expensive-read!
   [^HttpExchange ex f]
-  (if (.tryAcquire expensive-read-permit)
+  (if (.tryAcquire expensive-read-permit expensive-read-wait-ms TimeUnit/MILLISECONDS)
     (try
       (f)
       (finally (.release expensive-read-permit)))
