@@ -265,7 +265,26 @@ wave does not contain enough surviving documents.
   is sanitized by the same quoting function as `q`. At most **32** terms are
   accepted. Response:
   `{:df {"t1" <document-frequency> ...} :indexed <indexed-row-count>}`.
-- `stats=true` returns sidecar statistics as before.
+- `stats=true` returns sidecar statistics:
+  `{:indexed <n from the last catch-up> :errors <live-index failures since
+  boot> :last-error {:id :at :error} :last-at <catch-up checkpoint>
+  :rows <indexed rows> :ready <bool> :periodic? <bool>
+  :catch-up-running? <bool>}`.
+  - `:last-at` is the **catch-up checkpoint**, not a freshness watermark —
+    live appends index without advancing it, so the index is routinely
+    newer than `:last-at`. Do not read a stale `:last-at` as a stalled index.
+  - `:errors` counts fire-and-forget `on-append!` failures. Each one also
+    logs `[fts] index failed id=… at=… — <reason>` and lands in
+    `:last-error`, so a gap is attributable rather than merely counted.
+  - `:periodic?` reports the repair loop (below). `:catch-up-running?` is
+    true while a build holds the single-flight guard.
+- **Repair loop.** A catch-up runs every `FUTON1B_FTS_CATCHUP_MS` ms
+  (default 300000; `<= 0` disables) so a failed live index is repaired
+  without a restart. It uses a smaller page than the boot build, because
+  the batch write transaction is what contends with `on-append!` for
+  sqlite's single writer. `catch-up!` is single-flight: a concurrent
+  caller (periodic loop vs. a manual `POST {:op :catch-up}`) receives
+  `{:skipped :already-running}` rather than starting a second scan.
 
 ### GET /api/alpha/evidence/count
 **Does not exist in futon1a** (falls through to the `{id}` handler → 404).
