@@ -22,7 +22,9 @@
   (:require [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [clojure.string :as str]
-            [futon1b-xt :as fxt]))
+            [futon1b-xt :as fxt])
+  (:import [java.util.concurrent Executors ScheduledExecutorService
+            ThreadFactory TimeUnit]))
 
 (def ^:private unqualified {:builder-fn rs/as-unqualified-maps})
 
@@ -32,6 +34,22 @@
 (def hydration-width 4)
 (def max-df-terms 32)
 (def max-offset 10000)
+
+;; Periodic repair loop. on-append! is fire-and-forget and deliberately does
+;; NOT advance the checkpoint, so a failed live index is repaired only by a
+;; catch-up — and until 2026-08-03 the only triggers were a restart or a
+;; manual POST. Measured that day: 70 silent, unattributable index misses,
+;; recovered in 30s once a catch-up was finally run by hand.
+(def default-catch-up-interval-ms
+  (or (when-let [s (System/getenv "FUTON1B_FTS_CATCHUP_MS")]
+        (try (Long/parseLong s) (catch Exception _ nil)))
+      300000))
+
+;; Small page on the repair pass. index-batch! wraps a whole page in ONE write
+;; transaction, and that transaction is what contends with on-append! for
+;; sqlite's single writer (busy_timeout 10s) — a boot-sized 1000-doc page can
+;; outlast the timeout and manufacture the very failures this loop repairs.
+(def periodic-page 200)
 
 ;; ---------------------------------------------------------------------------
 ;; Schema + init.
@@ -115,26 +133,37 @@
                     '(order-by evidence/at xt/id)
                     (list 'limit page))))
 
+(defonce ^:private !catch-up-running? (atom false))
+
 (defn catch-up!
   "Index everything strictly after the last indexed (at, id) checkpoint.
    With no checkpoint this is the full deterministic rebuild. Returns
    {:indexed n :last-at s}. Batched keyset pagination — never holds more
-   than `page` bodies (the 259MB read-edn-file lesson)."
+   than `page` bodies (the 259MB read-edn-file lesson).
+
+   Single-flight: a concurrent caller gets {:skipped :already-running}
+   instead of piling a second scan onto sqlite's single writer. Two builds
+   at once only lengthen the write-lock hold and so amplify the on-append!
+   failures a catch-up exists to repair."
   [node & {:keys [page] :or {page 1000}}]
-  (let [ds @!ds]
-    (loop [after [(or (meta-get ds "last-at") "") (or (meta-get ds "last-id") "")]
-           total 0]
-      (let [docs (scan-after node after page)]
-        (if (empty? docs)
-          (do (swap! !stats assoc :indexed total)
-              {:indexed total :last-at (meta-get ds "last-at")})
-          (let [n (index-batch! ds docs)
-                lst (last docs)
-                hi [(str (:evidence/at lst)) (str (:xt/id lst))]]
-            (meta-set! ds "last-at" (first hi))
-            (meta-set! ds "last-id" (second hi))
-            (swap! !stats assoc :last-at (first hi))
-            (recur hi (+ total n))))))))
+  (if-not (compare-and-set! !catch-up-running? false true)
+    {:skipped :already-running}
+    (try
+      (let [ds @!ds]
+        (loop [after [(or (meta-get ds "last-at") "") (or (meta-get ds "last-id") "")]
+               total 0]
+          (let [docs (scan-after node after page)]
+            (if (empty? docs)
+              (do (swap! !stats assoc :indexed total)
+                  {:indexed total :last-at (meta-get ds "last-at")})
+              (let [n (index-batch! ds docs)
+                    lst (last docs)
+                    hi [(str (:evidence/at lst)) (str (:xt/id lst))]]
+                (meta-set! ds "last-at" (first hi))
+                (meta-set! ds "last-id" (second hi))
+                (swap! !stats assoc :last-at (first hi))
+                (recur hi (+ total n)))))))
+      (finally (reset! !catch-up-running? false)))))
 
 (defn on-append!
   "Write-path hook: index one freshly-written doc. Fire-and-forget —
@@ -148,8 +177,74 @@
     (future
       (try
         (index-batch! ds [xdoc])
-        (catch Throwable _
-          (swap! !stats update :errors inc))))))
+        (catch Throwable t
+          ;; Attributable, not just counted. A bare counter tells you THAT
+          ;; n documents fell out of the index and never WHICH — so the gap
+          ;; is undiagnosable and, since :ready stays true, invisible.
+          (let [id (str (:xt/id xdoc))
+                at (str (:evidence/at xdoc))
+                msg (str (.getSimpleName (class t)) ": " (.getMessage t))]
+            (swap! !stats (fn [s]
+                            (-> s
+                                (update :errors inc)
+                                (assoc :last-error {:id id :at at :error msg}))))
+            (println (str "[fts] index failed id=" id " at=" at " — " msg
+                          " (recoverable: checkpoint not advanced; the next"
+                          " catch-up re-indexes it)"))
+            (flush)))))))
+
+(defonce ^:private !scheduler (atom nil))
+
+(defn- daemon-factory []
+  (reify ThreadFactory
+    (newThread [_ r]
+      (doto (Thread. ^Runnable r "fts-periodic-catch-up")
+        (.setDaemon true)))))
+
+(defn start-periodic-catch-up!
+  "Run catch-up! every INTERVAL-MS so a failed live append is repaired
+   without waiting for a restart. Daemon thread; idempotent (a second call
+   while one is scheduled is a no-op). INTERVAL-MS <= 0 disables the loop.
+
+   scheduleWithFixedDelay, not AtFixedRate: a build slower than the interval
+   must not stack another on top of it."
+  [node & {:keys [interval-ms page]
+           :or {interval-ms default-catch-up-interval-ms page periodic-page}}]
+  (cond
+    (not (pos? (long interval-ms))) {:ok true :periodic false :reason :disabled}
+    (some? @!scheduler) {:ok true :periodic true :reason :already-running}
+    :else
+    (let [sched (Executors/newSingleThreadScheduledExecutor (daemon-factory))]
+      (.scheduleWithFixedDelay
+       sched
+       ^Runnable
+       (fn []
+         (try
+           (let [{:keys [indexed skipped]} (catch-up! node :page page)]
+             ;; Quiet in the steady state — log only real repair work, so a
+             ;; line here always means something had fallen out of the index.
+             (when (and (nil? skipped) (pos? (long (or indexed 0))))
+               (println (str "[fts] periodic catch-up re-indexed " indexed " doc(s)"))
+               (flush)))
+           (catch InterruptedException _
+             ;; stop-periodic-catch-up! interrupting an in-flight scan is an
+             ;; intentional shutdown, not a failure — don't cry wolf.
+             (.interrupt (Thread/currentThread)))
+           (catch Throwable t
+             (println (str "[fts] periodic catch-up failed: "
+                           (.getSimpleName (class t)) ": " (.getMessage t)))
+             (flush))))
+       (long interval-ms) (long interval-ms) TimeUnit/MILLISECONDS)
+      (reset! !scheduler sched)
+      {:ok true :periodic true :interval-ms interval-ms :page page})))
+
+(defn stop-periodic-catch-up!
+  "Cancel the repair loop (test/teardown use)."
+  []
+  (when-let [^ScheduledExecutorService s @!scheduler]
+    (.shutdownNow s)
+    (reset! !scheduler nil)
+    {:ok true :periodic false}))
 
 ;; ---------------------------------------------------------------------------
 ;; Search: FTS5 candidates -> XTDB re-check.
@@ -225,14 +320,15 @@
 (defn- recheck-candidates
   "Re-check candidates in waves of k and stop once k survive. This preserves
   the old short-circuit while replacing serial point reads with bounded
-  concurrency. Only the filter/result projection is fetched here."
-  [node cands k params]
+  concurrency. `cols` is what each surviving doc is fetched with — the narrow
+  re-check projection when the caller does not want bodies, `[*]` when it does."
+  [node cands k params cols]
   (loop [remaining cands
          survivors []]
     (if (or (>= (count survivors) k) (empty? remaining))
       (vec (take k survivors))
       (let [wave (vec (take k remaining))
-            docs (fetch-wave node (mapv :id wave) recheck-cols)
+            docs (fetch-wave node (mapv :id wave) cols)
             accepted (into []
                            (keep (fn [[cand doc]]
                                    (when (and doc (passes-recheck? doc params))
@@ -272,16 +368,21 @@
   [node {:keys [limit hydrate] :as params}]
   (let [ds @!ds
         k (or limit 10)
-        cands (candidates ds params)
-        survivors (recheck-candidates node cands k params)
         hydrate? (not (false? hydrate))
+        cands (candidates ds params)
+        ;; The re-check reads author/session/at/ephemeral?, ALL of which a full
+        ;; doc already carries. So when the caller wants bodies, fetch `[*]`
+        ;; ONCE in the re-check wave: a separate projection pass would double
+        ;; the XTDB round trips on the default (hydrated) path — every existing
+        ;; caller — for no gain. The narrow projection is a win only when the
+        ;; bodies are then thrown away, i.e. under hydrate=false.
+        survivors (recheck-candidates node cands k params
+                                      (if hydrate? '[*] recheck-cols))
         results
         (if hydrate?
-          (let [full-docs (fetch-wave node (mapv (comp :xt/id :doc) survivors) '[*])]
-            (into []
-                  (keep (fn [[{:keys [score]} doc]]
-                          (when doc {:score score :entry (dissoc doc :xt/id)})))
-                  (map vector survivors full-docs)))
+          (mapv (fn [{:keys [score doc]}]
+                  {:score score :entry (dissoc doc :xt/id)})
+                survivors)
           (mapv (fn [{:keys [score doc]}]
                   {:score score
                    :evidence/id (:evidence/id doc)
@@ -299,4 +400,6 @@
         rows (when ds
                (:n (jdbc/execute-one! ds ["SELECT count(*) AS n FROM ev_fts"]
                                       unqualified)))]
-    (assoc @!stats :rows rows :ready (some? ds))))
+    (assoc @!stats :rows rows :ready (some? ds)
+           :periodic? (some? @!scheduler)
+           :catch-up-running? @!catch-up-running?)))

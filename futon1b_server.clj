@@ -713,6 +713,10 @@
   "Stop a server returned by start-server! and release its worker threads."
   [^HttpServer server]
   (.stop server 0)
+  ;; Cancel the FTS repair loop too — it closes over the node, so leaving it
+  ;; scheduled past shutdown means a catch-up against a closed node every
+  ;; interval, forever.
+  (text/stop-periodic-catch-up!)
   (when-let [{:keys [executor companions]} (get @!server-executors server)]
     (swap! !server-executors dissoc server)
     (.shutdownNow ^java.util.concurrent.ExecutorService executor)
@@ -737,7 +741,15 @@
       (doto (Thread. (fn []
                        (try (println "[fts] catch-up:" (pr-str (text/catch-up! @!node)))
                             (catch Throwable t
-                              (println "[fts] catch-up failed:" (.getMessage t))))))
+                              (println "[fts] catch-up failed:" (.getMessage t))))
+                       ;; Only after the boot build: the repair loop is
+                       ;; single-flighted against it anyway, but starting it
+                       ;; here keeps the first run a genuine tail scan.
+                       (try (println "[fts] periodic catch-up:"
+                                     (pr-str (text/start-periodic-catch-up! @!node)))
+                            (catch Throwable t
+                              (println "[fts] periodic catch-up not started:"
+                                       (.getMessage t))))))
         (.setDaemon true)
         (.start)))
     (catch Throwable t
