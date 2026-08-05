@@ -1,0 +1,14 @@
+;; M-xtdb-22x-benchmarking — XTDB 2.2.0-rc0 bench node (Zone).
+;; Cloned from futon1b's house pattern (deps.edn :node alias); version bumped.
+;; Run: clojure -M:node -m ingest-graphs --graphs <dir> --store <dir>
+;;      clojure -M:node -m query-probe   --store <dir>
+{:paths ["."]
+ :deps
+ {org.clojure/clojure {:mvn/version "1.12.4"}
+  com.xtdb/xtdb-core  {:mvn/version "2.2.0-rc0"}
+  com.xtdb/xtdb-api   {:mvn/version "2.2.0-rc0"}}
+ :aliases
+ {:node {:jvm-opts ["--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
+                    "-Dio.netty.tryReflectionSetAccessible=true"
+                    "-Djava.net.preferIPv4Stack=true"
+                    "-Xmx4g" "-XX:MaxDirectMemorySize=4g"]}}}
