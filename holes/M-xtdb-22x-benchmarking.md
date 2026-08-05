@@ -267,6 +267,58 @@ check-parens on any elisp/clj, tests, oracle-agreement from the acceptance
 bar). Benchmark runs that produce cited numbers get the TN treatment:
 environment stated, confounds listed, scripts named.
 
+## Next steps (recorded 2026-08-05, post-first-ingest)
+
+1. **rc0 auth repro** — the other half of P1: re-run the pgwire/authn
+   bounded repro (TN-xtdb-derived-secondary-index §write-path) against
+   2.2.0-rc0 to test James's "more effort into auth" concretely. Also look
+   at the **Flight SQL server** rc0 starts by default — new client (and
+   auth?) surface.
+2. **Re-ingest cadence** — `ingest_graphs.clj` is idempotent; wire a
+   periodic re-run (cron or a loop on Zone) so the bench store tracks the
+   shards. Each re-ingest of a changed graph is a bitemporal version —
+   deliberately part of the benchmark corpus's history.
+3. **Full-extraction ingest** (Joe, 2026-08-05: ingest should include
+   symbol grounding and the other pipeline features, not just S3). Facts
+   established: all 100 papers' S1 anatomy is on Zone
+   (`data/showcases/ct-anatomy/golden/fable-<pid>-dp-emacs.json` — marks
+   with symbol typings, scopes, binders), and the enriched candidates
+   carry `binder-context` / `enrichment` / `source-window` /
+   `anchor-lines`. Widen the schema: `iatc_marks` (per-mark rows from
+   dp-emacs JSON), `iatc_candidates` (enrichment layers), plus rung2
+   reports and `:holes` as rows. That makes "browse a fully-ingested
+   article" a query, and gives the text/scalar rungs realistic volume.
+4. **Programmatic quality checks — seeded today as R6 in
+   `query_probe.clj`**, integrity-as-queries over the first 10 graphs
+   (n=10 is enough to start qualitative work; 100 would be overkill —
+   Joe). First results: **2/30 edges dangle their premise ref; 0 dangling
+   conclusions; 0 empty node texts; 1/69 nodes anchored outside its
+   passage; 18/27 warrant-bearing edges are `missing-warrant` (3 edges
+   carry no warrant at all)**. Next checks worth adding: rung2-soft-fail
+   tally (every recent shard pass carries one — quantify), per-paper
+   warrant-missing rates, node-text ⊆ source-window faithfulness (needs
+   the candidates layer from step 3), and a mark6-overlap comparison
+   where papers coincide. Instrument caveat, upstream-worthy: correlated
+   `NOT EXISTS` over an array element (`premise_refs[1]`) returned
+   silently wrong results on rc0 where the equivalent LEFT JOIN is
+   correct — potential SQL-semantics bug to minimally reproduce and
+   report.
+5. **Browsing surface** — verified: **no Emacs mode for a fully-ingested
+   article exists** (nothing consumes the dp-emacs JSON format; the name
+   was aspiration). Best renderings to date were the iffy HTML showcases.
+   With step 3 done, the cheapest good browser is probably a thin Emacs
+   mode querying the bench store (pgwire or the new Flight SQL surface)
+   rather than reviving the HTML path — house precedent:
+   `futon4/dev/arxana-xtdb-browse.el`. Decision deferred; rendering is
+   not on the benchmark's critical path.
+6. **Pass discipline** (Joe's caution): the pipeline model assumes a full
+   corpus pass per stage before the next refinement pass — the
+   completeness ledger enforces exactly this, so *official* S4+/second-pass
+   numbers wait for S3 × 100 to drain. But prefix work on the first ~10 is
+   legitimate **DERIVE probing** when labeled as such: S7 box-typing is
+   per-graph and can run on the prefix as a probe; the R6 checks above are
+   corpus-independent integrity facts; neither pretends to be a pass.
+
 ## Log
 
 - 2026-08-05 (evening) — **Bench node LIVE; P1's first rc0 datum in.**

@@ -68,4 +68,25 @@
             (println (format "    %-24s %s" label r))))
         (println "  R5-SQL id IN (...):")
         (rung node "SQL _id IN (?,?,?)"
-              "SELECT _id FROM iatc_nodes WHERE _id IN (?, ?, ?)" some-id "nope-1" "nope-2")))))
+              "SELECT _id FROM iatc_nodes WHERE _id IN (?, ?, ?)" some-id "nope-1" "nope-2")
+        ;; R6: programmatic quality checks over the extraction itself —
+        ;; integrity as queries (each doubles as a join-shaped benchmark rung).
+        (println "  R6 extraction-quality checks (rows = defects, except census rungs):")
+        (rung node "R6a dangling premise refs"
+              (str "SELECT e._id FROM iatc_edges e LEFT JOIN iatc_nodes n "
+                   "ON n._id = e.premise_refs[1] "
+                   "WHERE e.premise_refs IS NOT NULL AND n._id IS NULL"))
+        (rung node "R6b dangling conclusion refs"
+              (str "SELECT e._id FROM iatc_edges e LEFT JOIN iatc_nodes n "
+                   "ON n._id = e.conclusion_refs[1] "
+                   "WHERE e.conclusion_refs IS NOT NULL AND n._id IS NULL"))
+        (rung node "R6c nodes with empty text"
+              "SELECT _id FROM iatc_nodes WHERE \"text\" IS NULL OR CHAR_LENGTH(\"text\") = 0")
+        (rung node "R6d node anchors outside passage"
+              (str "SELECT n._id FROM iatc_nodes n, iatc_graphs g WHERE n.graph = g._id "
+                   "AND n.line_lo IS NOT NULL "
+                   "AND (n.line_lo < g.line_lo OR n.line_hi > g.line_hi)"))
+        (rung node "R6e census: missing-warrant edges"
+              "SELECT _id FROM iatc_edges WHERE warrant_kind = 'missing-warrant'")
+        (rung node "R6f census: edges with any warrant"
+              "SELECT _id FROM iatc_edges WHERE warrant_kind IS NOT NULL")))))
