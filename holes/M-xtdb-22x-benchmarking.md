@@ -269,6 +269,23 @@ environment stated, confounds listed, scripts named.
 
 ## Next steps (recorded 2026-08-05, post-first-ingest)
 
+0. **XTQL `in` — build it ourselves?** (James via Joe, 2026-08-05 follow-up:
+   most XTDB users use SQL and don't much care about XTQL — "if we want
+   `in` we may have to build it.") Consequences: (a) the benchmark's
+   client story stays **SQL-first** — which matches both the user base and
+   our production workaround, and the ladder already is; (b) the R5
+   finding converts from bug-report-and-wait into a **well-scoped first
+   in-core contribution**: an XTQL list-membership predicate lowering onto
+   the same plan SQL `IN` already uses (the planner machinery exists — the
+   work is XTQL surface: parse/type-check `(in expr [literals…])` and
+   lower it). Small, testable, directly ours to need, and pre-signaled as
+   acceptable by the maintainer. NOTE: this changes the mission's "no
+   local xtdb checkout" constraint — an in-core PR needs one; that
+   boundary move happens only when this item is actually picked up.
+   (c) Joe's XTQL-first motivation for the memory system is now partly a
+   sustainability question — XTQL staying good depends on users like us
+   contributing; worth saying plainly in the next Henderson exchange.
+
 1. **rc0 auth repro** — the other half of P1: re-run the pgwire/authn
    bounded repro (TN-xtdb-derived-secondary-index §write-path) against
    2.2.0-rc0 to test James's "more effort into auth" concretely. Also look
