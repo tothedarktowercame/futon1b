@@ -338,6 +338,35 @@ environment stated, confounds listed, scripts named.
 
 ## Log
 
+- 2026-08-06 — **Bench store at full e2e corpus: 98 graphs / 772 nodes /
+  419 edges** (ingest idempotent, 83 ms/graph warm). Ladder at this size,
+  cold→warm over 3 repeats: R1 point 163→24 ms · R2 scalar 224→83 ms (608
+  rows) · R3 text LIKE 185→45 ms (27 rows — the corpus is finally big
+  enough for text queries to return anything) · R4 edge→node join 289→37 ms
+  (409 rows) · SQL `IN` 131→63 ms.
+
+  **R6 quality census across three corpus sizes — the useful result:**
+
+  | check | n=10 | n=22 | n=98 |
+  |---|---|---|---|
+  | dangling premise refs | 2/30 (6.7%) | 2/77 (2.6%) | **3/419 (0.7%)** |
+  | dangling conclusion refs | 0 | 0 | **0** |
+  | empty node text | 0 | 0 | **1/772 (0.1%)** |
+  | anchor outside passage | 1/69 | 1/179 | **1/772 (0.1%)** |
+  | missing-warrant edges | 18/27 (67%) | 42/73 (58%) | **222/383 (58%)** |
+
+  Two things this says. (1) **Structural defects are front-loaded, not a
+  constant rate** — the dangling-ref rate falls ~10× as the corpus grows,
+  i.e. the early graphs carried them and later ones did not; total
+  structural defect load is ~0.4% of nodes+edges. (2) **The missing-warrant
+  rate has stabilised at 58%** across a 4.5× corpus increase — stable
+  enough to quote: *in mined category-theory proofs, 58% of
+  warrant-bearing inference edges carry `missing-warrant`.* That is the
+  quantified form of the Lakatos point (published mathematics deletes its
+  scaffolding), and it is the number the three-arm exam in
+  `futon6/holes/E-mining-qual-loop.md` §3 is designed to attribute —
+  literature omission vs extraction failure.
+
 - 2026-08-05 (evening) — **Bench node LIVE; P1's first rc0 datum in.**
   `futon1b/bench22x/` (deps.edn + `ingest_graphs.clj` + `query_probe.clj`,
   house `:node` pattern bumped to **2.2.0-rc0**) deployed to
