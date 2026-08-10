@@ -8,3 +8,4 @@ switchover-store/
 switchover-server.log
 gc.log*
 migration-export-lucy/
+bench22x/store-*/
