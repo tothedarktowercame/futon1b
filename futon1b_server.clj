@@ -214,13 +214,30 @@
 
 (defn- respond!
   "EDN by default; JSON when the request asked for it (contract §0).
-  Accepts the response VALUE (map) — encoding happens here."
+  Accepts the response VALUE (map) OR an already-serialized EDN string.
+
+  A string body is ALREADY EDN — most callers pass `(pr-str {...})`. It is
+  therefore written straight out on the EDN path. It used to be round-tripped
+  through `edn/read-string` and re-printed, which is a no-op when it works and
+  a 500 when it does not: `pr-str` can emit forms `edn/read-string` cannot read
+  back (`#xt/instant`, `#object[...]`, and at least one shape that reports
+  \"Map literal must contain an even number of forms\"). That made correctly
+  STORED documents unreadable, and — worse — masked whatever the real error
+  was, since the reader threw before the caller's value was ever sent.
+  Found 2026-08-13 when three agency/* pattern entities began returning 500 on
+  read; see futon3c/docs/pattern-retrieval-architecture.md.
+
+  The JSON path still parses, because it needs a data structure to encode. That
+  is the residual: a JSON-requested response whose EDN does not read back will
+  still fail. The full fix is for callers to pass the map and drop their own
+  `pr-str` — ~30 call sites, not attempted here."
   [^HttpExchange ex status body]
-  (let [v (if (string? body) (edn/read-string body) body)]
-    (if *json-response?*
+  (if *json-response?*
+    (let [v (if (string? body) (edn/read-string body) body)]
       (respond-str! ex status (json/generate-string v {:escape-non-ascii true})
-                    "application/json; charset=utf-8")
-      (respond-str! ex status (pr-str v) "application/edn; charset=utf-8"))))
+                    "application/json; charset=utf-8"))
+    (respond-str! ex status (if (string? body) body (pr-str body))
+                  "application/edn; charset=utf-8")))
 
 (defn- query-params [^HttpExchange ex]
   (into {}
@@ -725,7 +742,12 @@
       (.shutdownNow ^java.util.concurrent.ExecutorService companion-executor)))
   nil)
 
-(defn start-server! [{:keys [store-dir port health-port node]}]
+(defn- socket-address [bind-host port]
+  (if (str/blank? bind-host)
+    (InetSocketAddress. (int port))
+    (InetSocketAddress. ^String bind-host (int port))))
+
+(defn start-server! [{:keys [store-dir port health-port node bind-host]}]
   (gates/seed-mission-contract!)
   (reset! !node (or node (zm/open-store store-dir)))
   ;; Build the coherent current-memory projection before accepting traffic.
@@ -754,10 +776,10 @@
         (.start)))
     (catch Throwable t
       (println "[fts] init failed (serving continues):" (.getMessage t))))
-  (let [server (HttpServer/create (InetSocketAddress. (int port)) 50)
+  (let [server (HttpServer/create (socket-address bind-host port) 50)
         executor (bounded-executor 4 16)
         health-server (when health-port
-                        (HttpServer/create (InetSocketAddress. (int health-port)) 8))
+                        (HttpServer/create (socket-address bind-host health-port) 8))
         health-executor (when health-server (bounded-executor 1 4))]
     (.createContext server "/health" (handler health))
     ;; NB JDK HttpServer matches contexts by raw string prefix — the longer
@@ -793,7 +815,8 @@
                           (conj {:server health-server :executor health-executor}))})
     (.start server)
     (when health-server (.start health-server))
-    (println (format "futon1b-server up on :%d (store %s)" port store-dir))
+    (println (format "futon1b-server up on %s:%d (store %s)"
+                     (or (not-empty bind-host) "*") port store-dir))
     (when health-server
       (println (format "futon1b independent liveness up on :%d" health-port)))
     server))
@@ -805,6 +828,7 @@
       (case (first args)
         "--store-dir" (recur (nnext args) (assoc opts :store-dir (second args)))
         "--port"      (recur (nnext args) (assoc opts :port (Long/parseLong (second args))))
+        "--bind-host" (recur (nnext args) (assoc opts :bind-host (second args)))
         "--health-port" (recur (nnext args) (assoc opts :health-port
                                                     (Long/parseLong (second args))))
         (throw (ex-info (str "Unknown arg: " (first args)) {:args args}))))))
