@@ -249,8 +249,8 @@
         (some->> preferred (sort-by #(str (:entity/id %))) first :entity/id))
       (str (random-uuid))))
 
-(defn write-entity!
-  "POST /api/alpha/entity — the route where every gate fires (contract §5)."
+(defn- build-entity
+  "Validate and build one entity without writing it."
   [node payload]
   (let [name' (:name payload)
         type (normalize-type (:type payload))]
@@ -263,13 +263,68 @@
                 (:external-id payload) (assoc :entity/external-id (:external-id payload))
                 (:source payload) (assoc :entity/source (:source payload))
                 (map? (:props payload)) (assoc :entity/props (:props payload)))
-          gate-res (gates/gate-entity-id! doc)   ; L4 canonical-id (may throw 400)
-          rescue (put-verified! node :entities doc)]
+          gate-res (gates/gate-entity-id! doc)]
+      {:doc doc
+       :type type
+       :queued? (:queued? gate-res)
+       :public (public-entity doc)})))
+
+(defn write-entity!
+  "POST /api/alpha/entity — the route where every gate fires (contract §5)."
+  [node payload]
+  (let [{:keys [doc type queued? public]} (build-entity node payload)
+        rescue (put-verified! node :entities doc)]
       (register-types! node [{:kind :entity :type-id type}])
       (cond-> {:profile "default"
-               :entity (public-entity doc)
+               :entity public
                :rescue rescue}
-        (:queued? gate-res) (assoc :queued? true)))))
+        queued? (assoc :queued? true))))
+
+(defn write-entities-batch!
+  "POST /api/alpha/entities/batch (contract §5 batch variant).
+  {:entities [<per-item shape of write-entity!> ...]}. Every item is built and
+  gate-validated before the first entity write, so an invalid item makes the
+  batch all-or-nothing. The entity docs commit in one execute-tx. XTDB 2 batch
+  puts can drop rows silently, so every doc is read back; each absent doc runs
+  through the per-doc rescue ladder and an unrescuable absence throws the L0
+  error. Type registration runs after verified entity persistence, once for
+  every distinct entity type, and may use its own verified transactions.
+  Envelope carries :rescue instead of :tx-id/:path-id. A transport/commit or
+  post-commit rescue failure is not an atomic rollback guarantee: callers must
+  treat an error after validation as indeterminate and read back by entity id."
+  [node payload]
+  (when-not (contains? payload :entities)
+    (throw (gates/layered-error 4 :missing-required {:required [:entities]})))
+  (let [entities (:entities payload)]
+    (when-not (and (sequential? entities) (seq entities) (every? map? entities))
+      (throw (gates/layered-error 4 :invalid-entities-batch
+                                  {:expected :non-empty-seq-of-maps
+                                   :got (if (sequential? entities)
+                                          (mapv (comp str type) entities)
+                                          (str (type entities)))})))
+    (let [built (mapv #(build-entity node %) entities)
+          docs (mapv (comp xf/transform-doc :doc) built)]
+      (try (xt/execute-tx node (mapv (fn [d] [:put-docs :entities d]) docs))
+           (catch Exception _ nil))
+      (let [rescue
+            (into {}
+                  (keep (fn [d]
+                          (when-not (fxt/present? node :entities (:xt/id d))
+                            (let [res (ingest/put-doc-with-rescue!
+                                       node :entities d !shape-log)]
+                              (if (fxt/present? node :entities (:xt/id d))
+                                [(:xt/id d) (if (keyword? res) res :ok)]
+                                (throw (gates/layered-error
+                                        0 :postcommit-missing-entities
+                                        {:xt/id (:xt/id d) :table :entities})))))))
+                  docs)]
+        (register-types! node (mapv (fn [t] {:kind :entity :type-id t})
+                                    (distinct (map :type built))))
+        (cond-> {:profile "default"
+                 :count (count built)
+                 :entities (mapv :public built)}
+          (some :queued? built) (assoc :queued? true)
+          (seq rescue) (assoc :rescue rescue))))))
 
 (defn entities-latest
   "GET /api/alpha/entities/latest — generic branch + the pattern/library

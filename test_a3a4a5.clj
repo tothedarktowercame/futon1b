@@ -40,6 +40,7 @@
 
 (defn run-tests [base]
   (let [ENT (str base "/api/alpha/entity")
+        ENTS (str base "/api/alpha/entities")
         REL (str base "/api/alpha/relation")
         RELS (str base "/api/alpha/relations")
         HX (str base "/api/alpha/hyperedge")
@@ -69,6 +70,74 @@
               (and (= 200 (:status r1)) (string? (get-in r1 [:body :entity :id]))
                    (= (get-in r1 [:body :entity :id]) (get-in r2 [:body :entity :id])))
               [r1 r2]))
+
+    (println "— A3 entities/batch")
+    ;; Register the timing type before either clock starts so the measured
+    ;; transaction counts cover entity persistence, not type registration.
+    (req "POST" ENT {:id "timing-seed" :name "TimingSeed"
+                     :type "timing/entity"} ph)
+    (let [individual (mapv (fn [n]
+                             {:id (str "individual-" n)
+                              :name (str "Individual" n)
+                              :type "timing/entity"
+                              :source "entity-batch-timing"})
+                           (range 8))
+          batched (mapv (fn [n]
+                          {:id (str "batched-" n)
+                           :name (str "Batched" n)
+                           :type "timing/entity"
+                           :source "entity-batch-timing"})
+                        (range 8))
+          individual-start (System/nanoTime)
+          individual-results (mapv #(req "POST" ENT % ph) individual)
+          individual-ms (/ (double (- (System/nanoTime) individual-start)) 1000000.0)
+          batch-start (System/nanoTime)
+          batch-result (req "POST" (str ENTS "/batch") {:entities batched} ph)
+          batch-ms (/ (double (- (System/nanoTime) batch-start)) 1000000.0)]
+      (println (format "  A1 timing: individual-ms=%.3f write-transactions=8 batch-ms=%.3f write-transactions=1"
+                       individual-ms batch-ms))
+      (check! "8 individual writes succeed"
+              (every? #(= 200 (:status %)) individual-results)
+              individual-results)
+      (check! "batch write -> 200 and :count 8"
+              (and (= 200 (:status batch-result))
+                   (= 8 (get-in batch-result [:body :count])))
+              batch-result)
+      (check! "every successful batch doc is readable by name"
+              (every? #(= 200 (:status (req "GET" (str ENT "/" (:name %)))))
+                      batched)
+              (mapv :name batched)))
+    (let [r (req "POST" (str ENTS "/batch") {} ph)]
+      (check! "batch missing :entities -> 400 :missing-required"
+              (and (= 400 (:status r))
+                   (= :missing-required (get-in r [:body :error :reason])))
+              r))
+    (let [r (req "POST" (str ENTS "/batch") {:entities []} ph)]
+      (check! "batch empty :entities -> 400 :invalid-entities-batch"
+              (and (= 400 (:status r))
+                   (= :invalid-entities-batch (get-in r [:body :error :reason])))
+              r))
+    (let [r (req "POST" (str ENTS "/batch")
+                 {:entities [{:id "valid-batch-sibling"
+                              :name "ValidBatchSibling" :type "gadget"}
+                             {:id "invalid-batch-sibling"
+                              :name "InvalidBatchSibling"}]}
+                 ph)
+          sibling (req "GET" (str ENT "/ValidBatchSibling"))]
+      (check! "invalid item -> 400 and valid sibling is not committed"
+              (and (= 400 (:status r))
+                   (= :missing-required (get-in r [:body :error :reason]))
+                   (= 404 (:status sibling)))
+              [r sibling]))
+    (let [r (req "POST" (str ENTS "/batch")
+                 {:entities [{:id "batch-even" :name "BatchEven"
+                              :type "batch/even"}
+                             {:id "batch-odd" :name "BatchOdd"
+                              :type "batch/odd"}]}
+                 ph)]
+      (check! "batch registers every distinct entity type"
+              (and (= 200 (:status r)) (= 2 (get-in r [:body :count])))
+              r))
 
     (println "— A3 entities: canonical-id gate over HTTP")
     (let [r (req "POST" ENT {:name "futon3c-d/mission/first-flights"
@@ -469,9 +538,11 @@
       (check! "census no params -> 400" (= 400 (:status r)) r))
     (let [r (req "GET" (str base "/api/alpha/types"))
           ids (set (map :type/id (get-in r [:body :types])))]
-      (check! "auto-registered types listed (:gadget :uses :mission/doc)"
+      (check! "auto-registered types include every distinct batch entity type"
               (and (contains? ids :gadget) (contains? ids :uses)
-                   (contains? ids :mission/doc))
+                   (contains? ids :mission/doc)
+                   (contains? ids :batch/even)
+                   (contains? ids :batch/odd))
               ids))
     (let [r (req "POST" (str base "/api/alpha/types/parent")
                  {:type/id "gadget" :type/kind "entity" :type/parent "thing"} ph)]

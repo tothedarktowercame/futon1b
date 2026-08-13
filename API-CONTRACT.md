@@ -543,6 +543,28 @@ unrescuable. §6 batch endpoint-existence is enforced for resolved ids
 (stricter than the single route's uuid pass-through). Empty or non-map
 `:relations` → L4 400 `:invalid-relations-batch`.
 
+### POST /api/alpha/entities/batch (Futon1b)
+
+Takes `{:entities [<per-item shape of POST /api/alpha/entity> ...]}`. All
+items run the single-entity name/type validation, ensure-by-name id selection,
+canonical-id gate, document construction, and distinct-type registration. All
+entity validation completes before the first entity write: an invalid item
+rejects the whole batch with no entity sibling committed. Valid entity docs
+commit in one `execute-tx`, then **every document is read back**. Any absent
+document escalates through the same per-document rescue ladder as the single
+route and an unrescuable absence throws L0 503. Type-catalog registration runs
+after verified entity persistence and may perform its own verified writes.
+
+Success is `{:profile "default" :count n :entities [...]}` with optional
+`:queued? true` and `:rescue {entity-id stage}`; it deliberately has no
+`:tx-id`/`:path-id`. Missing `:entities` is L4 400 `:missing-required`; empty,
+non-sequential, or non-map items are L4 400 `:invalid-entities-batch`.
+
+Atomicity is phase-specific: validation failure is all-or-nothing because it
+precedes the transaction. A transport/commit or post-commit rescue failure is
+indeterminate rather than rollback-atomic; callers must read back the returned
+or requested entity ids before retrying.
+
 ---
 
 ## 6a. Backend-neutral graph extensions (2026-07-13)
