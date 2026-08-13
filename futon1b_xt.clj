@@ -19,17 +19,39 @@
   ;; brown-out. Fair acquisition keeps point reads and writes from starving.
   (Semaphore. query-width true))
 
+(def ^:private cached-plan-retries
+  "A pgwire cached plan is invalidated when the result type of its table
+  changes underneath it. XTDB materializes hyperedge props as `prop$*`
+  COLUMNS, so ingesting documents with previously unseen prop keys widens the
+  table and invalidates plans — continuously, while a backlog is indexing.
+  Re-executing re-prepares, so this is retryable rather than fatal; it was
+  fatal here only because we rethrew it. Found 2026-08-13, when it blocked
+  every boot after ~9.5k new pattern/clause records were written."
+  5)
+
 (defn safe-q
   [node form]
   (.acquire query-permits)
   (try
-    (try
-      (xt/q node form)
-      (catch Exception e
-        (if (re-find #"(?i)not all variables in expression are in scope|table not found"
-                     (str (.getMessage e)))
-          []
-          (throw e))))
+    (loop [attempt 1]
+      (let [r (try
+                (xt/q node form)
+                (catch Exception e
+                  (let [msg (str (.getMessage e))]
+                    (cond
+                      (re-find #"(?i)not all variables in expression are in scope|table not found"
+                               msg)
+                      []
+
+                      (and (re-find #"(?i)cached plan must not change result type" msg)
+                           (< attempt cached-plan-retries))
+                      ::retry-cached-plan
+
+                      :else (throw e)))))]
+        (if (identical? r ::retry-cached-plan)
+          (do (Thread/sleep (* 200 attempt))
+              (recur (inc attempt)))
+          r)))
     (finally
       (.release query-permits))))
 
