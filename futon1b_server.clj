@@ -529,6 +529,14 @@
                                               :limit (parse-limit p)}))))
       (respond! ex 400 (pr-str {:error "entities requires ?type=<entity-type>"})))))
 
+(defn- entities-batch-route [^HttpExchange ex]
+  (if (= "POST" (.getRequestMethod ex))
+    (let [payload (parse-payload ex)
+          _ (penholder! ex payload)
+          res (graph/write-entities-batch! @!node payload)]
+      (respond! ex 200 (pr-str res)))
+    (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
+
 (defn- relation-route [^HttpExchange ex]
   (if (= "POST" (.getRequestMethod ex))
     (let [payload (parse-payload ex)
@@ -793,6 +801,8 @@
     (.createContext server "/api/alpha/entity" (handler entity-route))
     (.createContext server "/api/alpha/entities" (handler entities-route))
     (.createContext server "/api/alpha/entities/latest" (handler entities-latest-route))
+    ;; longer prefix wins (see NB above): batch must out-rank /entities
+    (.createContext server "/api/alpha/entities/batch" (handler entities-batch-route))
     (.createContext server "/api/alpha/documents/retract" (handler documents-retract-route))
     (.createContext server "/api/alpha/relation" (handler relation-route))
     (.createContext server "/api/alpha/relations" (handler relations-route))
