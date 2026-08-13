@@ -143,7 +143,27 @@
     (:entity/props doc) (assoc :props (:entity/props doc))
     (:media/sha256 doc) (assoc :media/sha256 (:media/sha256 doc))))
 
-(def ^:private retractable-tables #{:entities :hyperedges})
+(def ^:private retractable-tables
+  "Tables that POST /api/alpha/documents/retract will delete from.
+
+  `:relations` added 2026-08-13. It was an oversight, not a policy: the
+  deletion body is already table-generic (`[:delete-docs table id]`), the
+  post-commit read-back check is generic, and the `:hyperedges`-only follow-up
+  work (query-cache invalidation, memory-projection refresh) is guarded by an
+  explicit table test, so relations skip it harmlessly.
+
+  Why it mattered: since the watcher began writing patterns as entities, one
+  pattern is 15 documents — 1 pattern entity, 7 clause entities, and 7
+  `:pattern/has-*` relations. Without `:relations` here, deleting or re-filing
+  a pattern could remove 8 of the 15 and strand 7 relations pointing at
+  documents that no longer exist. codex-3 correctly refused to implement that
+  partial cleanup. See zone.hyperreal.enterprises/2026-08-13-relations-retraction.html
+
+  Cascade (the store inferring which relations belong to a retracted entity)
+  was considered and deferred: it would put pattern semantics in the substrate,
+  where the caller already knows them. Callers name every document they want
+  removed and get atomicity plus read-back verification for free."
+  #{:entities :hyperedges :relations})
 
 (declare invalidate-hyperedge-query-cache!
          refresh-memory-projection-component!)
