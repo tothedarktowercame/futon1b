@@ -714,7 +714,23 @@
 (def ^:private max-memory-projection-endpoints 20)
 (def ^:private max-memory-projection-limit 100)
 (def ^:private max-memory-projection-index-components 5000)
-(def ^:private max-memory-projection-build-attempts 5)
+(def ^:private max-memory-projection-build-attempts
+  ;; Default 5 — steady-state behaviour unchanged.
+  ;;
+  ;; The build reads a watermark, builds, re-reads, and requires the two to be
+  ;; equal; a moving watermark burns an attempt. That is fine when the store is
+  ;; caught up, and fatal when it is not: on 2026-08-13 the node could not boot
+  ;; at all because ~185 MB of a 4.29 GB LOG was still being indexed, so every
+  ;; attempt saw a different watermark and the fifth threw
+  ;; :memory-projection-source-not-quiescent. Indexing progress persists across
+  ;; restarts, but 5 attempts (~56 s) is far less time than a backlog needs, so
+  ;; the node could never reach the state its own boot gate demanded.
+  ;;
+  ;; Override lets a recovery boot keep retrying while the backlog drains:
+  ;;   FUTON1B_PROJECTION_BUILD_ATTEMPTS=500 systemd-run ... futon1b-server
+  (or (when-let [s (System/getenv "FUTON1B_PROJECTION_BUILD_ATTEMPTS")]
+        (try (Long/parseLong (.trim ^String s)) (catch Exception _ nil)))
+      5))
 (defonce ^:private !memory-projection-indexes (atom {}))
 (defonce ^:private !memory-projection-generations (atom {}))
 
