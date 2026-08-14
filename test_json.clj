@@ -6,6 +6,7 @@
 ;; Run: clojure -M:node -m test-json
 (ns test-json
   (:require [cheshire.core :as json]
+            [clojure.string :as str]
             [futon1b-gates :as gates]
             [futon1b-server :as srv]
             [xtdb.node :as xtn])
@@ -47,7 +48,7 @@
                     (get-in r [:body :hx/id])))
             r)
     (check! "JSON request -> JSON response (watchers parse it)"
-            (clojure.string/includes? (:ctype r) "application/json") (:ctype r)))
+            (str/includes? (:ctype r) "application/json") (:ctype r)))
   (let [r (req-json "POST" (str base "/api/alpha/hyperedge")
                     {"hx/type" "code/v05/commit"
                      "hx/endpoints" ["commit:futon3c-d:abc123"]
@@ -71,14 +72,17 @@
         resp (.send client b (HttpResponse$BodyHandlers/ofString))]
     (check! "headerless GET still EDN"
             (and (= 200 (.statusCode resp))
-                 (clojure.string/starts-with? (.body resp) "{:"))
+                 (str/starts-with? (.body resp) "{:"))
             (.body resp))))
 
 (defn -main [& _]
   (gates/seed-mission-contract!)
   (with-open [node (xtn/start-node)]
-    (let [server (srv/start-server! {:node node :port 0})
+    (let [server (srv/start-server! {:node node :port 0 :bind-host "127.0.0.1"})
           port (.getPort (.getAddress server))]
+      (check! "explicit bind-host is applied"
+              (= "127.0.0.1" (.getHostString (.getAddress server)))
+              (.getAddress server))
       (try (run-tests (str "http://127.0.0.1:" port))
            (finally (srv/stop-server! server)))))
   (println (format "%nfails: %d" @!fails))
