@@ -6,6 +6,7 @@
             [futon1b-graph :as graph]
             [futon1b-server :as server]
             [futon1b-xt :as fxt]
+            [xtdb.api :as xt]
             [xtdb.node :as xtn])
   (:import [java.time Instant]))
 
@@ -19,6 +20,49 @@
     (cond-> {:end endpoint :type :memory/assert :limit 10}
       valid-as-of (assoc :valid-as-of valid-as-of)))
    [:hyperedges 0 :hx/props :state]))
+
+(deftest projection-gate-waits-for-a-real-indexing-backlog
+  (let [payload (apply str (repeat 1000 "x"))
+        docs (mapv (fn [i]
+                     {:xt/id (str "quiescence-backlog-" i)
+                      :payload payload})
+                   (range 20000))
+        submit (future
+                 (xt/submit-tx *node* [(into [:put-docs :docs] docs)]))
+        observed-backlog?
+        (loop [tries 0]
+          (let [{:keys [latest-submitted-byte-offset
+                        latest-processed-byte-offset]}
+                (graph/restart-readiness-status *node*)]
+            (cond
+              (> latest-submitted-byte-offset latest-processed-byte-offset)
+              true
+
+              (or (realized? submit) (>= tries 5000))
+              false
+
+              :else
+              (do (Thread/sleep 1) (recur (inc tries))))))]
+    (is observed-backlog? "the test must exercise a real submitted/processed gap")
+    (let [result (graph/wait-for-indexing-quiescence! *node* 30000 1)]
+      (is (= "bytes" (:unit result)))
+      (is (<= (:latest-submitted-byte-offset result)
+              (:latest-processed-byte-offset result))))
+    @submit))
+
+(deftest projection-gate-times-out-loudly
+  (with-redefs [graph/restart-readiness-status
+                (constantly {:unit "bytes"
+                             :latest-submitted-byte-offset 200
+                             :latest-processed-byte-offset 100})]
+    (let [failure (try
+                    (graph/wait-for-indexing-quiescence! ::node 0 1)
+                    nil
+                    (catch clojure.lang.ExceptionInfo e e))]
+      (is (= :indexing-quiescence-timeout
+             (get-in (ex-data failure) [:error :reason])))
+      (is (= "bytes" (get-in (ex-data failure)
+                              [:error :context :unit]))))))
 
 (deftest current-and-as-of-memory-projections-disagree
   (let [t1 (.minusSeconds (Instant/now) 120)
