@@ -9,3 +9,12 @@ switchover-server.log
 gc.log*
 migration-export-lucy/
 bench22x/store-*/
+
+# 2026-08-14 (M-dionysus-winddown inbox-zero sweep): generated artifacts.
+# Scoped narrowly — migration-export-full/ named explicitly rather than
+# widening migration-export/ to a glob.
+fts5-evidence.db
+fts5-evidence.db-shm
+fts5-evidence.db-wal
+logs/
+migration-export-full/
