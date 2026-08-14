@@ -33,6 +33,7 @@
   (:require [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.string :as str]
+            [clojure.walk :as walk]
             [migration.transform :as xf]
             [migration.ingest :as ingest]
             [futon1b-gates :as gates]
@@ -46,6 +47,7 @@
            [java.net InetSocketAddress URLDecoder]
            [java.nio.charset StandardCharsets]
            [java.time Instant]
+           [java.time.temporal TemporalAccessor]
            [java.util.concurrent ArrayBlockingQueue Semaphore ThreadPoolExecutor
             ThreadPoolExecutor$AbortPolicy TimeUnit])
   (:gen-class))
@@ -212,6 +214,11 @@
 
 (def ^:dynamic *json-response?* false)
 
+(defn- json-safe-response-value [value]
+  (walk/postwalk (fn [x]
+                   (if (instance? TemporalAccessor x) (str x) x))
+                 value))
+
 (defn- respond!
   "EDN by default; JSON when the request asked for it (contract §0).
   Accepts the response VALUE (map) OR an already-serialized EDN string.
@@ -227,14 +234,16 @@
   Found 2026-08-13 when three agency/* pattern entities began returning 500 on
   read; see futon3c/docs/pattern-retrieval-architecture.md.
 
-  The JSON path still parses, because it needs a data structure to encode. That
-  is the residual: a JSON-requested response whose EDN does not read back will
-  still fail. The full fix is for callers to pass the map and drop their own
-  `pr-str` — ~30 call sites, not attempted here."
+  The JSON path still parses string bodies, because it needs a data structure
+  to encode. Read routes that can return temporal or object values therefore
+  pass values directly. Remaining serialized callers return literal-only or
+  write-result shapes and retain their existing EDN wire contract."
   [^HttpExchange ex status body]
   (if *json-response?*
     (let [v (if (string? body) (edn/read-string body) body)]
-      (respond-str! ex status (json/generate-string v {:escape-non-ascii true})
+      (respond-str! ex status (json/generate-string
+                               (json-safe-response-value v)
+                               {:escape-non-ascii true})
                     "application/json; charset=utf-8"))
     (respond-str! ex status (if (string? body) body (pr-str body))
                   "application/edn; charset=utf-8")))
@@ -426,8 +435,8 @@
 
       (and (= method "GET") (not (str/blank? tail)))
       (if-let [doc (graph/hyperedge-by-id @!node tail)]
-        (respond! ex 200 (pr-str doc))
-        (respond! ex 404 (pr-str {:error "not found" :hx/id tail})))
+        (respond! ex 200 doc)
+        (respond! ex 404 {:error "not found" :hx/id tail}))
 
       :else
       (respond! ex 405 (pr-str {:ok false :error "POST (write) or GET /{id}"})))))
@@ -457,26 +466,26 @@
         (fn []
           (let [[status body]
                 (ev/query-evidence-response @!node (query-params ex))]
-            (respond! ex status (pr-str body)))))
+            (respond! ex status body))))
 
       (= tail "count")
       (with-expensive-read!
-        ex #(respond! ex 200 (pr-str (ev/count-evidence @!node (query-params ex)))))
+        ex #(respond! ex 200 (ev/count-evidence @!node (query-params ex))))
 
       (= tail "sessions")
       (with-expensive-read!
-        ex #(respond! ex 200 (pr-str (ev/sessions @!node (query-params ex)))))
+        ex #(respond! ex 200 (ev/sessions @!node (query-params ex))))
 
       (str/ends-with? tail "/chain")
       (let [id (subs tail 0 (- (count tail) (count "/chain")))]
-        (respond! ex 200 (pr-str (ev/chain @!node id))))
+        (respond! ex 200 (ev/chain @!node id)))
 
       :else
       (if-let [doc (ev/fetch-by-id @!node tail)]
         (if (:evidence/id doc)
-          (respond! ex 200 (pr-str (dissoc doc :xt/id)))
-          (respond! ex 404 (pr-str {:error "not found" :evidence/id tail})))
-        (respond! ex 404 (pr-str {:error "not found" :evidence/id tail}))))))
+          (respond! ex 200 (dissoc doc :xt/id))
+          (respond! ex 404 {:error "not found" :evidence/id tail}))
+        (respond! ex 404 {:error "not found" :evidence/id tail})))))
 
 (defn- entity-route [^HttpExchange ex]
   (let [method (.getRequestMethod ex)
@@ -495,14 +504,14 @@
       (str/blank? tail)
       (let [[status body] (graph/entity-by-external
                            @!node {:source (p "source") :external-id (p "external-id")})]
-        (respond! ex status (pr-str body)))
+        (respond! ex status body))
 
       :else
       (if-let [doc (graph/fetch-entity @!node tail)]
-        (respond! ex 200 (pr-str {:profile "default"
-                                  :entity (graph/public-entity doc)}))
-        (respond! ex 404 (pr-str {:error "Entity not found"
-                                  :profile "default" :entity-id tail}))))))
+        (respond! ex 200 {:profile "default"
+                          :entity (graph/public-entity doc)})
+        (respond! ex 404 {:error "Entity not found"
+                          :profile "default" :entity-id tail})))))
 
 (defn- documents-retract-route [^HttpExchange ex]
   (if (= "POST" (.getRequestMethod ex))
@@ -516,18 +525,18 @@
     (when-not (p "type")
       (throw (gates/layered-error 4 :missing-required {:required ["type"]})))
     (with-expensive-read!
-      ex #(respond! ex 200 (pr-str (graph/entities-latest
-                                    @!node {:type (p "type")
-                                            :limit (parse-limit p)}))))))
+      ex #(respond! ex 200 (graph/entities-latest
+                            @!node {:type (p "type")
+                                    :limit (parse-limit p)})))))
 
 (defn- entities-route [^HttpExchange ex]
   (let [p (query-params ex)]
     (if (p "type")
       (with-expensive-read!
-        ex #(respond! ex 200 (pr-str (graph/entities-query
-                                      @!node {:type (p "type")
-                                              :limit (parse-limit p)
-                                              :after (p "after")}))))
+        ex #(respond! ex 200 (graph/entities-query
+                              @!node {:type (p "type")
+                                      :limit (parse-limit p)
+                                      :after (p "after")})))
       (respond! ex 400 (pr-str {:error "entities requires ?type=<entity-type>"})))))
 
 (defn- entities-batch-route [^HttpExchange ex]
@@ -558,14 +567,14 @@
   (let [p (query-params ex)]
     (if (or (p "type") (p "types") (p "from") (p "to"))
       (with-expensive-read!
-        ex #(respond! ex 200 (pr-str (graph/relations-query
-                                      @!node {:type (p "type")
-                                              :types (some-> (p "types")
-                                                             (str/split #","))
-                                              :from (p "from")
-                                              :to (p "to")
-                                              :limit (parse-limit p)
-                                              :hydrate? (= "true" (p "hydrate"))}))))
+        ex #(respond! ex 200 (graph/relations-query
+                              @!node {:type (p "type")
+                                      :types (some-> (p "types")
+                                                     (str/split #","))
+                                      :from (p "from")
+                                      :to (p "to")
+                                      :limit (parse-limit p)
+                                      :hydrate? (= "true" (p "hydrate"))})))
       (respond! ex 400
                 (pr-str {:error "relations requires type, from, or to"})))))
 
@@ -583,20 +592,20 @@
   (let [p (query-params ex)]
     (if (or (p "type") (p "end"))
       (with-expensive-read!
-        ex #(respond! ex 200 (pr-str (graph/hyperedges-query
-                                      @!node {:type (p "type") :end (p "end")
-                                              :limit (parse-limit p)
-                                              :after (p "after")
-                                              :repo (p "repo")
-                                              :source-file (p "source-file")
-                                              :valid-as-of
-                                              (parse-instant
-                                               (or (p "valid-as-of")
-                                                   (p "as-of")))
-                                              :system-as-of
-                                              (parse-instant (p "system-as-of"))
-                                              :include-total? (not= "false" (p "include-total"))
-                                              :latest? (= "true" (p "latest"))}))))
+        ex #(respond! ex 200 (graph/hyperedges-query
+                              @!node {:type (p "type") :end (p "end")
+                                      :limit (parse-limit p)
+                                      :after (p "after")
+                                      :repo (p "repo")
+                                      :source-file (p "source-file")
+                                      :valid-as-of
+                                      (parse-instant
+                                       (or (p "valid-as-of")
+                                           (p "as-of")))
+                                      :system-as-of
+                                      (parse-instant (p "system-as-of"))
+                                      :include-total? (not= "false" (p "include-total"))
+                                      :latest? (= "true" (p "latest"))})))
       (respond! ex 400 (pr-str {:error "type or end parameter required"})))))
 
 (defn- census-route [^HttpExchange ex]
@@ -608,6 +617,11 @@
                                               :entity-type (p "entity-type")}))))
       (respond! ex 400
                 (pr-str {:error "census requires ?type=<hx-type> or ?entity-type=<type>"})))))
+
+(defn- restart-readiness-route [^HttpExchange ex]
+  (if (= "GET" (.getRequestMethod ex))
+    (respond! ex 200 (graph/restart-readiness-status @!node))
+    (respond! ex 405 {:ok false :error "GET only"})))
 
 (defn- types-route [^HttpExchange ex]
   (let [method (.getRequestMethod ex)
@@ -811,6 +825,8 @@
     (.createContext server "/api/alpha/relations/batch" (handler relations-batch-route))
     (.createContext server "/api/alpha/graph/inhabited" (handler graph-inhabited-route))
     (.createContext server "/api/alpha/census" (handler census-route))
+    (.createContext server "/api/alpha/restart-readiness"
+                    (handler restart-readiness-route))
     (.createContext server "/api/alpha/types" (handler types-route))
     (.createContext server "/api/alpha/memory/search" (handler memory-search-route))
     (.createContext server "/api/alpha/memory/projection"

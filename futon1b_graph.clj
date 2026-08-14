@@ -803,23 +803,11 @@
 (def ^:private max-memory-projection-endpoints 20)
 (def ^:private max-memory-projection-limit 100)
 (def ^:private max-memory-projection-index-components 5000)
-(def ^:private max-memory-projection-build-attempts
-  ;; Default 5 — steady-state behaviour unchanged.
-  ;;
-  ;; The build reads a watermark, builds, re-reads, and requires the two to be
-  ;; equal; a moving watermark burns an attempt. That is fine when the store is
-  ;; caught up, and fatal when it is not: on 2026-08-13 the node could not boot
-  ;; at all because ~185 MB of a 4.29 GB LOG was still being indexed, so every
-  ;; attempt saw a different watermark and the fifth threw
-  ;; :memory-projection-source-not-quiescent. Indexing progress persists across
-  ;; restarts, but 5 attempts (~56 s) is far less time than a backlog needs, so
-  ;; the node could never reach the state its own boot gate demanded.
-  ;;
-  ;; Override lets a recovery boot keep retrying while the backlog drains:
-  ;;   FUTON1B_PROJECTION_BUILD_ATTEMPTS=500 systemd-run ... futon1b-server
-  (or (when-let [s (System/getenv "FUTON1B_PROJECTION_BUILD_ATTEMPTS")]
+(def ^:private memory-projection-quiescence-timeout-ms
+  (or (when-let [s (System/getenv "FUTON1B_PROJECTION_QUIESCENCE_TIMEOUT_MS")]
         (try (Long/parseLong (.trim ^String s)) (catch Exception _ nil)))
-      5))
+      600000))
+(def ^:private memory-projection-quiescence-poll-ms 500)
 (defonce ^:private !memory-projection-indexes (atom {}))
 (defonce ^:private !memory-projection-generations (atom {}))
 
@@ -843,6 +831,60 @@
                [:latest-completed-txs
                 :latest-submitted-msg-ids
                 :latest-processed-msg-ids]))
+
+(defn- max-msg-offset
+  "Largest XTDB log coordinate in a status map. These values are BYTE
+   OFFSETS, not message counts."
+  [offsets]
+  (->> (tree-seq coll? seq offsets)
+       (filter number?)
+       (reduce max -1)))
+
+(defn restart-readiness-status
+  "Expose the running node's submitted/processed byte offsets for the
+   operator pre-restart gate."
+  [node]
+  (let [status (xt/status node)
+        submitted (:latest-submitted-msg-ids status)
+        processed (:latest-processed-msg-ids status)]
+    {:unit "bytes"
+     :latest-submitted-byte-offset (max-msg-offset submitted)
+     :latest-processed-byte-offset (max-msg-offset processed)
+     :submitted-byte-offsets submitted
+     :processed-byte-offsets processed}))
+
+(defn wait-for-indexing-quiescence!
+  "Wait boundedly until XTDB's processed BYTE OFFSET reaches its submitted
+   BYTE OFFSET. Returns timing/status evidence; throws loudly on timeout."
+  ([node]
+   (wait-for-indexing-quiescence!
+    node memory-projection-quiescence-timeout-ms
+    memory-projection-quiescence-poll-ms))
+  ([node timeout-ms poll-ms]
+   (let [started (System/nanoTime)]
+     (loop []
+       (let [{:keys [latest-submitted-byte-offset
+                     latest-processed-byte-offset]
+              :as status} (restart-readiness-status node)
+             waited-ms (elapsed-ms started)]
+         (cond
+           (<= latest-submitted-byte-offset latest-processed-byte-offset)
+           (assoc status :waited-ms waited-ms)
+
+           (>= waited-ms timeout-ms)
+           (throw (gates/layered-error
+                   0 :indexing-quiescence-timeout
+                   {:unit "bytes"
+                    :waited-ms waited-ms
+                    :timeout-ms timeout-ms
+                    :latest-submitted-byte-offset
+                    latest-submitted-byte-offset
+                    :latest-processed-byte-offset
+                    latest-processed-byte-offset}))
+
+           :else
+           (do (Thread/sleep (long poll-ms))
+               (recur))))))))
 
 (defn- any-equals
   [binding values]
@@ -952,49 +994,48 @@
   puts and retractions advance it synchronously. Historical reads bypass it."
   [node]
   (locking !memory-projection-indexes
-    (let [started (System/nanoTime)]
-      (loop [attempt 1]
-        (let [source-watermark (node-watermark node)
-              source-generation (memory-projection-generation node)
-              selected+
-              (fxt/safe-q
-               node
-               (list '->
-                     '(from :hyperedges [xt/id hx/type])
-                     (list 'where (list '= 'hx/type :memory/assert))
-                     (list 'return 'xt/id)
-                     (list 'order-by {:val 'xt/id :dir :asc})
-                     (list 'limit
-                           (inc max-memory-projection-index-components))))]
-          (when (> (count selected+) max-memory-projection-index-components)
-            (throw (gates/layered-error
-                    0 :memory-projection-index-bound-exceeded
-                    {:maximum max-memory-projection-index-components
-                     :observed-at-least (count selected+)})))
-          (let [rows (hydrate-memory-components
-                      node (mapv :xt/id selected+) {})
-                components (mapv hydrated-row->component rows)
-                observed-watermark (node-watermark node)]
-            (if (= source-watermark observed-watermark)
-              (let [prior-revision
-                    (get-in @!memory-projection-indexes [node :revision] 0)
-                    index
-                    (build-memory-projection-index
-                     (inc prior-revision) components source-watermark
-                     source-generation)]
-                (swap! !memory-projection-indexes assoc node index)
-                {:revision (:revision index)
-                 :component-count (count components)
-                 :endpoint-count (count (:by-endpoint index))
-                 :build-attempts attempt
-                 :build-ms (elapsed-ms started)})
-              (if (< attempt max-memory-projection-build-attempts)
-                (recur (inc attempt))
-                (throw (gates/layered-error
-                        0 :memory-projection-source-not-quiescent
-                        {:attempts attempt
-                         :source-watermark source-watermark
-                         :observed-watermark observed-watermark}))))))))))
+    (let [started (System/nanoTime)
+          quiescence (wait-for-indexing-quiescence! node)
+          source-watermark (node-watermark node)
+          source-generation (memory-projection-generation node)
+          selected+
+          (fxt/safe-q
+           node
+           (list '->
+                 '(from :hyperedges [xt/id hx/type])
+                 (list 'where (list '= 'hx/type :memory/assert))
+                 (list 'return 'xt/id)
+                 (list 'order-by {:val 'xt/id :dir :asc})
+                 (list 'limit
+                       (inc max-memory-projection-index-components))))]
+      (when (> (count selected+) max-memory-projection-index-components)
+        (throw (gates/layered-error
+                0 :memory-projection-index-bound-exceeded
+                {:maximum max-memory-projection-index-components
+                 :observed-at-least (count selected+)})))
+      (let [rows (hydrate-memory-components
+                  node (mapv :xt/id selected+) {})
+            components (mapv hydrated-row->component rows)
+            observed-watermark (node-watermark node)]
+        (when-not (= source-watermark observed-watermark)
+          (throw (gates/layered-error
+                  0 :memory-projection-source-moved-after-quiescence
+                  {:build-attempts 1
+                   :source-watermark source-watermark
+                   :observed-watermark observed-watermark})))
+        (let [prior-revision
+              (get-in @!memory-projection-indexes [node :revision] 0)
+              index
+              (build-memory-projection-index
+               (inc prior-revision) components source-watermark
+               source-generation)]
+          (swap! !memory-projection-indexes assoc node index)
+          {:revision (:revision index)
+           :component-count (count components)
+           :endpoint-count (count (:by-endpoint index))
+           :build-attempts 1
+           :quiescence-wait-ms (:waited-ms quiescence)
+           :build-ms (elapsed-ms started)})))))
 
 (defn refresh-memory-projection-component!
   "Point-refresh one current memory/assert component after its verified put."

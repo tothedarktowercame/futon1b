@@ -282,6 +282,27 @@ L1=409, L0=503. The three evidence required-field errors are plain
 | `textprobe*.clj` | standalone history extractors for private store copies (M-text-sidecar) |
 | `p1_*/p2*/parity_*/s0-s2*` | the original port-era probes and parity harness (E-futon1b-foothold) |
 
+### Required pre-restart gate
+
+Before restarting the substrate, run:
+
+```sh
+python3 scripts/pre-restart-check.py --store migration-store-21
+```
+
+Exit 0 means the byte-offset backlog is within the calibrated 32 MiB boot
+budget; any non-zero exit blocks the restart. Every reported coordinate is
+explicitly labelled as bytes: XTDB's submitted and processed message IDs are
+byte offsets into `log/LOG`, not message counts. Override the budget only with
+an operator-approved measured value via `--max-backlog-bytes`.
+
+At boot, the memory projection waits for submitted and processed byte offsets
+to become quiescent, then builds exactly once. The wait is bounded at 10
+minutes by default and fails loudly instead of turning a crash into a hang;
+set `FUTON1B_PROJECTION_QUIESCENCE_TIMEOUT_MS` only to an operator-approved
+measured bound. The former `FUTON1B_PROJECTION_BUILD_ATTEMPTS` retry workaround
+is no longer used.
+
 ### Unfiltered GET /api/alpha/evidence can kill the JVM (2026-07-13)
 
 `?limit=1` with NO filters crashed the server twice in a row (systemd restart

@@ -14,7 +14,8 @@
   (:import [java.net URI]
            [java.net URLEncoder]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
-            HttpResponse$BodyHandlers]))
+            HttpResponse$BodyHandlers]
+           [java.time Instant]))
 
 (def client (HttpClient/newHttpClient))
 
@@ -38,7 +39,7 @@
 
 (def ph {"x-penholder" "joe"})
 
-(defn run-tests [base]
+(defn run-tests [node base]
   (let [ENT (str base "/api/alpha/entity")
         ENTS (str base "/api/alpha/entities")
         REL (str base "/api/alpha/relation")
@@ -288,6 +289,20 @@
               [r1 r2]))
 
     (println "— A4 hyperedge reads")
+    (let [instant (Instant/parse "2026-08-13T12:34:56Z")]
+      (graph/put-verified!
+       node :hyperedges
+       {:xt/id "hx:json-temporal"
+        :hx/id "hx:json-temporal"
+        :hx/type :test/temporal
+        :hx/endpoints ["json-temporal-endpoint"]
+        :hx/created-at instant})
+      (let [r (req "GET" (str HX "/hx%3Ajson-temporal") nil
+                   {"Accept" "application/json"})]
+        (check! "JSON read returns temporal value without EDN round-trip"
+                (and (= 200 (:status r))
+                     (cstr/includes? (:body r) "2026-08-13T12:34:56Z"))
+                r)))
     (req "POST" HX {:hx/type :test/edge :hx/endpoints ["a" "b"]
                     :hx/props {:repo "r1" :source-file "f.clj"}} ph)
     (req "POST" HX {:hx/type :test/edge :hx/endpoints ["b" "c"]
@@ -572,7 +587,7 @@
           port (.getPort (.getAddress server))
           base (str "http://127.0.0.1:" port)]
       (try
-        (run-tests base)
+        (run-tests node base)
         (finally (srv/stop-server! server)))))
   (let [results @!results
         fails (remove :ok? results)]
