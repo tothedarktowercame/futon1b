@@ -241,9 +241,10 @@
 (defn- ensure-entity-id
   "Ensure semantics (futon1_write.clj:34-60): requested :id → existing by
   :entity/name (prefer matching type, then smallest id) → fresh UUID."
-  [node {:keys [id name' type]}]
+  [node {:keys [id name' type]} batch-candidates]
   (or id
-      (let [candidates (entities-by-name node name')
+      (let [candidates (concat (entities-by-name node name')
+                               (filter #(= name' (:entity/name %)) batch-candidates))
             preferred (or (seq (filter #(= type (:entity/type %)) candidates))
                           (seq candidates))]
         (some->> preferred (sort-by #(str (:entity/id %))) first :entity/id))
@@ -251,23 +252,25 @@
 
 (defn- build-entity
   "Validate and build one entity without writing it."
-  [node payload]
-  (let [name' (:name payload)
-        type (normalize-type (:type payload))]
-    (when (or (str/blank? (str name')) (nil? type))
-      (throw (gates/layered-error 4 :missing-required
-                                  {:required [:name :type]
-                                   :got (select-keys payload [:name :type])})))
-    (let [id (ensure-entity-id node {:id (:id payload) :name' name' :type type})
-          doc (cond-> {:xt/id id :entity/id id :entity/name name' :entity/type type}
-                (:external-id payload) (assoc :entity/external-id (:external-id payload))
-                (:source payload) (assoc :entity/source (:source payload))
-                (map? (:props payload)) (assoc :entity/props (:props payload)))
-          gate-res (gates/gate-entity-id! doc)]
-      {:doc doc
-       :type type
-       :queued? (:queued? gate-res)
-       :public (public-entity doc)})))
+  ([node payload] (build-entity node payload []))
+  ([node payload batch-candidates]
+   (let [name' (:name payload)
+         type (normalize-type (:type payload))]
+     (when (or (str/blank? (str name')) (nil? type))
+       (throw (gates/layered-error 4 :missing-required
+                                   {:required [:name :type]
+                                    :got (select-keys payload [:name :type])})))
+     (let [id (ensure-entity-id node {:id (:id payload) :name' name' :type type}
+                                batch-candidates)
+           doc (cond-> {:xt/id id :entity/id id :entity/name name' :entity/type type}
+                 (:external-id payload) (assoc :entity/external-id (:external-id payload))
+                 (:source payload) (assoc :entity/source (:source payload))
+                 (map? (:props payload)) (assoc :entity/props (:props payload)))
+           gate-res (gates/gate-entity-id! doc)]
+       {:doc doc
+        :type type
+        :queued? (:queued? gate-res)
+        :public (public-entity doc)}))))
 
 (defn write-entity!
   "POST /api/alpha/entity — the route where every gate fires (contract §5)."
@@ -302,7 +305,9 @@
                                    :got (if (sequential? entities)
                                           (mapv (comp str type) entities)
                                           (str (type entities)))})))
-    (let [built (mapv #(build-entity node %) entities)
+    (let [built (reduce (fn [acc entity]
+                          (conj acc (build-entity node entity (mapv :doc acc))))
+                        [] entities)
           docs (mapv (comp xf/transform-doc :doc) built)]
       (try (xt/execute-tx node (mapv (fn [d] [:put-docs :entities d]) docs))
            (catch Exception _ nil))
@@ -354,19 +359,28 @@
 (defn entities-query
   "Backend-neutral typed entity read. Returns raw entity documents so callers
   can inspect domain fields written before the HTTP cutover as well as the
-  equivalent fields carried in :entity/props by post-cutover writes."
-  [node {:keys [type limit]}]
+  equivalent fields carried in :entity/props by post-cutover writes. :count is
+  the true type total; :next-cursor resumes the stable xt/id ordering."
+  [node {:keys [type limit after]}]
   (let [t (normalize-type type)
-        query-tail (cond-> [(list 'where (list '= 'entity/type t))
-                            (list 'order-by
-                                  {:val 'entity/id :dir :asc}
-                                  {:val 'xt/id :dir :asc})]
+        clauses (cond-> [(list '= 'entity/type t)]
+                  after (conj (list '> 'xt/id after)))
+        query-tail (cond-> [(cons 'where clauses)
+                            (list 'order-by {:val 'xt/id :dir :asc})]
                      (and (int? limit) (pos? limit))
                      (conj (list 'limit limit)))
         docs (fxt/safe-q node
-                         (cons '-> (cons '(from :entities [*]) query-tail)))]
-    {:entities (mapv #(dissoc % :xt/id) docs)
-     :count (count docs)}))
+                         (cons '-> (cons '(from :entities [*]) query-tail)))
+        total (count (fxt/safe-q node
+                                 (list '-> '(from :entities [xt/id entity/type])
+                                       (list 'where (list '= 'entity/type t)))))
+        window (vec docs)
+        next-cursor (when (and (int? limit) (pos? limit)
+                               (= limit (count window)))
+                      (:xt/id (peek window)))]
+    (cond-> {:entities (mapv #(dissoc % :xt/id) window)
+             :count total}
+      next-cursor (assoc :next-cursor next-cursor))))
 
 ;; ---------------------------------------------------------------------------
 ;; Relations (A3) — §6. Stable rel| ids, both key spellings.

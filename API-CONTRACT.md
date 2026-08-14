@@ -573,8 +573,10 @@ The authoritative Futon1b substrate additionally exposes three semantic
 operations needed by consumers that formerly dereferenced Futon1a's embedded
 XTDB node. These routes expose graph meanings rather than XTDB query forms:
 
-- `GET /api/alpha/entities?type=…&limit=…` returns raw typed entity documents
-  as `{:entities […] :count n}` so legacy top-level domain fields and newer
+- `GET /api/alpha/entities?type=…&limit=…&after=…` returns raw typed entity
+  documents in stable `xt/id` order. `:count` is the true total for the type,
+  not the returned window size; a full bounded window includes `:next-cursor`
+  for the following request. Legacy top-level domain fields and newer
   `:entity/props` fields remain interpretable.
 - `GET /api/alpha/relations?type=…|types=a,b&from=…&to=…&limit=…&hydrate=true`
   returns matching relations. `hydrate=true` adds the referenced entity
