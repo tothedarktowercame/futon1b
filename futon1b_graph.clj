@@ -808,6 +808,18 @@
         (try (Long/parseLong (.trim ^String s)) (catch Exception _ nil)))
       600000))
 (def ^:private memory-projection-quiescence-poll-ms 500)
+;; Byte-offset quiescence is necessary but not sufficient: node-watermark is
+;; compared by whole-map equality and carries :system-time, so anything the
+;; node advances during the build window fails the check. On a 22 GB store the
+;; select+hydrate window is seconds, which is long enough for that to happen
+;; with no external writer at all — observed on Dionysus 2026-08-14, where a
+;; fresh boot failed 295 consecutive times against a quiet store. Rebuild
+;; rather than certifying a mixed snapshot, the same choice the point-refresh
+;; path already makes below.
+(def ^:private max-memory-projection-build-attempts
+  (or (when-let [s (System/getenv "FUTON1B_PROJECTION_BUILD_ATTEMPTS")]
+        (try (Long/parseLong (.trim ^String s)) (catch Exception _ nil)))
+      5))
 (defonce ^:private !memory-projection-indexes (atom {}))
 (defonce ^:private !memory-projection-generations (atom {}))
 
@@ -994,48 +1006,54 @@
   puts and retractions advance it synchronously. Historical reads bypass it."
   [node]
   (locking !memory-projection-indexes
-    (let [started (System/nanoTime)
-          quiescence (wait-for-indexing-quiescence! node)
-          source-watermark (node-watermark node)
-          source-generation (memory-projection-generation node)
-          selected+
-          (fxt/safe-q
-           node
-           (list '->
-                 '(from :hyperedges [xt/id hx/type])
-                 (list 'where (list '= 'hx/type :memory/assert))
-                 (list 'return 'xt/id)
-                 (list 'order-by {:val 'xt/id :dir :asc})
-                 (list 'limit
-                       (inc max-memory-projection-index-components))))]
-      (when (> (count selected+) max-memory-projection-index-components)
-        (throw (gates/layered-error
-                0 :memory-projection-index-bound-exceeded
-                {:maximum max-memory-projection-index-components
-                 :observed-at-least (count selected+)})))
-      (let [rows (hydrate-memory-components
-                  node (mapv :xt/id selected+) {})
-            components (mapv hydrated-row->component rows)
-            observed-watermark (node-watermark node)]
-        (when-not (= source-watermark observed-watermark)
-          (throw (gates/layered-error
-                  0 :memory-projection-source-moved-after-quiescence
-                  {:build-attempts 1
-                   :source-watermark source-watermark
-                   :observed-watermark observed-watermark})))
-        (let [prior-revision
-              (get-in @!memory-projection-indexes [node :revision] 0)
-              index
-              (build-memory-projection-index
-               (inc prior-revision) components source-watermark
-               source-generation)]
-          (swap! !memory-projection-indexes assoc node index)
-          {:revision (:revision index)
-           :component-count (count components)
-           :endpoint-count (count (:by-endpoint index))
-           :build-attempts 1
-           :quiescence-wait-ms (:waited-ms quiescence)
-           :build-ms (elapsed-ms started)})))))
+    (let [started (System/nanoTime)]
+      (loop [attempt 1]
+        (let [quiescence (wait-for-indexing-quiescence! node)
+              source-watermark (node-watermark node)
+              source-generation (memory-projection-generation node)
+              selected+
+              (fxt/safe-q
+               node
+               (list '->
+                     '(from :hyperedges [xt/id hx/type])
+                     (list 'where (list '= 'hx/type :memory/assert))
+                     (list 'return 'xt/id)
+                     (list 'order-by {:val 'xt/id :dir :asc})
+                     (list 'limit
+                           (inc max-memory-projection-index-components))))]
+          (when (> (count selected+) max-memory-projection-index-components)
+            (throw (gates/layered-error
+                    0 :memory-projection-index-bound-exceeded
+                    {:maximum max-memory-projection-index-components
+                     :observed-at-least (count selected+)})))
+          (let [rows (hydrate-memory-components
+                      node (mapv :xt/id selected+) {})
+                components (mapv hydrated-row->component rows)
+                observed-watermark (node-watermark node)
+                moved? (not= source-watermark observed-watermark)]
+            (when (and moved?
+                       (>= attempt max-memory-projection-build-attempts))
+              (throw (gates/layered-error
+                      0 :memory-projection-source-moved-after-quiescence
+                      {:build-attempts attempt
+                       :max-build-attempts max-memory-projection-build-attempts
+                       :source-watermark source-watermark
+                       :observed-watermark observed-watermark})))
+            (if moved?
+              (recur (inc attempt))
+              (let [prior-revision
+                    (get-in @!memory-projection-indexes [node :revision] 0)
+                    index
+                    (build-memory-projection-index
+                     (inc prior-revision) components source-watermark
+                     source-generation)]
+                (swap! !memory-projection-indexes assoc node index)
+                {:revision (:revision index)
+                 :component-count (count components)
+                 :endpoint-count (count (:by-endpoint index))
+                 :build-attempts attempt
+                 :quiescence-wait-ms (:waited-ms quiescence)
+                 :build-ms (elapsed-ms started)}))))))))
 
 (defn refresh-memory-projection-component!
   "Point-refresh one current memory/assert component after its verified put."
