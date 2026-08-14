@@ -526,7 +526,8 @@
       (with-expensive-read!
         ex #(respond! ex 200 (pr-str (graph/entities-query
                                       @!node {:type (p "type")
-                                              :limit (parse-limit p)}))))
+                                              :limit (parse-limit p)
+                                              :after (p "after")}))))
       (respond! ex 400 (pr-str {:error "entities requires ?type=<entity-type>"})))))
 
 (defn- entities-batch-route [^HttpExchange ex]

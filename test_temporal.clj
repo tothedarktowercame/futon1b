@@ -288,7 +288,7 @@
       (is (= 2 (get-in result [:groups 0 :audit :selected-count]))))))
 
 (deftest typed-entity-limit-is-pushed-into-xtdb
-  (let [captured (atom nil)
+  (let [captured (atom [])
         returned [{:xt/id "entity-a"
                    :entity/id "entity-a"
                    :entity/name "A"
@@ -299,16 +299,15 @@
                    :entity/type :generation-test}]
         expected (mapv #(dissoc % :xt/id) returned)]
     (with-redefs [fxt/safe-q (fn [_ form]
-                               (reset! captured form)
+                               (swap! captured conj form)
                                returned)]
-      (is (= {:entities expected :count 2}
+      (is (= {:entities expected :count 2 :next-cursor "entity-b"}
              (graph/entities-query
               ::capturing-node {:type :generation-test :limit 2}))))
     (is (= (list 'order-by
-                 {:val 'entity/id :dir :asc}
                  {:val 'xt/id :dir :asc})
-           (nth @captured 3)))
-    (is (= '(limit 2) (last @captured))))
+           (nth (first @captured) 3)))
+    (is (= '(limit 2) (last (first @captured)))))
   (let [docs [{:xt/id "entity-limit-c"
                :entity/id "entity-limit-c"
                :entity/name "C"
@@ -328,9 +327,55 @@
              (mapv #(dissoc % :xt/id)))]
     (doseq [doc docs]
       (is (= :ok (graph/put-verified! *node* :entities doc))))
-    (is (= {:entities expected :count 2}
-           (graph/entities-query
-            *node* {:type :entity-limit-test :limit 2})))))
+    (let [result (graph/entities-query
+                  *node* {:type :entity-limit-test :limit 2})]
+      (is (= expected (:entities result)))
+      (is (= 3 (:count result)))
+      (is (= "entity-limit-b" (:next-cursor result))))))
+
+(deftest entity-batch-deduplicates-repeated-names
+  (let [entity {:name "batch-local-duplicate" :type "batch/local-duplicate"}
+        first-result (graph/write-entities-batch!
+                      *node* {:entities [entity entity entity]})
+        first-ids (mapv :id (:entities first-result))
+        second-result (graph/write-entities-batch!
+                       *node* {:entities [entity entity entity]})
+        second-ids (mapv :id (:entities second-result))
+        stored (graph/entities-query
+                *node* {:type :batch/local-duplicate :limit 10})]
+    (is (= 1 (count (distinct first-ids))))
+    (is (= first-ids second-ids))
+    (is (= 1 (:count stored)))
+    (is (= (first first-ids) (get-in stored [:entities 0 :entity/id]))))
+  (let [explicit {:id "batch-explicit-id"
+                  :name "batch-explicit-name"
+                  :type "batch/explicit"}
+        implicit (dissoc explicit :id)
+        result (graph/write-entities-batch!
+                *node* {:entities [explicit implicit]})]
+    (is (= ["batch-explicit-id" "batch-explicit-id"]
+           (mapv :id (:entities result))))))
+
+(deftest entity-pagination-enumerates-more-than-server-max-window
+  (let [n 5001
+        entities (mapv (fn [i]
+                         {:id (format "paged-%05d" i)
+                          :name (format "Paged %05d" i)
+                          :type "pagination/over-server-max"})
+                       (range n))]
+    (graph/write-entities-batch! *node* {:entities entities})
+    (let [page-1 (graph/entities-query
+                  *node* {:type :pagination/over-server-max :limit 5000})
+          page-2 (graph/entities-query
+                  *node* {:type :pagination/over-server-max :limit 5000
+                          :after (:next-cursor page-1)})
+          rows (concat (:entities page-1) (:entities page-2))]
+      (is (= n (:count page-1)))
+      (is (= n (:count page-2)))
+      (is (= 5000 (count (:entities page-1))))
+      (is (= 1 (count (:entities page-2))))
+      (is (= n (count rows)))
+      (is (= n (count (distinct (map :entity/id rows))))))))
 
 (defn -main [& _]
   (with-open [node (xtn/start-node)]
