@@ -22,3 +22,7 @@ migration-export-full/
 # Retired XTDB store snapshot (2026-08-10). Binary store data: raw data lives
 # outside git; see futon0/README-inbox-zero.md.
 ams-store.retired-*/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
