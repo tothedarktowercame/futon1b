@@ -21,21 +21,65 @@
    and is DERIVED data: deleting it and rebuilding is always safe."
   (:require [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
+            [clojure.edn :as edn]
             [clojure.string :as str]
             [futon1b-xt :as fxt]
             [xtdb.api :as xt])
   (:import [java.time Instant]
+           [java.time.temporal ChronoUnit]
            [java.util.concurrent Executors ScheduledExecutorService
             ThreadFactory TimeUnit]))
 
 (def ^:private unqualified {:builder-fn rs/as-unqualified-maps})
 
 (defonce !ds (atom nil))
-(defonce !stats (atom {:indexed 0 :errors 0 :last-at nil}))
+(defonce !stats (atom {:indexed 0 :errors 0 :last-at nil
+                       :recheck-rejections 0}))
 
 (def hydration-width 4)
 (def max-df-terms 32)
 (def max-offset 10000)
+
+(def projection
+  [{:store-field :evidence/body
+    :index-home :ev_fts/body
+    :indexed-as :fts5-unicode61}
+   {:store-field :evidence/author
+    :index-home [:ev_fts/author :ev_attr/author]
+    :indexed-as :btree}
+   {:store-field :evidence/at
+    :index-home [:ev_fts/at :ev_attr/at]
+    :indexed-as :btree}
+   {:store-field :evidence/session-id
+    :index-home [:ev_fts/session :ev_attr/session]
+    :indexed-as :btree}
+   {:store-field :evidence/type
+    :index-home :ev_attr/type
+    :indexed-as [:btree :with-at]}
+   {:store-field :evidence/claim-type
+    :index-home :ev_attr/claim_type
+    :indexed-as [:btree :with-at]}
+   {:store-field :evidence/tags
+    :index-home :ev_tags/tag-id
+    :indexed-as :junction-primary-key}
+   {:store-field :evidence/subject
+    :index-home [:ev_attr/subject_type :ev_attr/subject_id]
+    :indexed-as :composite-btree}
+   {:store-field :evidence/pattern-id
+    :index-home :ev_attr/pattern_id
+    :indexed-as :btree}
+   {:store-field :evidence/ephemeral?
+    :index-home :ev_attr/ephemeral
+    :indexed-as :recheck-assist}
+   {:store-field :evidence/conjecture?
+    :index-home :ev_attr/conjecture
+    :indexed-as :recheck-assist}])
+
+(def residual
+  {:channels [:calls :email :speech]
+   :history [:before-basis-capture]
+   :undeclared-fields [:evidence/in-reply-to :evidence/fork-of :evidence/id]
+   :undeclared-tables [:hyperedges :entities]})
 
 ;; Periodic repair loop. on-append! is fire-and-forget and deliberately does
 ;; NOT advance the checkpoint, so a failed live index is repaired only by a
@@ -176,6 +220,21 @@
 
 (defonce ^:private !catch-up-running? (atom false))
 
+(defn- tx-id-map
+  "Reduce XTDB's per-db completed transaction records to plain numeric ids.
+   The full status value remains stored in basis-tx; this normalized companion
+   is EDN-readable without XTDB tagged-literal readers and exists only for
+   numeric staleness calculation."
+  [status]
+  (into {}
+        (map (fn [[db txs]]
+               [(str db)
+                (->> (tree-seq coll? seq txs)
+                     (keep #(when (associative? %) (get % :tx-id)))
+                     (filter number?)
+                     (reduce max -1))]))
+        (:latest-completed-txs status)))
+
 (defn catch-up!
   "Index everything strictly after the last indexed (at, id) checkpoint.
    With no checkpoint this is the full deterministic rebuild. Returns
@@ -195,6 +254,7 @@
                       (xt/status node)
                       [:latest-completed-txs :latest-submitted-msg-ids
                        :latest-processed-msg-ids])
+            basis-tx-ids (tx-id-map basis-tx)
             basis-captured-at (str (Instant/now))]
         (loop [after [(or (meta-get ds "last-at") "") (or (meta-get ds "last-id") "")]
                total 0]
@@ -209,6 +269,7 @@
               ;; the store as of these coordinates") only on a full drain.
               (do (jdbc/with-transaction [tx ds]
                     (meta-set! tx "basis-tx" (pr-str basis-tx))
+                    (meta-set! tx "basis-tx-ids" (pr-str basis-tx-ids))
                     (meta-set! tx "basis-captured-at" basis-captured-at))
                   (swap! !stats assoc :indexed total)
                   {:indexed total :last-at (meta-get ds "last-at")})
@@ -319,31 +380,70 @@
                   (str "\"" (str/replace t "\"" "\"\"") "\""))))
          (str/join " "))))
 
+(defn- index-enum-values
+  "Both verbatim representations a typed store value may have in the derived
+   index. Writes deliberately preserve strings vs keywords; candidates must
+   over-approximate that distinction and let the store-side re-check decide."
+  [v]
+  (when (some? v)
+    (let [raw (str/replace-first (str v) #"^:" "")]
+      [raw (str ":" raw)])))
+
 (defn- candidates
-  "Ranked candidate ids from FTS5. Over-fetches so the re-check can drop
-   stale/filtered rows without starving k."
-  [ds {:keys [q author session-id since before limit offset]}]
+  "Candidate ids from one composable SQL statement. Content queries rank by
+   BM25; attribute-only queries use deterministic newest-first ordering."
+  [ds {:keys [q author session-id since before type claim-type tags
+              subject-type subject-id pattern-id limit offset]}]
   (let [k (or limit 10)
         offset (or offset 0)
         overfetch (max 50 (* 4 k))
-        clauses (cond-> ["ev_fts MATCH ?"]
-                  author (conj "author = ?")
-                  session-id (conj "session = ?")
-                  since (conj "at >= ?")
-                  before (conj "at < ?"))
-        params (cond-> [(match-string q)]
+        content? (not (str/blank? (str q)))
+        from (if content?
+               "ev_fts f JOIN ev_attr a USING (id)"
+               "ev_attr a")
+        clauses (cond-> []
+                  content? (conj "ev_fts MATCH ?")
+                  author (conj "a.author = ?")
+                  session-id (conj "a.session = ?")
+                  since (conj "a.at >= ?")
+                  before (conj "a.at < ?")
+                  type (conj "a.type IN (?,?)")
+                  claim-type (conj "a.claim_type IN (?,?)")
+                  subject-type (conj "a.subject_type IN (?,?)")
+                  subject-id (conj "a.subject_id = ?")
+                  pattern-id (conj "a.pattern_id IN (?,?)")
+                  (seq tags)
+                  (into (repeat
+                         (count tags)
+                         "EXISTS (SELECT 1 FROM ev_tags t
+                                  WHERE t.id = a.id AND t.tag IN (?,?))")))
+        params (cond-> []
+                 content? (conj (match-string q))
                  author (conj (str author))
                  session-id (conj (str session-id))
                  since (conj (str since))
-                 before (conj (str before)))
-        sql (str "SELECT id, bm25(ev_fts) AS score FROM ev_fts WHERE "
-                 (str/join " AND " clauses)
-                 " ORDER BY bm25(ev_fts) LIMIT ? OFFSET ?")]
+                 before (conj (str before))
+                 type (into (index-enum-values type))
+                 claim-type (into (index-enum-values claim-type))
+                 subject-type (into (index-enum-values subject-type))
+                 subject-id (conj (str subject-id))
+                 pattern-id (into (index-enum-values pattern-id))
+                 (seq tags) (into (mapcat index-enum-values tags)))
+        sql (str "SELECT a.id, "
+                 (if content? "bm25(ev_fts)" "NULL")
+                 " AS score FROM " from
+                 (when (seq clauses)
+                   (str " WHERE " (str/join " AND " clauses)))
+                 (if content?
+                   " ORDER BY bm25(ev_fts)"
+                   " ORDER BY a.at DESC, a.id DESC")
+                 " LIMIT ? OFFSET ?")]
     (jdbc/execute! ds (into [sql] (conj params overfetch offset)) unqualified)))
 
 (def ^:private recheck-cols
   '[xt/id evidence/id evidence/at evidence/author evidence/session-id
-    evidence/type evidence/ephemeral?])
+    evidence/body evidence/type evidence/claim-type evidence/tags
+    evidence/subject evidence/pattern-id evidence/ephemeral?])
 
 (defn- fetch-doc
   [node id cols]
@@ -363,15 +463,52 @@
                       (mapv deref))))
        vec))
 
+(defn- enum-value [v]
+  (some-> (if (keyword? v) (subs (str v) 1) (str v))
+          (str/replace-first #"^:" "")))
+
+(defn- content-tokens [s]
+  (->> (re-seq #"[\p{L}\p{N}]+" (str/lower-case (str s)))
+       set))
+
+(defn- content-match? [doc q]
+  (if (str/blank? (str q))
+    true
+    (let [body-tokens (content-tokens (body-text doc))
+          groups (partition-by #{"OR"} (str/split (str q) #"\s+"))
+          conjunctions (->> groups
+                            (remove #(= ["OR"] %))
+                            (map #(remove #{"AND"} %)))]
+      (boolean
+       (some (fn [terms]
+               (every? body-tokens (mapcat content-tokens terms)))
+             conjunctions)))))
+
+(defn- tag-match? [doc tags]
+  (let [stored (set (map enum-value (:evidence/tags doc)))]
+    (every? stored (map enum-value tags))))
+
 (defn- passes-recheck?
-  [doc {:keys [author session-id since before include-ephemeral]}]
-  (and (or (nil? author) (= (str author) (str (:evidence/author doc))))
+  [doc {:keys [q author session-id since before type claim-type tags
+               subject-type subject-id pattern-id include-ephemeral]}]
+  (let [subject (:evidence/subject doc)]
+    (and (content-match? doc q)
+       (or (nil? author) (= (str author) (str (:evidence/author doc))))
        (or (nil? session-id) (= (str session-id) (str (:evidence/session-id doc))))
        (or (nil? since) (>= (compare (str (:evidence/at doc)) (str since)) 0))
        (or (nil? before) (neg? (compare (str (:evidence/at doc)) (str before))))
+       (or (nil? type) (= (enum-value type) (enum-value (:evidence/type doc))))
+       (or (nil? claim-type)
+           (= (enum-value claim-type) (enum-value (:evidence/claim-type doc))))
+       (or (empty? tags) (tag-match? doc tags))
+       (or (nil? subject-type)
+           (= (enum-value subject-type) (enum-value (:ref/type subject))))
+       (or (nil? subject-id) (= (str subject-id) (str (:ref/id subject))))
+       (or (nil? pattern-id)
+           (= (enum-value pattern-id) (enum-value (:evidence/pattern-id doc))))
        ;; contract semantics: param absent = no filtering
        (or (not (false? include-ephemeral))
-           (not (true? (:evidence/ephemeral? doc))))))
+           (not (true? (:evidence/ephemeral? doc)))))))
 
 (defn- recheck-candidates
   "Re-check candidates in waves of k and stop once k survive. This preserves
@@ -380,17 +517,47 @@
   re-check projection when the caller does not want bodies, `[*]` when it does."
   [node cands k params cols]
   (loop [remaining cands
-         survivors []]
+         survivors []
+         checked 0]
     (if (or (>= (count survivors) k) (empty? remaining))
-      (vec (take k survivors))
+      {:survivors (vec survivors) :checked checked}
       (let [wave (vec (take k remaining))
             docs (fetch-wave node (mapv :id wave) cols)
-            accepted (into []
-                           (keep (fn [[cand doc]]
-                                   (when (and doc (passes-recheck? doc params))
-                                     {:score (:score cand) :doc doc})))
-                           (map vector wave docs))]
-        (recur (drop k remaining) (into survivors accepted))))))
+            needed (- k (count survivors))
+            {:keys [accepted wave-checked]}
+            (loop [pairs (seq (map vector wave docs))
+                   accepted []
+                   wave-checked 0]
+              (if (or (empty? pairs) (>= (count accepted) needed))
+                {:accepted accepted :wave-checked wave-checked}
+                (let [[[cand doc] & more] pairs]
+                  (recur more
+                         (cond-> accepted
+                           (and doc (passes-recheck? doc params))
+                           (conj {:score (:score cand) :doc doc}))
+                         (inc wave-checked)))))]
+        (swap! !stats update :recheck-rejections (fnil + 0)
+               (- wave-checked (count accepted)))
+        (recur (drop k remaining)
+               (into survivors accepted)
+               (+ checked wave-checked))))))
+
+(defn- hydrate-survivors
+  "Hydrate certified ids through the same bounded SQL IN shape used by the
+   evidence list path. SQLite proposes ids; this query still reads XTDB."
+  [node survivors]
+  (if-not (seq survivors)
+    []
+    (let [ids (mapv #(get-in % [:doc :xt/id]) survivors)
+          placeholders (str/join "," (repeat (count ids) "?"))
+          sql (str "SELECT * FROM evidence WHERE _id IN (" placeholders ")")
+          docs (fxt/safe-q node (into [sql] ids))
+          by-id (into {} (map (juxt :xt/id identity)) docs)]
+      (into []
+            (keep (fn [{:keys [doc] :as survivor}]
+                    (when-let [full-doc (get by-id (:xt/id doc))]
+                      (assoc survivor :doc full-doc))))
+            survivors))))
 
 (defn document-frequencies
   "Index-only document frequencies for sanitized terms. Never reads XTDB."
@@ -416,11 +583,10 @@
     {:df frequencies :indexed indexed}))
 
 (defn search
-  "Free-text search: FTS5 pre-filter + bounded-concurrency XTDB re-check.
+  "Unified content/attribute candidates + bounded-concurrency XTDB re-check.
    A candidate survives only if the doc exists in the store AND still
-   passes the structured filters (author/session/since/before/ephemeral)
-   read from the STORE's copy, not the index's. Returns
-   {:results [{:score f :entry doc} ...] :count n :checked n :index-as-of s}."
+   passes every requested predicate read from the STORE's copy, not the
+   index's."
   [node {:keys [limit hydrate] :as params}]
   (let [ds @!ds
         k (or limit 10)
@@ -432,8 +598,11 @@
         ;; the XTDB round trips on the default (hydrated) path — every existing
         ;; caller — for no gain. The narrow projection is a win only when the
         ;; bodies are then thrown away, i.e. under hydrate=false.
-        survivors (recheck-candidates node cands k params
-                                      (if hydrate? '[*] recheck-cols))
+        {:keys [survivors checked]}
+        (recheck-candidates node cands k params recheck-cols)
+        survivors (if hydrate?
+                    (hydrate-survivors node survivors)
+                    survivors)
         results
         (if hydrate?
           (mapv (fn [{:keys [score doc]}]
@@ -448,17 +617,46 @@
                 survivors))]
     {:results results
      :count (count results)
-     :checked (count cands)
-     :index-as-of (meta-get ds "last-at")}))
+     :checked checked
+     :index-as-of (meta-get ds "last-at")
+     :index-basis {:checkpoint [(meta-get ds "last-at")
+                                (meta-get ds "last-id")]
+                   :basis-tx (meta-get ds "basis-tx")
+                   :basis-captured-at (meta-get ds "basis-captured-at")}}))
 
-(defn stats []
-  (let [ds @!ds
-        rows (when ds
-               (:n (jdbc/execute-one! ds ["SELECT count(*) AS n FROM ev_fts"]
-                                      unqualified)))
-        basis {:tx (when ds (meta-get ds "basis-tx"))
-               :captured-at (when ds (meta-get ds "basis-captured-at"))}]
-    (assoc @!stats :rows rows :ready (some? ds)
-           :basis basis
-           :periodic? (some? @!scheduler)
-           :catch-up-running? @!catch-up-running?)))
+(defn- read-meta-edn [ds k]
+  (when-let [s (and ds (meta-get ds k))]
+    (try (edn/read-string s) (catch Throwable _ nil))))
+
+(defn- staleness [node ds captured-at]
+  (let [basis-ids (read-meta-edn ds "basis-tx-ids")
+        live-ids (when node (tx-id-map (xt/status node)))
+        tx-lag (when (and basis-ids live-ids)
+                 (->> (into #{} (concat (keys basis-ids) (keys live-ids)))
+                      (map #(max 0 (- (long (get live-ids % -1))
+                                      (long (get basis-ids % -1)))))
+                      (reduce max 0)))
+        age-ms (when captured-at
+                 (try
+                   (max 0 (.between ChronoUnit/MILLIS
+                                    (Instant/parse captured-at) (Instant/now)))
+                   (catch Throwable _ nil)))]
+    {:tx-lag tx-lag :age-ms age-ms}))
+
+(defn stats
+  ([] (stats nil))
+  ([node]
+   (let [ds @!ds
+         rows (when ds
+                (:n (jdbc/execute-one! ds ["SELECT count(*) AS n FROM ev_fts"]
+                                       unqualified)))
+         captured-at (when ds (meta-get ds "basis-captured-at"))
+         basis {:tx (when ds (meta-get ds "basis-tx"))
+                :captured-at captured-at}]
+     (assoc @!stats :rows rows :ready (some? ds)
+            :basis basis
+            :staleness (staleness node ds captured-at)
+            :projection projection
+            :residual residual
+            :periodic? (some? @!scheduler)
+            :catch-up-running? @!catch-up-running?))))

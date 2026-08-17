@@ -256,6 +256,14 @@
                     [k (URLDecoder/decode v "UTF-8")]))))
         (some-> (.getQuery (.getRequestURI ex)) (str/split #"&"))))
 
+(defn- query-param-values [^HttpExchange ex wanted-key]
+  (into []
+        (keep (fn [kv]
+                (let [[k v] (str/split kv #"=" 2)]
+                  (when (and (= wanted-key k) v)
+                    (URLDecoder/decode v "UTF-8")))))
+        (some-> (.getQuery (.getRequestURI ex)) (str/split #"&"))))
+
 (defn- parse-instant
   [value]
   (when (some? value)
@@ -681,14 +689,19 @@
     (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
 
 (defn- text-search-route
-  "GET /api/alpha/evidence/text-search?q=…&author=&session-id=&since=&before=
-   &include-ephemeral=&limit=&offset=&hydrate= — D1 sidecar search
-   (candidates + re-check). ?df=t1,t2 returns index-only document frequencies;
-   ?stats=true returns index stats instead. POST {:op :catch-up} (penholder-
-   gated) starts a background catch-up/rebuild."
+  "GET /api/alpha/evidence/text-search — unified content/attribute candidate
+   search with store-side re-check. q is optional; tags is repeatable.
+   ?df=t1,t2 returns index-only document frequencies; ?stats=true returns
+   index stats instead. POST {:op :catch-up} (penholder-gated) starts a
+   background catch-up/rebuild."
   [^HttpExchange ex]
   (let [method (.getRequestMethod ex)
-        p (query-params ex)]
+        p (query-params ex)
+        tags (->> (query-param-values ex "tags")
+                  (mapcat #(str/split % #","))
+                  (map str/trim)
+                  (remove str/blank?)
+                  vec)]
     (cond
       (= method "POST")
       (let [payload (parse-payload ex)
@@ -702,7 +715,7 @@
       (respond! ex 405 (pr-str {:ok false :error "GET (search) or POST (catch-up)"}))
 
       (= "true" (p "stats"))
-      (respond! ex 200 (pr-str (text/stats)))
+      (respond! ex 200 (pr-str (text/stats @!node)))
 
       (not (str/blank? (str (p "df"))))
       (let [terms (->> (str/split (p "df") #",")
@@ -715,24 +728,32 @@
                              :maximum text/max-df-terms}))
           (respond! ex 200 (pr-str (text/document-frequencies terms)))))
 
-      (str/blank? (str (p "q")))
-      (respond! ex 400 (pr-str {:error "q parameter required"}))
-
       :else
       (with-expensive-read!
         ex
         #(respond! ex 200
                    (pr-str (text/search @!node
-                                        (cond-> {:q (p "q")
-                                                 :limit (parse-limit p)
+                                        (cond-> {:limit (parse-limit p)
                                                  :offset (parse-text-offset p)
                                                  :hydrate (not= "false"
                                                                  (str/lower-case
                                                                   (str (p "hydrate"))))}
+                                          (not (str/blank? (str (p "q"))))
+                                          (assoc :q (p "q"))
                                           (p "author") (assoc :author (p "author"))
                                           (p "session-id") (assoc :session-id (p "session-id"))
                                           (p "since") (assoc :since (p "since"))
                                           (p "before") (assoc :before (p "before"))
+                                          (p "type") (assoc :type (p "type"))
+                                          (p "claim-type")
+                                          (assoc :claim-type (p "claim-type"))
+                                          (seq tags) (assoc :tags tags)
+                                          (p "subject-type")
+                                          (assoc :subject-type (p "subject-type"))
+                                          (p "subject-id")
+                                          (assoc :subject-id (p "subject-id"))
+                                          (p "pattern-id")
+                                          (assoc :pattern-id (p "pattern-id"))
                                           (p "include-ephemeral")
                                           (assoc :include-ephemeral
                                                  (= "true" (str/lower-case
