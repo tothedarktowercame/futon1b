@@ -129,11 +129,13 @@
         checkpoint-at "2026-08-17T02:00:00Z"
         checkpoint-id "checkpoint-before-failure"
         old-basis "{:latest-completed-txs {:foo 7}}"
+        old-basis-ids "{\"foo\" 7}"
         old-captured-at "2026-08-17T02:00:01Z"
         calls (atom 0)]
     (meta-set! ds "last-at" checkpoint-at)
     (meta-set! ds "last-id" checkpoint-id)
     (meta-set! ds "basis-tx" old-basis)
+    (meta-set! ds "basis-tx-ids" old-basis-ids)
     (meta-set! ds "basis-captured-at" old-captured-at)
     (let [before (meta-map ds)
           threw?
@@ -151,8 +153,12 @@
           after (meta-map ds)]
       (check! "the injected catch-up failure reaches the caller" threw?)
       (check! "mid-scan failure never advances the basis"
-              (= (select-keys before ["basis-tx" "basis-captured-at"])
-                 (select-keys after ["basis-tx" "basis-captured-at"])))
+              (= (select-keys before
+                              ["basis-tx" "basis-tx-ids"
+                               "basis-captured-at"])
+                 (select-keys after
+                              ["basis-tx" "basis-tx-ids"
+                               "basis-captured-at"])))
       ;; The checkpoint is the page-level claim and DOES advance to the
       ;; last completed page (resumability + observable progress); only
       ;; the basis is drain-only.
