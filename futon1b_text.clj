@@ -22,8 +22,10 @@
   (:require [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [clojure.string :as str]
-            [futon1b-xt :as fxt])
-  (:import [java.util.concurrent Executors ScheduledExecutorService
+            [futon1b-xt :as fxt]
+            [xtdb.api :as xt])
+  (:import [java.time Instant]
+           [java.util.concurrent Executors ScheduledExecutorService
             ThreadFactory TimeUnit]))
 
 (def ^:private unqualified {:builder-fn rs/as-unqualified-maps})
@@ -63,7 +65,22 @@
    "CREATE VIRTUAL TABLE IF NOT EXISTS ev_fts USING fts5(
       id UNINDEXED, author UNINDEXED, at UNINDEXED, session UNINDEXED,
       body, tokenize='unicode61')"
-   "CREATE TABLE IF NOT EXISTS fts_meta (k TEXT PRIMARY KEY, v TEXT)"])
+   "CREATE TABLE IF NOT EXISTS fts_meta (k TEXT PRIMARY KEY, v TEXT)"
+   "CREATE TABLE IF NOT EXISTS ev_attr (
+  id TEXT PRIMARY KEY, type TEXT, claim_type TEXT, author TEXT, at TEXT,
+  session TEXT, subject_type TEXT, subject_id TEXT, pattern_id TEXT,
+  ephemeral INTEGER, conjecture INTEGER);"
+   "CREATE INDEX IF NOT EXISTS ev_attr_claim_at ON ev_attr(claim_type, at);"
+   "CREATE INDEX IF NOT EXISTS ev_attr_type_at  ON ev_attr(type, at);"
+   "CREATE INDEX IF NOT EXISTS ev_attr_auth_at  ON ev_attr(author, at);"
+   "CREATE INDEX IF NOT EXISTS ev_attr_subject  ON ev_attr(subject_type, subject_id);"
+   "CREATE INDEX IF NOT EXISTS ev_attr_pattern  ON ev_attr(pattern_id);"
+   "CREATE TABLE IF NOT EXISTS ev_tags (
+  id TEXT, tag TEXT, PRIMARY KEY (tag, id)) WITHOUT ROWID;"
+   "CREATE INDEX IF NOT EXISTS ev_tags_id ON ev_tags(id);"
+   ;; fts_meta gains keys: "basis-tx" (pr-str of :latest-completed-txs),
+   ;;                      "basis-captured-at"
+   ])
 
 (defn- meta-get [ds k]
   (:fts_meta/v (first (jdbc/execute! ds ["SELECT v FROM fts_meta WHERE k = ?" k]))))
@@ -98,23 +115,47 @@
     (if (string? b) b (pr-str b))))
 
 (defn- index-batch!
-  "Upsert docs into the index (delete+insert: FTS5 has no PK). One tx."
+  "Upsert docs into all declared index tables. One transaction per batch."
   [ds docs]
   (jdbc/with-transaction [tx ds]
     (doseq [d docs]
-      (let [id (str (:xt/id d))]
+      (let [id (str (:xt/id d))
+            subject (:evidence/subject d)]
         (jdbc/execute! tx ["DELETE FROM ev_fts WHERE id = ?" id])
+        (jdbc/execute! tx ["DELETE FROM ev_attr WHERE id = ?" id])
+        (jdbc/execute! tx ["DELETE FROM ev_tags WHERE id = ?" id])
         (jdbc/execute! tx ["INSERT INTO ev_fts(id, author, at, session, body)
                             VALUES (?,?,?,?,?)"
                            id
                            (str (:evidence/author d))
                            (str (:evidence/at d))
                            (some-> (:evidence/session-id d) str)
-                           (body-text d)]))))
+                           (body-text d)])
+        (jdbc/execute! tx ["INSERT INTO ev_attr(
+                              id, type, claim_type, author, at, session,
+                              subject_type, subject_id, pattern_id,
+                              ephemeral, conjecture)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+                           id
+                           (str (:evidence/type d))
+                           (str (:evidence/claim-type d))
+                           (str (:evidence/author d))
+                           (str (:evidence/at d))
+                           (str (:evidence/session-id d))
+                           (str (:ref/type subject))
+                           (str (:ref/id subject))
+                           (str (:evidence/pattern-id d))
+                           (if (:evidence/ephemeral? d) 1 0)
+                           (if (:evidence/conjecture? d) 1 0)])
+        (doseq [tag (:evidence/tags d)]
+          (jdbc/execute! tx ["INSERT INTO ev_tags(id, tag) VALUES (?,?)"
+                             id (str tag)])))))
   (count docs))
 
 (def ^:private scan-cols
-  '[xt/id evidence/at evidence/author evidence/session-id evidence/body])
+  '[xt/id evidence/at evidence/author evidence/session-id evidence/body
+    evidence/type evidence/claim-type evidence/tags evidence/subject
+    evidence/pattern-id evidence/ephemeral? evidence/conjecture?])
 
 (defn- scan-after
   "One keyset page strictly after (at, id), oldest first. The compound
@@ -149,19 +190,26 @@
   (if-not (compare-and-set! !catch-up-running? false true)
     {:skipped :already-running}
     (try
-      (let [ds @!ds]
+      (let [ds @!ds
+            basis-tx (select-keys
+                      (xt/status node)
+                      [:latest-completed-txs :latest-submitted-msg-ids
+                       :latest-processed-msg-ids])
+            basis-captured-at (str (Instant/now))]
         (loop [after [(or (meta-get ds "last-at") "") (or (meta-get ds "last-id") "")]
                total 0]
           (let [docs (scan-after node after page)]
             (if (empty? docs)
-              (do (swap! !stats assoc :indexed total)
+              (do (jdbc/with-transaction [tx ds]
+                    (meta-set! tx "last-at" (first after))
+                    (meta-set! tx "last-id" (second after))
+                    (meta-set! tx "basis-tx" (pr-str basis-tx))
+                    (meta-set! tx "basis-captured-at" basis-captured-at))
+                  (swap! !stats assoc :indexed total :last-at (first after))
                   {:indexed total :last-at (meta-get ds "last-at")})
               (let [n (index-batch! ds docs)
                     lst (last docs)
                     hi [(str (:evidence/at lst)) (str (:xt/id lst))]]
-                (meta-set! ds "last-at" (first hi))
-                (meta-set! ds "last-id" (second hi))
-                (swap! !stats assoc :last-at (first hi))
                 (recur hi (+ total n)))))))
       (finally (reset! !catch-up-running? false)))))
 
@@ -399,7 +447,10 @@
   (let [ds @!ds
         rows (when ds
                (:n (jdbc/execute-one! ds ["SELECT count(*) AS n FROM ev_fts"]
-                                      unqualified)))]
+                                      unqualified)))
+        basis {:tx (when ds (meta-get ds "basis-tx"))
+               :captured-at (when ds (meta-get ds "basis-captured-at"))}]
     (assoc @!stats :rows rows :ready (some? ds)
+           :basis basis
            :periodic? (some? @!scheduler)
            :catch-up-running? @!catch-up-running?)))
