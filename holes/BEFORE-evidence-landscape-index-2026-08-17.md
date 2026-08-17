@@ -143,19 +143,31 @@ returned documents client-side for both `:user` and
 the `bb` stage reads the returned EDN and does not issue another request.
 
 ```sh
-curl -sS -m 180 -w '%{stderr}__HTTP__=%{http_code} __TIME_TOTAL__=%{time_total}\n' 'http://localhost:7073/api/alpha/evidence/text-search?q=Michaela&author=joe&limit=50&hydrate=true' | bb -e '(require (quote [clojure.edn :as edn])) (let [response (edn/read-string (slurp *in*)) results (:results response) survivors (filter #(and (some #{:user} (:evidence/tags %)) (= :question (:evidence/claim-type %))) results)] (println (str "result_count=" (count results) " survivor_count=" (count survivors))) (doseq [item survivors] (println (:evidence/id item))))'
+curl -sS -m 60 -w '%{stderr}__HTTP__=%{http_code} __TIME_TOTAL__=%{time_total}\n' 'http://localhost:7073/api/alpha/evidence/text-search?q=Michaela&author=joe&limit=50&hydrate=true' | bb -e '(require (quote [clojure.edn :as edn])) (let [response (edn/read-string (slurp *in*)) results (:results response) survivors (filter #(let [doc (:entry %)] (and (some #{:user} (:evidence/tags doc)) (= :question (:evidence/claim-type doc)))) results)] (println (str "result_count=" (count results) " survivor_count=" (count survivors))) (doseq [item survivors] (println (get-in item [:entry :evidence/id]))))'
 ```
 
 | run | HTTP | hydrated content matches | survivors (`:user` + `:question`) | curl `time_total` |
 |---|---:|---:|---:|---:|
-| cold (first) | 200 | 1 | 0 | 0.153558 s |
-| warm (repeat) | 200 | 1 | 0 | 0.297174 s |
+| review rerun (corrected filter) | 200 | 2 | 2 | 0.159893 s |
 
-The zero-survivor result is not evidence that the composed corpus query has
-no matches: this workaround can filter only the first 50 FTS candidates (one
-candidate for this term), so attribute filtering occurs after the content
-limit and cannot recover matching documents excluded upstream.  It records
-the honest capability and cost of the before system.
+**Review correction (claude-9, same day):** the original run of this
+workaround reported 1 match / **0 survivors**, but that zero was a
+measurement artifact, not a system fact: `text-search` returns results as
+`{:score … :entry doc}`, and the original client filter read
+`:evidence/tags` on the wrapper instead of on `:entry`, so tags were always
+nil and nothing could survive. The corrected command above (filter applied
+to `:entry`) retrieves both Michaela-bearing operator turns, including the
+known 2026-08-15 one (`emacs-08dc8df323d560e364287af3d1a29241`). The count
+moved from 1 to 2 matches between the original run and the review rerun
+because the live corpus had grown in the interval.
+
+The honest before-story is therefore: the workaround *does* retrieve, but
+(a) it is not one query — composition happens client-side; and (b) it is
+recall-bounded at the content limit: attribute filtering occurs after the
+50-candidate FTS cut, so attribute predicates can never widen or steer
+candidate selection, and matching documents excluded upstream are
+unrecoverable. Those two properties, not a retrieval failure, are what the
+after leg must beat.
 
 ## Confounds and interpretation limits
 
@@ -181,3 +193,23 @@ the honest capability and cost of the before system.
 - Curl's `time_total` is client wall-clock.  The journal's server elapsed
   time is the independent corroboration; sub-millisecond rounding accounts
   for their small differences.
+
+## Reviewer addendum (claude-9, 2026-08-17)
+
+The §1 attribute timings are a **floor, not a ceiling**, on the before-cost.
+Both probed tags filled the 50-row limit quickly, so both measurements
+exercise the find-50-early path (~2–5 s). The pathological case — a tag
+matching fewer than 50 documents, worst of all zero — forces the
+post-filter to walk the entire ordered corpus in 1,000-row pages (~141
+pages at the current inventory; cold single-page bounded scans measured
+2–3 s in `holes/SPIKE-attribute-index-2026-07-26.md`, implying minutes of
+server-side work). That probe was **deliberately not fired at the live
+service**: a client timeout does not stop the server-side walk (the spike's
+journal records scans completing after client disconnect), so the
+measurement would impose multi-minute load on a box already showing a 78.5 s
+concurrent scan during this window. The heavy tail is instead documented by
+the spike's production journal evidence (typed sweeps 5–28 s; non-PK
+fallbacks 20–30 s with client disconnects). The after leg should therefore
+compare: (i) these same two tag probes, (ii) the sensor-sweep composition
+(inexpressible → one query), and (iii) a sub-50-match tag query, which
+becomes safe to measure only once the index serves it.
