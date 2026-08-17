@@ -41,14 +41,77 @@ systemctl --user daemon-reload
 systemctl --user enable --now futon1b-server
 ```
 
-Heap is **`-Xmx1536m` + 768m direct** (`deps.edn :server`), right-sized
-2026-07-14 from lucy's `gc.log`: the full-corpus live set after GC is only
-~800–850M, so 1536m gives ~44% headroom on a 3.8G box while `1g` OOM'd (the
-pool-2 cascade). If the target box's RAM differs materially from lucy's
-3.8G, change the cap in `deps.edn :server`, not the unit. The two genuine
-per-box knobs in the unit are `--store-dir` (lucy `switchover-store`,
-chicago `chicago-store`) and `--port` (lucy `7074`, chicago `7074`,
-default elsewhere `7073`) — edit these in the copied unit before `enable`.
+Memory is documented in **[Memory requirements](#memory-requirements)** below —
+read it before deploying to a new box, because `deps.edn :server` is now sized
+for a large host and **is not safe on a small one**.
+
+The two genuine per-box knobs in the unit are `--store-dir` (lucy
+`switchover-store`, chicago `chicago-store`) and `--port` (lucy `7074`, chicago
+`7074`, default elsewhere `7073`) — edit these in the copied unit before
+`enable`.
+
+## Memory requirements
+
+**Current, as of 2026-08-17:**
+
+| alias | heap | direct (Arrow off-heap) | for |
+|---|---|---|---|
+| `:node` | `1g` | `1g` | dev / scripts / tests |
+| **`:server`** | **`4g`** | **`3g`** | the persistent service |
+
+Plus, in the systemd unit, **`Environment=MALLOC_ARENA_MAX=2`** — see below. It
+is not optional on a busy box.
+
+### ⚠ `:server` travels with the repo, and boxes are not alike
+
+`scripts/futon1b-server.service` runs `-M:server`, so the sizing reproduces
+everywhere without a per-box override. That was the point, and it has become a
+hazard: **`4g` heap + `3g` direct is 7G of commitment, which does not fit lucy's
+3.8G box.** Sizing was raised for 31G and 249G hosts and nobody re-checked the
+small ones. Before deploying to a box with materially less RAM than the service's
+`MemoryHigh`, either lower `:server` for that box or give it its own alias — do
+not assume the tracked value is safe because it is tracked.
+
+### How each number was arrived at (all measured, not guessed)
+
+- **`1g` heap is too small.** ~150M over the live set → G1 death-spiral plus
+  swap: the `pool-2` OOM cascade of **2026-07-12/13**, which took HTTP down while
+  the listen socket stayed open (see `TN-futon1b-memory-incident.md`).
+- **`1536m` heap is too small on a big corpus.** Right-sized 2026-07-14 from
+  lucy's `gc.log` (full-corpus live set after GC only ~800–850M, so 1536m gave
+  ~44% headroom on 3.8G) — but under the learning-loop workload of
+  **2026-07-25/26** it pinned G1 concurrent threads at 99.9% (deep-health 8–25s,
+  type sweeps 5–20s) while the box still had ~15G free. Hence `4g`.
+- **`768m` → `1536m` → `3g` direct.** Steady-state Arrow allocation sits at
+  ~1.45G, so at a 1536m cap a **full-corpus rebuild could not obtain transient
+  buffers at any page size** (2026-08-17). Backfill, not tail maintenance, is what
+  finds this ceiling — and candidate-index backfill is a C3 lifecycle operation
+  that *will* recur. `4g`/`3g` also matches the half-heap/half-off-heap
+  provisioning guidance from the Henderson call (2026-08-05).
+- **`4g` is ample, not tight.** Measured on Zone 2026-08-17 while serving a
+  140,296-document store: RSS 4.88G, heap committed 2.31G of which ~976M live.
+  Raising it further buys nothing and lengthens GC.
+
+### MALLOC_ARENA_MAX — the one that isn't a JVM flag
+
+On 2026-08-17, with a full-corpus rebuild running, **glibc malloc arenas held
+8.4G of 12.4G RSS and were invisible to `-XX:NativeMemoryTracking`** — NMT
+accounted for 5.26G against a 10.96G cgroup anon total. Native allocation from
+SQLite/zstd/netty JNI goes through glibc, not the JVM's tracked allocators, so it
+looks like a leak the JVM cannot see. Setting `MALLOC_ARENA_MAX=2` cut RSS ~70%
+and turned growth *negative*.
+
+If a futon1b JVM's RSS climbs while `jcmd GC.heap_info` and
+`VM.native_memory summary` both stay flat, this is why — check arena-shaped
+anonymous mappings (~64M each) before hunting a heap leak.
+
+### Cgroup sizing, for reference
+
+Narrow `MemoryHigh`/`MemoryMax` deliberately: over `MemoryHigh` with anon-only
+pages and swap exhausted, the kernel reclaims forever and pins PSI, which on
+2026-08-17 made `systemd-oomd` kill *other* processes on the box rather than this
+one. Zone's `futon1b-dionysus.service` uses `48G`/`50G`; Dionysus used `20G`/`21G`
+after that incident. See `futon0/holes/…` and the oomd notes for the full story.
 
 Tests: `clojure -M:node -m test-a1a2` (HTTP smoke suite against an
 in-memory node; 26/26 as of `d171150`). Gates for any Clojure change:
