@@ -200,16 +200,24 @@
                total 0]
           (let [docs (scan-after node after page)]
             (if (empty? docs)
+              ;; Drain: the pre-scan basis is now proven covered (contract
+              ;; C6). The checkpoint is NOT written here — it advances per
+              ;; completed page below, which is what keeps a long rebuild
+              ;; resumable and its progress observable in stats. The two
+              ;; claims differ: the checkpoint's ("everything <= (at,id) is
+              ;; indexed") is true after every page; the basis's ("reflects
+              ;; the store as of these coordinates") only on a full drain.
               (do (jdbc/with-transaction [tx ds]
-                    (meta-set! tx "last-at" (first after))
-                    (meta-set! tx "last-id" (second after))
                     (meta-set! tx "basis-tx" (pr-str basis-tx))
                     (meta-set! tx "basis-captured-at" basis-captured-at))
-                  (swap! !stats assoc :indexed total :last-at (first after))
+                  (swap! !stats assoc :indexed total)
                   {:indexed total :last-at (meta-get ds "last-at")})
               (let [n (index-batch! ds docs)
                     lst (last docs)
                     hi [(str (:evidence/at lst)) (str (:xt/id lst))]]
+                (meta-set! ds "last-at" (first hi))
+                (meta-set! ds "last-id" (second hi))
+                (swap! !stats assoc :last-at (first hi))
                 (recur hi (+ total n)))))))
       (finally (reset! !catch-up-running? false)))))
 
