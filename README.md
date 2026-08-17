@@ -41,9 +41,10 @@ systemctl --user daemon-reload
 systemctl --user enable --now futon1b-server
 ```
 
-Memory is documented in **[Memory requirements](#memory-requirements)** below —
-read it before deploying to a new box, because `deps.edn :server` is now sized
-for a large host and **is not safe on a small one**.
+Memory is documented in **[Memory requirements](#memory-requirements)** below.
+Day-to-day serving is modest and ran fine on a 3.8G box; `deps.edn :server` ships
+a larger ceiling sized for *rebuilds*, so read that section before deploying to a
+small host — the shipped value is a ceiling, not a minimum.
 
 The two genuine per-box knobs in the unit are `--store-dir` (lucy
 `switchover-store`, chicago `chicago-store`) and `--port` (lucy `7074`, chicago
@@ -52,25 +53,42 @@ The two genuine per-box knobs in the unit are `--store-dir` (lucy
 
 ## Memory requirements
 
-**Current, as of 2026-08-17:**
+**You do not need a big machine to run this.** Day-to-day serving is modest; the
+large numbers in `:server` are sized for *rebuilds*, which are occasional. Size
+for the workload you actually have.
 
-| alias | heap | direct (Arrow off-heap) | for |
+| workload | heap | direct | evidence |
 |---|---|---|---|
-| `:node` | `1g` | `1g` | dev / scripts / tests |
-| **`:server`** | **`4g`** | **`3g`** | the persistent service |
+| dev / scripts / tests (`:node`) | `1g` | `1g` | |
+| **day-to-day serving** | **~`1536m`** | **~`768m`** | ran the **full corpus on lucy's 3.8G box** from 2026-07-14; live set after GC only ~800–850M, so 1536m is ~44% headroom. Measured again on Zone 2026-08-17 serving 140,296 documents: **~976M live**. |
+| heavy concurrent workload | `4g` | `768m`+ | the 2026-07-25/26 learning loop pinned G1 concurrent threads at 99.9% under 1536m (deep-health 8–25s, type sweeps 5–20s) while 15G sat free |
+| **full-corpus rebuild / backfill** | `4g` | **`3g`** | steady-state Arrow allocation is already ~1.45G, so at a 1536m cap the rebuild scan **cannot obtain transient buffers at any page size** (2026-08-17) |
 
-Plus, in the systemd unit, **`Environment=MALLOC_ARENA_MAX=2`** — see below. It
-is not optional on a busy box.
+`deps.edn :server` currently ships **`4g` + `3g`** — the rebuild row, because
+candidate-index backfill is a C3 lifecycle operation that *will* recur and it is
+the case most likely to fail confusingly. That is a deliberate ceiling, **not a
+minimum**.
 
-### ⚠ `:server` travels with the repo, and boxes are not alike
+Plus, in the systemd unit, **`Environment=MALLOC_ARENA_MAX=2`** — see below.
+That one matters at *any* size.
 
-`scripts/futon1b-server.service` runs `-M:server`, so the sizing reproduces
-everywhere without a per-box override. That was the point, and it has become a
-hazard: **`4g` heap + `3g` direct is 7G of commitment, which does not fit lucy's
-3.8G box.** Sizing was raised for 31G and 249G hosts and nobody re-checked the
-small ones. Before deploying to a box with materially less RAM than the service's
-`MemoryHigh`, either lower `:server` for that box or give it its own alias — do
-not assume the tracked value is safe because it is tracked.
+### Sizing for a smaller box
+
+`scripts/futon1b-server.service` runs `-M:server`, so whatever `deps.edn` says
+reproduces on every box without a per-box override. Convenient, but it means the
+shipped value follows the largest use case: **`4g` + `3g` is 7G of commitment,
+which does not fit a 3.8G host like lucy.**
+
+On a small box, run small and raise only when you rebuild:
+
+1. serve day-to-day with roughly `1536m` heap + `768m` direct — proven on lucy;
+2. when a full-corpus rebuild or candidate-index backfill is needed, raise the
+   direct cap for that run (or do the rebuild on a larger host and copy the
+   store), then drop back.
+
+Either edit `:server` for that box or give it its own alias — the point is that a
+tracked value is not automatically a *correct* value for your host, and nobody
+re-checked the small boxes when it was raised for the large ones.
 
 ### How each number was arrived at (all measured, not guessed)
 
