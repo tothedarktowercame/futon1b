@@ -698,6 +698,15 @@ mission's core, takes up IC-5/IC-6 plus the sweep/propose/confirm loop.)*
   bar amendment is V2.4 (operator-gated). Evidence emission to the
   landscape (per lifecycle conventions) happens at INSTANTIATE with the
   measurement runs.
+  - *INSTANTIATE review revision (2026-08-17, P-schema+batch review):* the
+    packet (and contract C6 as first drafted) conflated the checkpoint's
+    page-level claim with the basis's drain-level claim, and the faithful
+    implementation of that wording made the checkpoint drain-only — losing
+    rebuild resumability and the V4.2 progress-observability requirement.
+    Fixed at review: checkpoint advances per completed page (original
+    semantics restored), basis commits on drain only; contract C6 reworded
+    to state the two claims separately; failed-scan test updated to assert
+    the split. Spec defect was the reviewer's, not the implementer's.
 
 ## INSTANTIATE — NOT ENTERED (stop-gate 2026-08-17)
 

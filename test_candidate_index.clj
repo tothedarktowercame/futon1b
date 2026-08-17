@@ -150,13 +150,16 @@
             (catch clojure.lang.ExceptionInfo _ true))
           after (meta-map ds)]
       (check! "the injected catch-up failure reaches the caller" threw?)
-      (check! "mid-scan failure advances neither checkpoint nor basis"
-              (= (select-keys before
-                              ["last-at" "last-id" "basis-tx"
-                               "basis-captured-at"])
-                 (select-keys after
-                              ["last-at" "last-id" "basis-tx"
-                               "basis-captured-at"]))))))
+      (check! "mid-scan failure never advances the basis"
+              (= (select-keys before ["basis-tx" "basis-captured-at"])
+                 (select-keys after ["basis-tx" "basis-captured-at"])))
+      ;; The checkpoint is the page-level claim and DOES advance to the
+      ;; last completed page (resumability + observable progress); only
+      ;; the basis is drain-only.
+      (check! "mid-scan failure retains the last completed page's checkpoint"
+              (= {"last-at" "2026-08-17T02:01:00Z"
+                  "last-id" "indexed-before-failure"}
+                 (select-keys after ["last-at" "last-id"]))))))
 
 (defn -main [& _]
   (let [dir (temp-dir)]

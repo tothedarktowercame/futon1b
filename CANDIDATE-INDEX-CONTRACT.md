@@ -91,12 +91,23 @@ TN 2026-08-02 §1).
 ## C6 — Conservative basis advance
 
 The live append hook may enrich the index at any time but **never advances
-the basis** — neither the checkpoint nor `basis-tx`. Only a completed
-catch-up scan does, and the `basis-tx` it commits is the one captured
-*before* that scan started: everything committed to the store before the
-capture is guaranteed scanned, so the basis under-claims coverage rather
-than over-claiming it. An interrupted scan advances nothing. (This promotes
-the existing `on-append!`/`catch-up!` checkpoint split — adopted after the
+the checkpoint or the basis**. During a catch-up scan the two advance on
+different schedules, because they make different claims *(refined at review,
+2026-08-17)*:
+
+- the **checkpoint** claims "everything ≤ `(at, id)` is indexed" — true
+  after every completed page batch, so it advances per page. This is what
+  keeps a long rebuild resumable and its progress observable while it runs.
+- the **basis** claims "this index reflects the store as of these
+  coordinates" — provable only when a scan drains, so it commits only then,
+  and the `basis-tx` committed is the one captured *before* the scan
+  started: everything committed to the store before the capture is
+  guaranteed scanned, so the basis under-claims coverage rather than
+  over-claiming it.
+
+An interrupted scan therefore advances the checkpoint to its last completed
+page and the basis not at all. (This promotes the existing
+`on-append!`/`catch-up!` checkpoint split — adopted after the
 70-silent-misses incident — from implementation habit to contract term.)
 
 The costs this buys are bounded and visible: re-indexing overlap on the next
