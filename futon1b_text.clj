@@ -471,7 +471,12 @@
   (->> (re-seq #"[\p{L}\p{N}]+" (str/lower-case (str s)))
        set))
 
-(defn- content-match? [doc q]
+(defn- content-match?
+  "Certify the content predicate against the store's body text. Token
+   semantics approximate FTS5 unicode61 minus diacritic folding, so a
+   diacritic-insensitive index match can be dropped here — a bounded
+   recall edge, never a wrong answer (C1 direction)."
+  [doc q]
   (if (str/blank? (str q))
     true
     (let [body-tokens (content-tokens (body-text doc))
@@ -592,12 +597,13 @@
         k (or limit 10)
         hydrate? (not (false? hydrate))
         cands (candidates ds params)
-        ;; The re-check reads author/session/at/ephemeral?, ALL of which a full
-        ;; doc already carries. So when the caller wants bodies, fetch `[*]`
-        ;; ONCE in the re-check wave: a separate projection pass would double
-        ;; the XTDB round trips on the default (hydrated) path — every existing
-        ;; caller — for no gain. The narrow projection is a win only when the
-        ;; bodies are then thrown away, i.e. under hydrate=false.
+        ;; Two phases, deliberately: the re-check wave fetches recheck-cols
+        ;; (which must include body — content certification reads the STORE's
+        ;; text, not the index's), then hydrate-survivors fetches full docs
+        ;; for the ≤k survivors in ONE SQL IN — the only affordable id-set
+        ;; shape (TN 2026-08-02 §1). The survivor bodies are read twice on
+        ;; the hydrated path; bounded by k, and it keeps the wave projection
+        ;; independent of what callers want back.
         {:keys [survivors checked]}
         (recheck-candidates node cands k params recheck-cols)
         survivors (if hydrate?
