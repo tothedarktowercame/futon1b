@@ -287,6 +287,55 @@ honest and visible rather than silent.
 
 ---
 
+## 9a. When a full rebuild will not run (2026-08-18, OPEN)
+
+**On a long-lived store, a full evidence re-scan currently fails.** Attempted on
+Zone's restored store (145,789 documents, written to continuously since March):
+
+```
+[fts] catch-up failed: Unconsumed nodes:
+      [ArrowFieldNode [length=72103, nullCount=0],
+       ArrowFieldNode [length=0,     nullCount=0]]
+```
+
+What was ruled out, and how:
+
+| hypothesis | test | result |
+|---|---|---|
+| no lower bound → unbounded scan | re-ran with `--boundary 2026-01-01` | **same error** |
+| page size too large | POST uses page 1000; periodic uses **200** | **same error, both** |
+| transient / load-related | four attempts across 12 minutes | identical every time |
+
+`length=72103` is **constant across every attempt and every page size**, which
+points at one specific stored Arrow batch rather than anything about the query.
+This is consistent with the F4 finding in `README.md` — *Arrow column typing is
+stateful; a doc can ingest fine on a fresh table and fail after other docs shape
+the column's type union, and no shape rule predicts it.* A store shaped by
+months of live writes can hold a batch a full scan cannot consume.
+
+Note what still works, because it bounds the problem precisely:
+
+- **incremental tail catch-up is fine** — `{:indexed 13}` immediately after,
+  basis re-earned, checkpoint advancing;
+- `on-append!` indexes new writes normally, so live search is unaffected;
+- every other query surface (hyperedges, entities, stats) serves normally.
+
+Only the full historical scan fails. **Consequence: `ev_attr`/`ev_tags` cannot
+be backfilled on this store by rebuilding, so facet filters stay near-empty for
+history (§4) while free-text search remains complete.**
+
+> **If you attempt this, restore the checkpoint afterwards.** A parked
+> checkpoint makes the periodic sweep fail every 5 minutes and never re-earn a
+> basis — strictly worse than not trying. Record `last-at`/`last-id` before you
+> start; `fts-rebuild.py` prints them under `--- before ---`.
+
+Options not yet attempted: rebuilding facets from a freshly-ingested store
+(yesterday's merged store full-scanned cleanly *because* it was built by replay,
+never having accumulated the stateful column shape); or identifying and
+re-writing the offending batch via the `put-doc-with-rescue!` ladder.
+
+---
+
 ## 10. Incident log
 
 **2026-08-17 — the drain that was never performed.** A 7,249-document replay
