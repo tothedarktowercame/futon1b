@@ -397,6 +397,81 @@ afterwards.
 
 ---
 
+## 9c. Uniting two stores' evidence — the correct order of operations
+
+The operation that went wrong on 2026-08-17 and was done correctly on 08-18.
+**Goal:** the live store gains the evidence a second store has and it lacks.
+
+| | what it touches |
+|---|---|
+| ❌ swap the live store's directory for the other one | **every table** — entities, hyperedges, relations, patterns all move with it |
+| ✅ replay the other store's missing evidence *into* the live store | **`:evidence` only** |
+
+The wrong version is faster and looks equivalent. It is not: the donor's
+non-evidence tables are whatever they were when it was built, so swapping
+silently reverts all of them. That is the whole of the 08-17 incident.
+
+### The order, and why each step cannot move
+
+1. **Census the live store** (`/health?deep=true`). Record *every* table. This
+   is the before-picture that makes step 8 meaningful.
+2. **Start a server on the donor, on its own port.** XTDB 2 local stores are
+   single-process, so a store that is not being served cannot be read at all.
+   The live service is untouched.
+3. **Compute the delta by id**, bounded at a date both stores share. Check that
+   assumption rather than trusting it.
+4. **Replay delta → live, ascending `(at, id)`, preserving `:id` and `:at`.**
+   Ascending because the store refuses a reply whose `:in-reply-to` parent is
+   absent, and the API pages newest-first. **Do not touch the checkpoint here.**
+5. **Stop the donor server.**
+6. **Only now: reset the live checkpoint** to a boundary below the earliest
+   replayed document, and clear the basis.
+7. **One catch-up.** It drains across the whole region and re-earns the basis.
+8. **Census again and diff.** Non-evidence tables must be unchanged, or grown
+   only by live traffic.
+
+**Why 6 cannot come before 4.** Resetting first, then inserting, lets a sweep
+drain *while* documents are still landing behind it — you get a basis asserting
+coverage of a region that was still being written. Insertion phase first, then
+one reset, then one scan.
+
+**Why 6 cannot be skipped.** The replayed documents are dated in the past, so
+they land *behind* the checkpoint, and `catch-up!` only scans forward (§3). This
+is not theoretical — it was observed live during this very operation:
+
+```
+basis-captured-at  2026-08-18T09:12:59      <- written by a periodic sweep
+last-at            2026-08-18T09:04:08      <- ...that scanned forward from here
+                                            while 2,384 documents dated
+                                            08-10..08-17 sat behind it
+```
+
+The sweep was honest and its conclusion was false. The reset in step 6 is what
+converts that into a real proof.
+
+### Result (2026-08-18)
+
+2,384 documents, `accepted 2384 | FAILED 0` in 185s; store 146,125 → 148,509;
+catch-up `{:indexed 10878}`, basis earned; index and store exactly level at
+148,522 (`delta +0`); spot-check 8/8 retrievable by id. Census confirmed every
+non-evidence table intact and *above* its pre-operation count, i.e. grown by
+live traffic and not disturbed:
+
+| table | before | after |
+|---|---|---|
+| hyperedges | 470,363 | 470,987 |
+| entities | 48,415 | 48,533 |
+| relations | 49,483 | 49,497 |
+
+Both sites' authors now answer in one result set (`codex-8` 9,334, `claude-9`
+2,454, `mission-control/sync` 1,808, `codex-5` 643).
+
+> **Footgun met on the way:** `pkill -f "store-dir <name>"` matches the shell
+> command line running it, killing your own session. Harmless here, but use the
+> pid from `pgrep` and check it first.
+
+---
+
 ## 10. Incident log
 
 **2026-08-17 — the drain that was never performed.** A 7,249-document replay
@@ -417,6 +492,14 @@ every item was about evidence.
 Rolled back 2026-08-18 in a 42-second outage, with the 35 intervening evidence
 documents dumped beforehand and replayed after — lossless. **The lesson is §7:
 a store swap moves every table, so the checklist must cover every table.**
+
+**2026-08-18 — the union, done correctly.** The 08-17 goal finally met by the
+other direction: 2,384 documents that existed only in the merged store replayed
+*into* the live store, touching `:evidence` and nothing else. `FAILED 0`; index
+and store level at 148,522; every other table intact. The false basis appeared
+again mid-operation (a sweep drained at 09:12:59 over a 09:04:08 checkpoint while
+the replayed documents sat behind it) and was cleared by the step-6 reset rather
+than shipped. Procedure: §9c.
 
 **2026-08-18 — the empty facet table.** The restored store had the new sidecar
 schema but no historical attribute rows (`ev_attr` = 40 against 145,770 body
