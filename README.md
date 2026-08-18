@@ -8,6 +8,9 @@ the server carries the live operational surface.
 
 - **Contract**: `API-CONTRACT.md` — the futon1a route-by-route spec the
   server implements (extracted at boundary commit `a71c399`).
+- **Text index**: `CANDIDATE-INDEX-CONTRACT.md` (invariants C1–C6) and
+  `README-fts.md` (how the index behaves, how to check it, and the checklist
+  for store operations — **read before any replay, backfill or store swap**).
 - **Plan**: `futon2/holes/E-futon1b-operational-switchover.md` (phases A–D)
   and `futon2/holes/E-futon1a-to-futon1b-migration-pipeline.md` (data leg,
   findings F1–F11).
