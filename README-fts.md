@@ -302,16 +302,27 @@ What was ruled out, and how:
 
 | hypothesis | test | result |
 |---|---|---|
-| no lower bound → unbounded scan | re-ran with `--boundary 2026-01-01` | **same error** |
-| page size too large | POST uses page 1000; periodic uses **200** | **same error, both** |
+| no lower bound → unbounded scan | re-ran with `--boundary 2026-01-01` | same error |
+| page size too large | POST uses page 1000; periodic uses **200** | same error, both |
 | transient / load-related | four attempts across 12 minutes | identical every time |
+| **one corrupt stored batch** | probe from a *later* boundary | **REFUTED — see below** |
 
-`length=72103` is **constant across every attempt and every page size**, which
-points at one specific stored Arrow batch rather than anything about the query.
-This is consistent with the F4 finding in `README.md` — *Arrow column typing is
-stateful; a doc can ingest fine on a fresh table and fail after other docs shape
-the column's type union, and no shape rule predicts it.* A store shaped by
-months of live writes can hold a batch a full scan cannot consume.
+It is a **scan-volume ceiling, not a bad record.** The first three attempts all
+reported `length=72103` and I read that constant as one specific corrupt Arrow
+batch. That was wrong. Probing from a June boundary gave `length=71826` — the
+number *tracks the scan*, and a fixed bad batch would give a fixed number.
+
+The decisive experiment is the range, not the record:
+
+| scan range | documents | result |
+|---|---|---|
+| 2026-08-10 → now | ~15,000 | **succeeds**, drains, basis earned |
+| 2026-06-01 → now | ~112,000 | fails instantly |
+
+So a scan over a large range dies assembling an oversized Arrow batch, while a
+bounded recent range completes normally. `catch-up!` has **no upper-bound
+parameter** — it always scans `[boundary, now]` — so you cannot simply walk the
+corpus in chunks. That is what makes §9b the practical route.
 
 Note what still works, because it bounds the problem precisely:
 
@@ -329,10 +340,60 @@ history (§4) while free-text search remains complete.**
 > basis — strictly worse than not trying. Record `last-at`/`last-id` before you
 > start; `fts-rebuild.py` prints them under `--- before ---`.
 
-Options not yet attempted: rebuilding facets from a freshly-ingested store
-(yesterday's merged store full-scanned cleanly *because* it was built by replay,
-never having accumulated the stateful column shape); or identifying and
-re-writing the offending batch via the `put-doc-with-rescue!` ladder.
+---
+
+## 9b. Transplanting a sidecar (the way round the ceiling)
+
+Because §9a blocks a full rescan, the practical way to get full facet coverage
+is to **take an already-built sidecar from another store** and repair the
+difference with one bounded catch-up. Done on Zone 2026-08-18; it took minutes
+where a fresh re-ingest would have taken most of a day.
+
+**Why it is sound.** C1: *"The index yields candidate document ids only. It
+over-approximates and never under-approximates: no index state — stale,
+corrupt, or rebuilt mid-flight — can produce a wrong answer, only a slower or
+less complete one."* A donor indexing a **superset** of your evidence is
+therefore safe: its surplus ids become candidates the store-side re-check
+rejects. The direction that is *not* safe is a donor missing ids you have —
+those documents silently become unfindable.
+
+**So measure coverage first, both ways:**
+
+```bash
+scripts/sidecar-coverage.py <live-store-dir> <donor-store-dir>
+```
+
+On Zone this reported 2,385 surplus (harmless) and **547 missing** — all dated
+`2026-08-10` or later, i.e. inside the window §9a proves is scannable. That is
+what made the repair a single bounded catch-up rather than a blocker.
+
+**Procedure** (`scripts/transplant-sidecar.sh`):
+
+1. Copy the donor sidecar in beside the live one — the donor is static, so this
+   costs no outage.
+2. Set the staged copy's checkpoint back to a boundary covering the missing ids,
+   and clear its basis. Edit the **staged** file, which nothing has open.
+3. Swap the files, then run one catch-up. It covers the gap and re-earns the
+   basis by a proven drain.
+
+Result on Zone: `ev_attr` 57 → **148,183**, facet filters working from
+2026-04 onward, `{:indexed 8157}`, basis earned, `recheck-rejections 0`.
+
+### Two hazards this exposed
+
+**`sudo` breaks `systemctl --user`.** Running the script under `sudo` gave
+`Failed to connect to bus: No medium found`, and the stop/start silently did
+not happen while the script reported an outage duration. Run file operations
+with `sudo` if you must, but issue `systemctl --user` **as the owning user**.
+
+**A restart may not be needed — and renaming a live SQLite db is still risky.**
+`next.jdbc` opens the sidecar *by path per operation* rather than holding one
+handle, so the swap took effect without a restart. But `-wal` and `-shm` are
+named after the db file and were **not** renamed with it, so the old WAL briefly
+paired with the new database. SQLite rejected it on salt mismatch and
+`pragma integrity_check` returned `ok` — the safe outcome, but not one to rely
+on. **Rename or remove `-wal`/`-shm` alongside the db**, and integrity-check
+afterwards.
 
 ---
 

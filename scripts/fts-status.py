@@ -39,11 +39,14 @@ print("  store evidence rows : %s" % store_rows)
 print("  index rows          : %s" % index_rows)
 try:
     delta = int(store_rows) - int(index_rows)
+    # A negative delta is NOT a fault: C1 has the index over-approximate and
+    # never under-approximate, so surplus candidates are rejected by the
+    # store-side re-check. Expected after a sidecar transplant (README-fts §9b).
     print("  delta               : %+d %s" % (
         delta,
         "(index behind -- catch-up should close this)" if delta > 0
         else "(level)" if delta == 0
-        else "(index AHEAD of store -- investigate)"))
+        else "(index over-approximates -- fine per C1; re-check rejects surplus)"))
 except ValueError:
     pass
 
