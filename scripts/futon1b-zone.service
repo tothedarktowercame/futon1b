@@ -22,18 +22,26 @@ Environment=FUTON1B_STORE_DIR=migration-store-21
 Environment=FUTON1B_PORT=7073
 Environment=FUTON1B_HEALTH_PORT=7072
 
-# HEAP. deps.edn :server carries -Xmx4g, which is right for a 3.8G box and wrong
-# for this one: the process this unit replaces ran -Xmx64g against a 150k-evidence
-# store. -J flags override the alias (verified 2026-08-19: `-J-Xmx64g -M:server`
-# resolves to 64G, `-M:server` alone to 4G), so the override is stated here rather
-# than assumed.
+# NOT a per-box knob: README.md says this one "matters at *any* size". glibc
+# spawns per-thread malloc arenas and a JVM with many threads can hold gigabytes
+# of untouched arena address space. Omitted from my first version.
+Environment=MALLOC_ARENA_MAX=2
+
+# HEAP: NO -J OVERRIDES. deps.edn :server (4g heap / 3g direct) is correct as
+# shipped and is a deliberate REBUILD CEILING, not a minimum -- README.md
+# "Memory requirements". Day-to-day serving wants ~1536m/768m; Zone was measured
+# 2026-08-17 at 140,296 documents with ~976M LIVE.
+#
+# My first version of this unit passed -J-Xmx64g -J-XX:MaxDirectMemorySize=32g
+# to reproduce the manual process it replaced. That was the wrong instinct: I
+# reproduced what was RUNNING without asking whether what was running was right.
+# 64g is ~65x the measured live set. (claude-11, futon1b owner, 2026-08-19;
+# verified here against README.md:57-76.)
 # SINGLE-PROCESS GUARD. Without this, a start against an already-held store
 # opens it, builds a ~47s memory projection, touches the FTS sidecar, then fails
 # to bind and is restarted -- 38 times on 2026-08-19 before anyone looked.
 ExecStartPre=%h/code/futon1b/scripts/store-guard assert-free
-ExecStart=/usr/local/bin/clojure \
-  -J-Xmx64g -J-XX:MaxDirectMemorySize=32g -J-XX:+ExitOnOutOfMemoryError \
-  -M:server -m futon1b-server \
+ExecStart=/usr/local/bin/clojure -M:server -m futon1b-server \
   --store-dir ${FUTON1B_STORE_DIR} --port ${FUTON1B_PORT} --health-port ${FUTON1B_HEALTH_PORT}
 
 Restart=on-failure
