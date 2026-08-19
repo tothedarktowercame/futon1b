@@ -93,7 +93,19 @@
         (check! "default/full mode retains the existing response shape"
                 (every? #(contains? % :entry) (:results hydrated)))
         (check! "store-side ephemeral re-check is preserved"
-                (not-any? #{"text-0"} projected-ids)))
+                (not-any? #{"text-0"} projected-ids))
+        ;; :ids must be checked against an INDEPENDENT route to the same fact.
+        ;; The original bug shipped because it was compared against
+        ;; (mapv :evidence/id results) -- its own implementation, which agrees
+        ;; with itself in both modes, nils included. hydrated-ids above is
+        ;; derived via [:entry :evidence/id], so it is a genuine second opinion.
+        (check! ":ids is populated under hydration, the mode it exists for"
+                (and (= 6 (count (:ids hydrated)))
+                     (not-any? nil? (:ids hydrated))))
+        (check! ":ids matches the ids reached via [:entry :evidence/id]"
+                (= (vec (:ids hydrated)) hydrated-ids))
+        (check! ":ids agrees across hydrate modes"
+                (= (vec (:ids hydrated)) (vec (:ids projected)))))
       (let [{:keys [df indexed]} (text/document-frequencies ["common" "missing"])]
         (check! "df reports index-only per-term document frequencies"
                 (= {"common" 48 "missing" 0} df))
