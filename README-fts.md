@@ -521,3 +521,41 @@ than shipped. Procedure: §9c.
 schema but no historical attribute rows (`ev_attr` = 40 against 145,770 body
 rows). Free-text search was complete; facet filters were silently near-empty.
 See §4.
+
+---
+
+## 10. Restarting on Zone (added 2026-08-19 after the 38-open incident)
+
+    systemd-run --user --unit=futon1b-restart --collect \
+      /home/joe/code/futon1b/scripts/restart-futon1b-detached.sh
+    cat /tmp/futon1b-restart-receipt.txt
+
+`scripts/futon1b-zone.service` is Zone's unit — **not**
+`scripts/futon1b-server.service`, which still carries lucy's `switchover-store`
+/ `:7074`. Installing that one here starts against a different store on a
+different port, which reads as catastrophic data loss.
+
+**`ExecStartPre=scripts/store-guard assert-free` is load-bearing.** Without it,
+a start against an already-held store opens it, builds a ~47s memory
+projection, touches the sidecar, fails to bind, exits 1, and is restarted 10s
+later — 38 times on 2026-08-19, 5 min CPU, before anyone looked. The store
+survived (WAL 0 bytes, `integrity_check ok`, `ev_fts`/`ev_attr` level, basis and
+checkpoint agreeing to 6 ms) but that is WAL doing its job, not design.
+
+**A health check is not a restart check.** The first version of the restart
+script polled `:7073`, got an answer, and reported `RESULT=ok` — from the OLD
+process, which had never gone down. `STORE UP after 2s` against a measured
+42–61 s, and a before/after census byte-identical five seconds apart on a store
+taking continuous traffic. The script now captures `MainPID` before and after
+and fails `RESULT=failed-not-restarted` if it did not change. Same family as §6's
+other entries: a check reading a population it never addressed.
+
+**Heap.** The unit carries NO `-J` overrides: `deps.edn :server` is the single
+source of truth, per "Memory requirements" above. Measured on Zone 2026-08-19
+with a 64g cap: RSS 13.1 G, VSZ 78 G, box 249 G total / 176 G available — so
+64g was never a capacity problem, it was simply ~65× the ~976 M measured live
+set. `MALLOC_ARENA_MAX=2` is in the unit and matters at any size.
+
+**The gate after any start** is store-rows vs index-rows: everything the sidecar
+can check about itself is the sidecar grading its own homework.
+`scripts/fts-status.py` does it in one line.
