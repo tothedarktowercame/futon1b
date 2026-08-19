@@ -664,7 +664,13 @@
      ;; those over-segments (measured: a limit=10 query yielded 310 ':score '
      ;; boundaries) and the miscount is silent. Consumers that want ids
      ;; should read this, not regex the body.
-     :ids (mapv :evidence/id results)
+     ;; Both shapes: hydrated results nest the id under :entry, bare ones
+     ;; carry it top-level. The first version read only the top level, so it
+     ;; returned a full-length vector of nils in the hydrated mode -- the only
+     ;; mode this field exists for. It was "verified" by comparing it against
+     ;; (mapv :evidence/id results), which is its own implementation and
+     ;; therefore agrees with itself in both modes, nils included.
+     :ids (mapv #(or (:evidence/id %) (get-in % [:entry :evidence/id])) results)
      :count (count results)
      :checked checked
      :index-as-of (meta-get ds "last-at")
