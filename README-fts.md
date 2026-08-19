@@ -138,15 +138,31 @@ disagreeing with the store.
 
 What the fields mean, and what is actually reassuring:
 
-| field | read it as |
-|---|---|
-| store rows vs index rows | the only cross-check that matters; a small positive delta is live-write lag |
-| `tx-lag` | index behind store in transaction terms; should trend to ~0 |
-| `age-ms` | time since the last basis capture — confirms the sweep is running |
-| `errors` | **cumulative since boot**, not current state. A non-zero count with a repaired document is normal |
-| `basis captured-at` | present = a proven drain. **Absent is honest**; a stale one is a lie |
-| `recheck-rejections` | C5 re-check disagreeing with candidates |
-| `periodic?` | the repair path is scheduled |
+| field | window | read it as |
+|---|---|---|
+| store rows vs index rows | now | the only cross-check that matters; a small positive delta is live-write lag |
+| `tx-lag` | now | index behind store in transaction terms; should trend to ~0 |
+| `age-ms` | now | time since the last basis capture — confirms the sweep is running |
+| `indexed` | **last catch-up run only** | overwritten every run; not a lifetime total |
+| `errors` | **cumulative since process start** | never reset. A non-zero count with a repaired document is normal |
+| `ready` | now | **the sidecar is attached. NOT a coverage claim** (`:ready (some? ds)`) |
+| `basis captured-at` | now | present = a proven drain. **Absent is honest**; a stale one is a lie |
+| `recheck-rejections` | cumulative | C5 re-check disagreeing with candidates |
+| `periodic?` | now | the repair path is scheduled |
+
+> **`indexed` and `errors` are not comparable, and `ready` is not coverage.**
+> On 2026-08-19 `{:indexed 29, :errors 121, :ready true}` was read as "the
+> index is dropping 121 of 150 writes". There is no population of 150: 29 is
+> one sweep's total and 121 is 28.5 hours of cumulative append failures. At
+> that moment index and store were level at 150,428, and checking all 125
+> logged failures individually found **every one present in both `ev_fts` and
+> `ev_attr`** — zero writes dropped. An `on-append!` failure never loses a
+> write: the store already has the document, the checkpoint is deliberately
+> not advanced, and the next catch-up re-indexes it (§1).
+>
+> 87 of those 125 errors landed in a single hour — a 2,384-document bulk
+> replay contending with a catch-up scan for sqlite's single writer. Steady
+> state is ~1.7% of live appends, all repaired.
 
 > **`tx-lag 0` means "the index has caught up with everything the store has".
 > It does not mean the store is receiving anything.** A perfectly healthy index

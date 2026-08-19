@@ -51,8 +51,17 @@ except ValueError:
     pass
 
 print("  ---")
+# Windows matter more than the numbers: :indexed is the LAST catch-up run only,
+# :errors is cumulative since process start, and :ready means "sidecar
+# attached", not "covered". Read as a ratio they say nothing (field misreading,
+# 2026-08-19). README-fts.md section 5.
+LABEL = {"indexed": "(last catch-up run only)",
+         "errors": "(cumulative since process start)",
+         "ready": "(sidecar attached -- NOT coverage)"}
 for k in ("indexed", "errors", "ready", "periodic?", "recheck-rejections"):
-    print("  %-19s : %s" % (k, field(k, stats)))
+    print("  %-19s : %-10s %s" % (k, field(k, stats), LABEL.get(k, "")))
+print("  %-19s : %s" % ("process-started-at", field("process-started-at", stats)))
+print("  coverage is the delta above and the basis below, not these counters")
 
 m = re.search(r":staleness \{([^}]*)\}", stats)
 if m:
