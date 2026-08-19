@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Refuse to start a second futon1b against a single-process XTDB store.
+#
+# WHY THIS EXISTS (2026-08-19, and it is not hypothetical).
+# futon1b-zone.service was written without a start guard. The manual process it
+# was meant to replace was still holding :7073, so every start:
+#   1. opened migration-store-21 -- a store XTDB 2 permits ONE process to open,
+#   2. spent ~47s building a memory projection and touched the FTS sidecar,
+#   3. failed to bind :7073, exited 1,
+#   4. was restarted 10s later by Restart=on-failure.
+# It went round 38 times and consumed 5min of CPU before anyone looked. The
+# store survived (index and store level at 150,732, 0 errors) but that was luck,
+# not design. futon3c's unit has had `server-guard assert-zero` as ExecStartPre
+# all along; this is the same idea for this store.
+#
+#   assert-free : exit 0 only if the port is unbound AND no other
+#                 futon1b-server process is alive. Otherwise exit 1 and say why.
+set -uo pipefail
+
+PORT="${FUTON1B_PORT:-7073}"
+MODE="${1:-assert-free}"
+
+case "$MODE" in
+  assert-free)
+    # Match only REAL server processes: a JVM whose argv contains
+    # `-m futon1b-server`. Matching the bare string also matches this guard's
+    # own process tree (its argv carries the pattern), which would make the
+    # unit permanently unstartable -- a refusal is the safe direction, but a
+    # PERMANENT refusal is not.
+    # Require comm=java as well as the argv match. Matching argv alone also
+    # matches this guard's own shell (whose command line carries the pattern),
+    # which would make the unit permanently unstartable -- refusing is the safe
+    # direction, but refusing FOREVER is not. The server is always a JVM.
+    others=$(pgrep -f -- '-m futon1b-server' | while read -r pid; do
+               [ "$(cat /proc/$pid/comm 2>/dev/null)" = "java" ] && echo "$pid"
+             done)
+    if [ -n "$others" ]; then
+      echo "store-guard: REFUSING to start -- futon1b-server already running (pid: $(echo $others | tr '\n' ' '))" >&2
+      echo "store-guard: XTDB 2 stores are single-process; a second open risks the store." >&2
+      exit 1
+    fi
+    if ss -lptn "sport = :$PORT" 2>/dev/null | grep -q LISTEN; then
+      echo "store-guard: REFUSING to start -- something is already listening on :$PORT" >&2
+      ss -lptn "sport = :$PORT" >&2
+      exit 1
+    fi
+    echo "store-guard: :$PORT free and no futon1b-server running -- safe to start"
+    ;;
+  *)
+    echo "store-guard: unknown mode '$MODE' (expected assert-free)" >&2; exit 2 ;;
+esac
