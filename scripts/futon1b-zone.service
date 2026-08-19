@@ -1,0 +1,51 @@
+[Unit]
+Description=futon1b XTDB2 store server (Zone / reliablesite, :7073)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+Slice=futon-services.slice
+WorkingDirectory=%h/code/futon1b
+
+# PER-BOX KNOBS. These are reliablesite's, and they are the ONLY things that
+# legitimately differ per box. They are wrong for lucy (switchover-store, 7074)
+# and wrong for chicago (chicago-store, 7074) -- see scripts/futon1b-server.service,
+# the older template that still carries lucy's values. Installing THAT file here
+# would start a server against a DIFFERENT STORE on a DIFFERENT PORT, which looks
+# exactly like catastrophic data loss. Hence a separate, box-named unit.
+Environment=FUTON1B_STORE_DIR=migration-store-21
+Environment=FUTON1B_PORT=7073
+Environment=FUTON1B_HEALTH_PORT=7072
+
+# HEAP. deps.edn :server carries -Xmx4g, which is right for a 3.8G box and wrong
+# for this one: the process this unit replaces ran -Xmx64g against a 150k-evidence
+# store. -J flags override the alias (verified 2026-08-19: `-J-Xmx64g -M:server`
+# resolves to 64G, `-M:server` alone to 4G), so the override is stated here rather
+# than assumed.
+ExecStart=/usr/local/bin/clojure \
+  -J-Xmx64g -J-XX:MaxDirectMemorySize=32g -J-XX:+ExitOnOutOfMemoryError \
+  -M:server -m futon1b-server \
+  --store-dir ${FUTON1B_STORE_DIR} --port ${FUTON1B_PORT} --health-port ${FUTON1B_HEALTH_PORT}
+
+Restart=on-failure
+RestartSec=10
+SuccessExitStatus=143
+KillMode=control-group
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
+SendSIGKILL=yes
+TimeoutStartSec=300
+TimeoutStopSec=120
+ManagedOOMPreference=avoid
+OOMPolicy=stop
+CPUAccounting=yes
+MemoryAccounting=yes
+IOAccounting=yes
+TasksAccounting=yes
+
+# XTDB 2 stores are SINGLE-PROCESS. Never run two instances on one store-dir.
+# The restart script asserts the old process is gone before starting.
+
+[Install]
+WantedBy=default.target
