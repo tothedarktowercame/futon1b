@@ -2,6 +2,10 @@
 Description=futon1b XTDB2 store server (Zone / reliablesite, :7073)
 Wants=network-online.target
 After=network-online.target
+# A crash loop against a SINGLE-PROCESS store is worse than a stopped service:
+# each restart re-opens the store. 3 failures in 5 minutes and it stays down.
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -23,6 +27,10 @@ Environment=FUTON1B_HEALTH_PORT=7072
 # store. -J flags override the alias (verified 2026-08-19: `-J-Xmx64g -M:server`
 # resolves to 64G, `-M:server` alone to 4G), so the override is stated here rather
 # than assumed.
+# SINGLE-PROCESS GUARD. Without this, a start against an already-held store
+# opens it, builds a ~47s memory projection, touches the FTS sidecar, then fails
+# to bind and is restarted -- 38 times on 2026-08-19 before anyone looked.
+ExecStartPre=%h/code/futon1b/scripts/store-guard assert-free
 ExecStart=/usr/local/bin/clojure \
   -J-Xmx64g -J-XX:MaxDirectMemorySize=32g -J-XX:+ExitOnOutOfMemoryError \
   -M:server -m futon1b-server \

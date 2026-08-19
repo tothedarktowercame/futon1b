@@ -50,8 +50,10 @@ fi
 echo "    $BEFORE" >> "$R"
 
 # ---- RESTART ---------------------------------------------------------------
+OLD_PID=$(pgrep -f -- '-m futon1b-server' | while read -r p; do
+           [ "$(cat /proc/$p/comm 2>/dev/null)" = "java" ] && echo "$p"; done | head -1)
 RESTART_AT=$(date -u +%FT%TZ)
-say "restarting $UNIT (t0=$RESTART_AT)"
+say "restarting $UNIT (t0=$RESTART_AT, old-pid=${OLD_PID:-none})"
 systemctl --user restart "$UNIT"
 RC=$?
 say "  systemctl returned $RC"
@@ -69,6 +71,16 @@ for i in $(seq 1 150); do
   fi
   sleep 2
 done
+NEW_PID=$(systemctl --user show "$UNIT" -p MainPID --value 2>/dev/null)
+if [ -n "$UP" ] && [ -n "$OLD_PID" ] && [ "$NEW_PID" = "$OLD_PID" ]; then
+  say "  *** THE PROCESS DID NOT CHANGE (pid $OLD_PID before and after) ***"
+  say "  The health check answered, but it was answered by the OLD process."
+  say "  Every check after this point would pass against a store that never"
+  say "  restarted -- which is exactly how this script read RESULT=ok on"
+  say "  2026-08-19 while a second JVM crash-looped 38 times beside it."
+  say "RESULT=failed-not-restarted"; exit 1
+fi
+say "  main pid ${OLD_PID:-none} -> ${NEW_PID:-unknown}"
 if [ -z "$UP" ]; then
   say "STORE DID NOT RETURN within 300s"
   say "  journalctl --user -u ${UNIT%.service} -n 40 --no-pager:"
