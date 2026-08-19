@@ -33,6 +33,8 @@
 (def ^:private unqualified {:builder-fn rs/as-unqualified-maps})
 
 (defonce !ds (atom nil))
+(defonce !started-at (str (java.time.Instant/now)))
+
 (defonce !stats (atom {:indexed 0 :errors 0 :last-at nil
                        :recheck-rejections 0}))
 
@@ -650,6 +652,24 @@
     {:tx-lag tx-lag :age-ms age-ms}))
 
 (defn stats
+  "Index health. Read the WINDOW on each counter before comparing any two.
+
+   Three fields were misread together in the field (2026-08-19), so they are
+   labelled inline:
+
+     :indexed  total from the LAST catch-up run only, overwritten each run --
+               not a lifetime figure;
+     :errors   CUMULATIVE on-append! failures since process start, never reset;
+     :ready    the sidecar datasource is attached. NOT a coverage claim.
+
+   :indexed and :errors have different windows and different denominators, so
+   their ratio means nothing. An on-append! failure does not drop a write: the
+   store already holds the document, the checkpoint is deliberately not
+   advanced, and the next catch-up re-indexes it. Measured 2026-08-19 on Zone:
+   all 125 logged failures were present in ev_fts AND ev_attr afterwards, with
+   index and store level at 150,428.
+
+   The coverage claim is :basis (C2/C6) -- present means a scan drained."
   ([] (stats nil))
   ([node]
    (let [ds @!ds
@@ -660,6 +680,13 @@
          basis {:tx (when ds (meta-get ds "basis-tx"))
                 :captured-at captured-at}]
      (assoc @!stats :rows rows :ready (some? ds)
+            ;; Windows, inline: these were read as a ratio in the field
+            ;; and are not comparable. See the docstring.
+            :ready-means :sidecar-attached-not-coverage
+            :indexed-window :last-catch-up-run-only
+            :errors-window :cumulative-since-process-start
+            :process-started-at !started-at
+            :coverage-claim-is :basis
             :basis basis
             :staleness (staleness node ds captured-at)
             :projection projection
