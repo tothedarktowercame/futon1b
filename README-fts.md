@@ -189,6 +189,22 @@ next sweep restored it to both `ev_fts` and `ev_attr`. **Do not treat an
 `errors` count from a replay as data loss** — check the store, then check
 whether the sweep repaired the index.
 
+**A hydrated search response cannot be lexically scraped.** Evidence bodies
+legitimately contain the same tokens the envelope uses, so splitting or
+regexing the payload silently miscounts. Measured 2026-08-19: a `limit=10`
+query with `hydrate=true` produced **310 occurrences of `:score `** — 300 of
+them inside bodies — and 410 documents in the corpus contain the token
+`evidence/id`. Chunk-splitting therefore over-segments while per-chunk id
+extraction under-yields, which presents as *missing data* rather than as a
+parsing error. Two agents lost rounds to this in one day, in opposite
+directions.
+
+Use the top-level **`:ids`** vector, which carries result identities in rank
+order outside the body text, or parse the response as EDN. Do not regex it —
+including for `:ids` itself: a regex for `:ids \[...\]` can match an
+occurrence inside a body and return nothing, which is how this note's own
+verification first failed.
+
 **Evidence writes return `201`, not `200`.** A success check written as
 `status == 200` will report every successful insert as a failure. (Done, and it
 briefly produced 35 phantom failures.)
