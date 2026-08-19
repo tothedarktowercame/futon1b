@@ -658,6 +658,13 @@
                    :evidence/type (:evidence/type doc)})
                 survivors))]
     {:results results
+     ;; Identities in rank order, OUTSIDE the payload text. A hydrated
+     ;; response cannot be lexically scraped: evidence bodies legitimately
+     ;; contain ':score ' and ':evidence/id' themselves, so splitting on
+     ;; those over-segments (measured: a limit=10 query yielded 310 ':score '
+     ;; boundaries) and the miscount is silent. Consumers that want ids
+     ;; should read this, not regex the body.
+     :ids (mapv :evidence/id results)
      :count (count results)
      :checked checked
      :index-as-of (meta-get ds "last-at")
