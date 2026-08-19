@@ -721,12 +721,26 @@
       (let [terms (->> (str/split (p "df") #",")
                        (map str/trim)
                        (remove str/blank?)
-                       vec)]
+                       vec)
+            ;; df now honours the same filters as search. Until 2026-08-19 these
+            ;; were silently DROPPED -- ?df=x&type=:memory returned whole-index
+            ;; numbers with HTTP 200, indistinguishable from a scoped answer.
+            filters (cond-> {}
+                      (p "author") (assoc :author (p "author"))
+                      (p "session-id") (assoc :session-id (p "session-id"))
+                      (p "since") (assoc :since (p "since"))
+                      (p "before") (assoc :before (p "before"))
+                      (p "type") (assoc :type (p "type"))
+                      (p "claim-type") (assoc :claim-type (p "claim-type"))
+                      (seq tags) (assoc :tags tags)
+                      (p "subject-type") (assoc :subject-type (p "subject-type"))
+                      (p "subject-id") (assoc :subject-id (p "subject-id"))
+                      (p "pattern-id") (assoc :pattern-id (p "pattern-id")))]
         (if (> (count terms) text/max-df-terms)
           (respond! ex 400
                     (pr-str {:error "too many df terms"
                              :maximum text/max-df-terms}))
-          (respond! ex 200 (pr-str (text/document-frequencies terms)))))
+          (respond! ex 200 (pr-str (text/document-frequencies terms filters)))))
 
       :else
       (with-expensive-read!

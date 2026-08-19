@@ -391,11 +391,43 @@
     (let [raw (str/replace-first (str v) #"^:" "")]
       [raw (str ":" raw)])))
 
+(defn- attr-clauses
+  "Attribute predicates over the `a` (ev_attr) alias, shared by candidate
+   search and scoped document frequencies so the two cannot drift. Excludes
+   the content MATCH, which each caller supplies itself."
+  [{:keys [author session-id since before type claim-type tags
+           subject-type subject-id pattern-id]}]
+  {:clauses (cond-> []
+              author (conj "a.author = ?")
+              session-id (conj "a.session = ?")
+              since (conj "a.at >= ?")
+              before (conj "a.at < ?")
+              type (conj "a.type IN (?,?)")
+              claim-type (conj "a.claim_type IN (?,?)")
+              subject-type (conj "a.subject_type IN (?,?)")
+              subject-id (conj "a.subject_id = ?")
+              pattern-id (conj "a.pattern_id IN (?,?)")
+              (seq tags)
+              (into (repeat
+                     (count tags)
+                     "EXISTS (SELECT 1 FROM ev_tags t
+                              WHERE t.id = a.id AND t.tag IN (?,?))")))
+   :params (cond-> []
+             author (conj (str author))
+             session-id (conj (str session-id))
+             since (conj (str since))
+             before (conj (str before))
+             type (into (index-enum-values type))
+             claim-type (into (index-enum-values claim-type))
+             subject-type (into (index-enum-values subject-type))
+             subject-id (conj (str subject-id))
+             pattern-id (into (index-enum-values pattern-id))
+             (seq tags) (into (mapcat index-enum-values tags)))})
+
 (defn- candidates
   "Candidate ids from one composable SQL statement. Content queries rank by
    BM25; attribute-only queries use deterministic newest-first ordering."
-  [ds {:keys [q author session-id since before type claim-type tags
-              subject-type subject-id pattern-id limit offset]}]
+  [ds {:keys [q limit offset] :as opts}]
   (let [k (or limit 10)
         offset (or offset 0)
         overfetch (max 50 (* 4 k))
@@ -403,34 +435,13 @@
         from (if content?
                "ev_fts f JOIN ev_attr a USING (id)"
                "ev_attr a")
+        {attr-c :clauses attr-p :params} (attr-clauses opts)
         clauses (cond-> []
                   content? (conj "ev_fts MATCH ?")
-                  author (conj "a.author = ?")
-                  session-id (conj "a.session = ?")
-                  since (conj "a.at >= ?")
-                  before (conj "a.at < ?")
-                  type (conj "a.type IN (?,?)")
-                  claim-type (conj "a.claim_type IN (?,?)")
-                  subject-type (conj "a.subject_type IN (?,?)")
-                  subject-id (conj "a.subject_id = ?")
-                  pattern-id (conj "a.pattern_id IN (?,?)")
-                  (seq tags)
-                  (into (repeat
-                         (count tags)
-                         "EXISTS (SELECT 1 FROM ev_tags t
-                                  WHERE t.id = a.id AND t.tag IN (?,?))")))
+                  :always (into attr-c))
         params (cond-> []
                  content? (conj (match-string q))
-                 author (conj (str author))
-                 session-id (conj (str session-id))
-                 since (conj (str since))
-                 before (conj (str before))
-                 type (into (index-enum-values type))
-                 claim-type (into (index-enum-values claim-type))
-                 subject-type (into (index-enum-values subject-type))
-                 subject-id (conj (str subject-id))
-                 pattern-id (into (index-enum-values pattern-id))
-                 (seq tags) (into (mapcat index-enum-values tags)))
+                 :always (into attr-p))
         sql (str "SELECT a.id, "
                  (if content? "bm25(ev_fts)" "NULL")
                  " AS score FROM " from
@@ -567,27 +578,50 @@
             survivors))))
 
 (defn document-frequencies
-  "Index-only document frequencies for sanitized terms. Never reads XTDB."
-  [terms]
-  (when (> (count terms) max-df-terms)
-    (throw (IllegalArgumentException.
-            (str "at most " max-df-terms " df terms are allowed"))))
-  (let [ds @!ds
-        terms (vec (distinct terms))
-        frequencies
-        (into {}
-              (map (fn [term]
-                     [term
-                      (:n (jdbc/execute-one!
-                           ds
-                           ["SELECT count(*) AS n FROM ev_fts WHERE ev_fts MATCH ?"
-                            (match-string term)]
-                           unqualified))]))
-              terms)
-        indexed (:n (jdbc/execute-one! ds
-                                      ["SELECT count(*) AS n FROM ev_fts"]
-                                      unqualified))]
-    {:df frequencies :indexed indexed}))
+  "Index-only document frequencies for sanitized terms. Never reads XTDB.
+
+   With `filters`, df is computed WITHIN that population and `:indexed` is the
+   size of that same population -- both must move together or the ratio is
+   meaningless. The response states `:population` so a caller can tell a scoped
+   answer from an unscoped one; a df of 15 against 149,766 and a df of 15
+   against 770 are different claims, and until 2026-08-19 the endpoint silently
+   ignored filters and always returned the former.
+
+   Filter keys are the search ones: :author :session-id :since :before :type
+   :claim-type :tags :subject-type :subject-id :pattern-id."
+  ([terms] (document-frequencies terms nil))
+  ([terms filters]
+   (when (> (count terms) max-df-terms)
+     (throw (IllegalArgumentException.
+             (str "at most " max-df-terms " df terms are allowed"))))
+   (let [ds @!ds
+         terms (vec (distinct terms))
+         {:keys [clauses params]} (attr-clauses (or filters {}))
+         scoped? (seq clauses)
+         from (if scoped? "ev_fts f JOIN ev_attr a USING (id)" "ev_fts")
+         where (str/join " AND " (cons "ev_fts MATCH ?" clauses))
+         sql (str "SELECT count(*) AS n FROM " from " WHERE " where)
+         frequencies
+         (into {}
+               (map (fn [term]
+                      [term
+                       (:n (jdbc/execute-one!
+                            ds (into [sql (match-string term)] params)
+                            unqualified))]))
+               terms)
+         ;; the denominator must be the SAME population the numerators were
+         ;; counted over, or a percentile band computed from it is nonsense
+         indexed (:n (jdbc/execute-one!
+                      ds (if scoped?
+                           (into [(str "SELECT count(*) AS n FROM ev_attr a WHERE "
+                                       (str/join " AND " clauses))]
+                                 params)
+                           ["SELECT count(*) AS n FROM ev_fts"])
+                      unqualified))]
+     {:df frequencies
+      :indexed indexed
+      :population (if scoped? :filtered :whole-index-unfiltered)
+      :filters (when scoped? (into {} (remove (comp nil? val) (or filters {}))))})))
 
 (defn search
   "Unified content/attribute candidates + bounded-concurrency XTDB re-check.
