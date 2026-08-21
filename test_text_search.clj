@@ -140,11 +140,14 @@
                 light-ids (mapv :evidence/id (get-in light [:body :results]))
                 df (get-edn (str base "?df=common,missing"))
                 bad-offset (get-edn (str base "?q=" q "&offset=10001"))]
+            (check! "HTTP successful search is explicitly :ok true"
+                    (true? (get-in full [:body :ok])))
             (check! "HTTP hydrate=false preserves ids and order"
                     (= full-ids light-ids))
             (check! "HTTP df mode returns frequencies without q"
-                    (= {"common" 48 "missing" 0}
-                       (get-in df [:body :df])))
+                    (and (true? (get-in df [:body :ok]))
+                         (= {"common" 48 "missing" 0}
+                            (get-in df [:body :df]))))
             (check! "HTTP offset cap is enforced"
                     (= 400 (:status bad-offset))))
           (let [{:keys [exit out err]}

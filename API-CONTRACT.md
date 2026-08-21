@@ -248,6 +248,18 @@ waves of the requested `limit`, with at most four XTDB queries in flight inside
 the process-wide four-query budget. A later wave is read only when the current
 wave does not contain enough surviving documents.
 
+**Callers MUST check the HTTP status and `:ok` before interpreting results.**
+Every successful mode returns HTTP **200** with `:ok true`, including a search
+whose `:results` is genuinely empty. Admission rejection returns HTTP **503**,
+the `Retry-After` header, and
+`{:ok false :error :expensive-read-busy :retry-after-seconds 1}`. It is not an
+empty search result and must be retried with backoff. In particular, piping the
+body through a row counter without first making non-2xx status fatal is not a
+valid client of this endpoint.
+
+The `:ok true` success marker is an additive response-shape change made on
+2026-08-21. Existing result keys and values are unchanged.
+
 - `q` is tokenized and quoted before being passed to FTS5. `AND` and `OR` are
   the only accepted operators.
 - `author`, `session-id`, `since`, `before`, and `include-ephemeral` retain the
@@ -256,7 +268,7 @@ wave does not contain enough surviving documents.
 - `offset` skips that many rows in the ranked FTS5 candidate window. It
   defaults to zero and is capped at **10000**; invalid values return **400**.
 - `hydrate` defaults to `true`, preserving the existing response:
-  `{:results [{:score <bm25> :entry <full evidence doc>} ...] ...}`.
+  `{:ok true :results [{:score <bm25> :entry <full evidence doc>} ...] ...}`.
   `hydrate=false` performs the same candidate selection and XTDB re-check but
   returns only `:score`, `:evidence/id`, `:evidence/at`, `:evidence/author`,
   and `:evidence/type`. For the same request its ids and order are identical to
