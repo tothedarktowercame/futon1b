@@ -715,7 +715,7 @@
       (respond! ex 405 (pr-str {:ok false :error "GET (search) or POST (catch-up)"}))
 
       (= "true" (p "stats"))
-      (respond! ex 200 (pr-str (text/stats @!node)))
+      (respond! ex 200 (pr-str (assoc (text/stats @!node) :ok true)))
 
       (not (str/blank? (str (p "df"))))
       (let [terms (->> (str/split (p "df") #",")
@@ -740,38 +740,36 @@
           (respond! ex 400
                     (pr-str {:error "too many df terms"
                              :maximum text/max-df-terms}))
-          (respond! ex 200 (pr-str (text/document-frequencies terms filters)))))
+          (respond! ex 200
+                    (pr-str (assoc (text/document-frequencies terms filters)
+                                   :ok true)))))
 
       :else
       (with-expensive-read!
         ex
-        #(respond! ex 200
-                   (pr-str (text/search @!node
-                                        (cond-> {:limit (parse-limit p)
-                                                 :offset (parse-text-offset p)
-                                                 :hydrate (not= "false"
-                                                                 (str/lower-case
-                                                                  (str (p "hydrate"))))}
-                                          (not (str/blank? (str (p "q"))))
-                                          (assoc :q (p "q"))
-                                          (p "author") (assoc :author (p "author"))
-                                          (p "session-id") (assoc :session-id (p "session-id"))
-                                          (p "since") (assoc :since (p "since"))
-                                          (p "before") (assoc :before (p "before"))
-                                          (p "type") (assoc :type (p "type"))
-                                          (p "claim-type")
-                                          (assoc :claim-type (p "claim-type"))
-                                          (seq tags) (assoc :tags tags)
-                                          (p "subject-type")
-                                          (assoc :subject-type (p "subject-type"))
-                                          (p "subject-id")
-                                          (assoc :subject-id (p "subject-id"))
-                                          (p "pattern-id")
-                                          (assoc :pattern-id (p "pattern-id"))
-                                          (p "include-ephemeral")
-                                          (assoc :include-ephemeral
-                                                 (= "true" (str/lower-case
-                                                            (p "include-ephemeral"))))))))))))
+        #(let [params (cond-> {:limit (parse-limit p)
+                               :offset (parse-text-offset p)
+                               :hydrate (not= "false"
+                                              (str/lower-case
+                                               (str (p "hydrate"))))}
+                        (not (str/blank? (str (p "q"))))
+                        (assoc :q (p "q"))
+                        (p "author") (assoc :author (p "author"))
+                        (p "session-id") (assoc :session-id (p "session-id"))
+                        (p "since") (assoc :since (p "since"))
+                        (p "before") (assoc :before (p "before"))
+                        (p "type") (assoc :type (p "type"))
+                        (p "claim-type") (assoc :claim-type (p "claim-type"))
+                        (seq tags) (assoc :tags tags)
+                        (p "subject-type") (assoc :subject-type (p "subject-type"))
+                        (p "subject-id") (assoc :subject-id (p "subject-id"))
+                        (p "pattern-id") (assoc :pattern-id (p "pattern-id"))
+                        (p "include-ephemeral")
+                        (assoc :include-ephemeral
+                               (= "true" (str/lower-case
+                                          (p "include-ephemeral")))))]
+           (respond! ex 200 (pr-str (assoc (text/search @!node params)
+                                           :ok true))))))))
 
 (defonce ^:private !server-executors (atom {}))
 
