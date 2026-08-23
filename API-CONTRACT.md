@@ -505,8 +505,9 @@ params required (else L4 400). **200** `{:entity <raw-doc>}`; **404** layered
 
 ### POST /api/alpha/documents/retract
 Gated batch retraction for substrate-maintenance clients. Body requires
-`:documents`, a non-empty sequence of `{:table :entities|:hyperedges :id
-<non-blank-string>}` maps, plus the normal penholder. The entire request is
+`:documents`, a non-empty sequence of `{:table :entities|:hyperedges|:relations
+:id <non-blank-string>}` maps (`:relations` since 2026-08-13 —
+`futon1b_graph.clj` `retractable-tables`), plus the normal penholder. The entire request is
 validated before the first write, duplicate table/id pairs are coalesced, and
 the batch is committed in one XTDB transaction. Every requested document is
 then read back as absent; a surviving document fails at L0 with **503**
