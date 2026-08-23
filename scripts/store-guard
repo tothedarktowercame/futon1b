@@ -31,11 +31,25 @@ case "$MODE" in
     # matches this guard's own shell (whose command line carries the pattern),
     # which would make the unit permanently unstartable -- refusing is the safe
     # direction, but refusing FOREVER is not. The server is always a JVM.
+    # Refuse only for a server on the SAME store (or port). Other stores are
+    # legitimate neighbours: on 2026-08-23 the staging-store instance
+    # (--store-dir staging-store, :7273) made this guard refuse a routine
+    # restart of :7073 and production stayed down.
+    store=$(cd "$(dirname "${FUTON1B_STORE_DIR:-migration-store}")" 2>/dev/null && pwd -P)/$(basename "${FUTON1B_STORE_DIR:-migration-store}")
     others=$(pgrep -f -- '-m futon1b-server' | while read -r pid; do
-               [ "$(cat /proc/$pid/comm 2>/dev/null)" = "java" ] && echo "$pid"
+               [ "$(cat /proc/$pid/comm 2>/dev/null)" = "java" ] || continue
+               argv=$(tr '\0' '\n' < /proc/$pid/cmdline 2>/dev/null)
+               dir=$(printf '%s\n' "$argv" | grep -A1 -x -- '--store-dir' | tail -1)
+               port=$(printf '%s\n' "$argv" | grep -A1 -x -- '--port' | tail -1)
+               # cwd is unreadable for a process we do not own (staging ran
+               # as another user on 2026-08-23); assume this checkout then.
+               cwd=$(readlink /proc/$pid/cwd 2>/dev/null || true)
+               [ -n "$cwd" ] || cwd="$(cd "$(dirname "$0")/.." && pwd -P)"
+               case "$dir" in /*) abs="$dir" ;; *) abs="$cwd/$dir" ;; esac
+               if [ "$abs" = "$store" ] || [ "$port" = "$PORT" ]; then echo "$pid"; fi
              done)
     if [ -n "$others" ]; then
-      echo "store-guard: REFUSING to start -- futon1b-server already running (pid: $(echo $others | tr '\n' ' '))" >&2
+      echo "store-guard: REFUSING to start -- futon1b-server already running on store $store or :$PORT (pid: $(echo $others | tr '\n' ' '))" >&2
       echo "store-guard: XTDB 2 stores are single-process; a second open risks the store." >&2
       exit 1
     fi
@@ -44,7 +58,7 @@ case "$MODE" in
       ss -lptn "sport = :$PORT" >&2
       exit 1
     fi
-    echo "store-guard: :$PORT free and no futon1b-server running -- safe to start"
+    echo "store-guard: :$PORT free and no futon1b-server on $store -- safe to start"
     ;;
   *)
     echo "store-guard: unknown mode '$MODE' (expected assert-free)" >&2; exit 2 ;;
