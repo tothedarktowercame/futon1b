@@ -95,8 +95,10 @@
       (:props payload) (assoc :hx/props (:props payload)))))
 
 (defn fetch-current [node id]
-  (fxt/q1 node (list '-> '(from :hyperedges [*])
-                     (list 'where (list '= 'xt/id id)))))
+  (fxt/q1 node (fxt/pq '[p-id]
+                       '(-> (from :hyperedges [*])
+                            (where (= xt/id p-id)))
+                       id)))
 
 (defn- present? [node id]
   (fxt/present? node :hyperedges id))
@@ -127,15 +129,18 @@
                       (first
                        (fxt/safe-q
                         node
-                        (list '->
-                              (list 'from :hyperedges
-                                    (into ['xt/id]
-                                          (comp
-                                           (remove #{:xt/id})
-                                           (map #(symbol (namespace %)
-                                                         (name %))))
-                                          (keys doc)))
-                              (list 'where (list '= 'xt/id id)))))
+                        (fxt/pq
+                         '[p-id]
+                         (list '->
+                               (list 'from :hyperedges
+                                     (into ['xt/id]
+                                           (comp
+                                            (remove #{:xt/id})
+                                            (map #(symbol (namespace %)
+                                                          (name %))))
+                                           (keys doc)))
+                               '(where (= xt/id p-id)))
+                         id)))
                       ;; nil-valued keys are stored as absent (XTDB 2 semantics)
                       doc-cmp (into {} (filter (comp some? val)) doc)
                       stored-cmp

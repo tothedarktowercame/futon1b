@@ -166,6 +166,22 @@
 (defn q1 [node form]
   (first (safe-q node form)))
 
+(defn pq
+  "Parameterised XTQL: `(pq '[p-id] body id)` → `[(fn [p-id] body) id]`, the
+  vector form `xt/q`/`safe-q`/`timed-q` all accept.
+
+  USE THIS instead of splicing values into the form. XTDB 2.1.0 compiles each
+  distinct query expression — literals included — to JVM classes via `eval`
+  under a fresh DynamicClassLoader (xtdb.expression/emit-projection and
+  friends, LRU-memoised on the expression). Inlined ids/limits therefore make
+  every request a cache miss; on 2026-08-23 the :7073 JVM reached 160k live
+  classloaders / 1.9 GB metaspace that way. With parameters the compiled plan
+  is keyed on query SHAPE and the class count stays bounded."
+  [params body & args]
+  (into [(list 'fn params body)] args))
+
 (defn present? [node table id]
-  (seq (safe-q node (list '-> (list 'from table '[xt/id])
-                          (list 'where (list '= 'xt/id id))))))
+  (seq (safe-q node (pq '[p-id]
+                        (list '-> (list 'from table '[xt/id])
+                              '(where (= xt/id p-id)))
+                        id))))

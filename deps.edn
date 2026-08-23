@@ -44,4 +44,16 @@
                       "-Djava.net.preferIPv4Stack=true"
                       "-Xmx4g" "-XX:MaxDirectMemorySize=3g"
                       "-XX:+ExitOnOutOfMemoryError"
-                      "-XX:NativeMemoryTracking=summary"]}}}
+                      "-XX:NativeMemoryTracking=summary"
+                      ;; Metaspace backstop (2026-08-23 incident): XTDB 2.1.0
+                      ;; `eval`s a fresh DynamicClassLoader per distinct query
+                      ;; expression (literals included); Clojure keeps those
+                      ;; classes in a static SoftReference cache, and G1 only
+                      ;; clears soft refs after ~SoftRefLRUPolicyMSPerMB × free-MB
+                      ;; (default 1000 → ~35 min with 2 GB free), so metaspace
+                      ;; grew monotonically to 1.9 GB / 160k loaders. 10 ms/MB
+                      ;; lets evicted compiled queries unload within seconds;
+                      ;; MaxMetaspaceSize is a tripwire — hitting it forces a
+                      ;; full GC (which unloads) before it can OOM.
+                      "-XX:SoftRefLRUPolicyMSPerMB=10"
+                      "-XX:MaxMetaspaceSize=2g"]}}}

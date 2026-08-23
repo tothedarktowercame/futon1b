@@ -100,9 +100,10 @@
     (when (and (= op :merge) (not (sequential? (:type/aliases payload))))
       (throw (gates/layered-error 4 :invalid-type-aliases
                                   {:got (:type/aliases payload)})))
-    (let [existing (fxt/q1 node (list '-> '(from :type-catalog [*])
-                                  (list 'where (list '= 'xt/id
-                                                     (type-id->xt-id kind type-id)))))
+    (let [existing (fxt/q1 node (fxt/pq '[p-id]
+                                        '(-> (from :type-catalog [*])
+                                             (where (= xt/id p-id)))
+                                        (type-id->xt-id kind type-id)))
           base (or existing (type-doc {:type-id type-id :kind kind}))
           doc (case op
                 :parent (assoc base :type/parent (normalize-type (:type/parent payload)))
@@ -115,20 +116,26 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- entities-by-name [node name']
-  (fxt/safe-q node (list '-> '(from :entities [*])
-                   (list 'where (list '= 'entity/name name')))))
+  (fxt/safe-q node (fxt/pq '[p-name]
+                           '(-> (from :entities [*])
+                                (where (= entity/name p-name)))
+                           name')))
 
 (defn fetch-entity
   "futon1a f1g/fetch-entity: :xt/id → :entity/name → :entity/external-id,
   deterministic smallest-id pick on duplicates."
   [node id]
-  (or (fxt/q1 node (list '-> '(from :entities [*])
-                     (list 'where (list '= 'xt/id id))))
+  (or (fxt/q1 node (fxt/pq '[p-id]
+                           '(-> (from :entities [*])
+                                (where (= xt/id p-id)))
+                           id))
       (->> (entities-by-name node id)
            (sort-by #(str (:entity/id %)))
            first)
-      (->> (fxt/safe-q node (list '-> '(from :entities [*])
-                            (list 'where (list '= 'entity/external-id id))))
+      (->> (fxt/safe-q node (fxt/pq '[p-id]
+                                    '(-> (from :entities [*])
+                                         (where (= entity/external-id p-id)))
+                                    id))
            (sort-by #(str (:entity/id %)))
            first)))
 
@@ -225,10 +232,11 @@
   (when (or (str/blank? (str source)) (str/blank? (str external-id)))
     (throw (gates/layered-error 4 :missing-required
                                 {:required [:source :external-id]})))
-  (let [matches (fxt/safe-q node (list '-> '(from :entities [*])
-                                 (list 'where
-                                       (list '= 'entity/source source)
-                                       (list '= 'entity/external-id external-id))))]
+  (let [matches (fxt/safe-q node (fxt/pq '[p-source p-external-id]
+                                         '(-> (from :entities [*])
+                                              (where (= entity/source p-source)
+                                                     (= entity/external-id p-external-id)))
+                                         source external-id))]
     (cond
       (empty? matches)
       [404 {:error {:reason :not-found
@@ -347,8 +355,10 @@
   ([node {:keys [type limit]} query-fn]
    (let [t (normalize-type type)
          n (long (max 1 (or limit 1)))
-         all (query-fn node (list '-> '(from :entities [*])
-                                  (list 'where (list '= 'entity/type t))))
+         all (query-fn node (fxt/pq '[p-type]
+                                    '(-> (from :entities [*])
+                                         (where (= entity/type p-type)))
+                                    t))
          library? (= t :pattern/library)
          sigil-src-ids (when library?
                          (->> (query-fn node '(-> (from :relations [relation/type relation/src])
@@ -382,17 +392,29 @@
    (entities-query node opts fxt/safe-q))
   ([node {:keys [type limit after]} query-fn]
    (let [t (normalize-type type)
-         clauses (cond-> [(list '= 'entity/type t)]
-                   after (conj (list '> 'xt/id after)))
+         limited? (and (int? limit) (pos? limit))
+         ;; Values ride as parameters (see fxt/pq); the form varies only by
+         ;; which clauses are present, so the compiled plan is reused.
+         params (cond-> '[p-type]
+                  after (conj 'p-after)
+                  limited? (conj 'p-limit))
+         args (cond-> [t]
+                after (conj after)
+                limited? (conj limit))
+         clauses (cond-> ['(= entity/type p-type)]
+                   after (conj '(> xt/id p-after)))
          query-tail (cond-> [(cons 'where clauses)
-                             (list 'order-by {:val 'xt/id :dir :asc})]
-                      (and (int? limit) (pos? limit))
-                      (conj (list 'limit limit)))
+                             '(order-by {:val xt/id :dir :asc})]
+                      limited? (conj '(limit p-limit)))
          docs (query-fn node
-                        (cons '-> (cons '(from :entities [*]) query-tail)))
+                        (apply fxt/pq params
+                               (cons '-> (cons '(from :entities [*]) query-tail))
+                               args))
          total (count (query-fn node
-                                (list '-> '(from :entities [xt/id entity/type])
-                                      (list 'where (list '= 'entity/type t)))))
+                                (fxt/pq '[p-type]
+                                        '(-> (from :entities [xt/id entity/type])
+                                             (where (= entity/type p-type)))
+                                        t)))
          window (vec docs)
          next-cursor (when (and (int? limit) (pos? limit)
                                 (= limit (count window)))
@@ -533,17 +555,19 @@
   [node {:keys [type types from to limit hydrate?]}]
   (let [types (or (seq types) (when type [type]))
         query-for (fn [relation-type]
-                    (let [clauses (cond-> []
-                                    relation-type
-                                    (conj (list '= 'relation/type
-                                                (normalize-type relation-type)))
-                                    from (conj (list '= 'relation/from from))
-                                    to (conj (list '= 'relation/to to)))]
-                      (cond-> (list '-> '(from :relations [xt/id relation/id relation/type
-                                                           relation/from relation/to
-                                                           relation/src relation/dst
-                                                           relation/provenance]))
-                        (seq clauses) (concat [(cons 'where clauses)]))))
+                    (let [specs (cond-> []
+                                  relation-type
+                                  (conj ['p-type '(= relation/type p-type)
+                                         (normalize-type relation-type)])
+                                  from (conj ['p-from '(= relation/from p-from) from])
+                                  to (conj ['p-to '(= relation/to p-to) to]))
+                          clauses (mapv second specs)
+                          form (cond-> (list '-> '(from :relations [xt/id relation/id relation/type
+                                                                  relation/from relation/to
+                                                                  relation/src relation/dst
+                                                                  relation/provenance]))
+                                 (seq clauses) (concat [(cons 'where clauses)]))]
+                      (apply fxt/pq (mapv first specs) form (mapv #(nth % 2) specs))))
         docs (if (seq types)
                (mapcat #(fxt/safe-q node (query-for %)) types)
                (fxt/safe-q node (query-for nil)))
@@ -563,25 +587,28 @@
   [node type]
   (into #{} (map :xt/id)
         (fxt/safe-q node
-                    (list '-> '(from :entities [xt/id entity/type])
-                          (list 'where (list '= 'entity/type
-                                            (normalize-type type)))))))
+                    (fxt/pq '[p-type]
+                            '(-> (from :entities [xt/id entity/type])
+                                 (where (= entity/type p-type)))
+                            (normalize-type type)))))
 
 (defn- entity-type-inhabited?
   [node type]
   (boolean
    (seq (fxt/safe-q node
-                    (list '-> '(from :entities [xt/id entity/type])
-                          (list 'where (list '= 'entity/type
-                                            (normalize-type type)))
-                          '(limit 1))))))
+                    (fxt/pq '[p-type]
+                            '(-> (from :entities [xt/id entity/type])
+                                 (where (= entity/type p-type))
+                                 (limit 1))
+                            (normalize-type type))))))
 
 (defn- hyperedge-type-inhabited?
   [node type endpoint-types]
   (let [docs (fxt/safe-q node
-                         (list '-> '(from :hyperedges [xt/id hx/type hx/endpoints])
-                               (list 'where (list '= 'hx/type
-                                                 (normalize-type type)))))
+                         (fxt/pq '[p-type]
+                                 '(-> (from :hyperedges [xt/id hx/type hx/endpoints])
+                                      (where (= hx/type p-type)))
+                                 (normalize-type type)))
         required (mapv #(entity-ids-of-type node %) endpoint-types)]
     (boolean
      (some (fn [doc]
@@ -611,9 +638,11 @@
   "GET /api/alpha/hyperedge/{id} (id = URL-decoded URI tail)."
   ([node id] (hyperedge-by-id node id {}))
   ([node id temporal]
-   (when-let [doc (fxt/q1 node (list '->
-                                     (hyperedge-from '[*] temporal)
-                                     (list 'where (list '= 'xt/id id))))]
+   (when-let [doc (fxt/q1 node (fxt/pq '[p-id]
+                                       (list '->
+                                             (hyperedge-from '[*] temporal)
+                                             '(where (= xt/id p-id)))
+                                       id))]
      (when (:hx/id doc) (dissoc doc :xt/id)))))
 
 (def ^:private hyperedge-window-cols
@@ -636,8 +665,10 @@
   ([node id temporal]
    (fetch-hyperedge-doc node id temporal fxt/safe-q))
   ([node id temporal query-fn]
-   (first (query-fn node (list '-> (hyperedge-from '[*] temporal)
-                               (list 'where (list '= 'xt/id id)))))))
+   (first (query-fn node (fxt/pq '[p-id]
+                                 (list '-> (hyperedge-from '[*] temporal)
+                                       '(where (= xt/id p-id)))
+                                 id)))))
 
 ;; PER-DOC HYDRATION, deliberately. Restored 2026-08-02 after the batched form
 ;; measured as a large regression on the live store.
@@ -705,18 +736,22 @@
           projected (->> targets
                          (mapcat
                           (fn [target]
-                            (let [clauses (cond-> [(list '= 'ep target)]
-                                            t (conj (list '= 'hx/type t)))]
+                            (let [clauses (cond-> ['(= ep p-target)]
+                                            t (conj '(= hx/type p-type)))
+                                  params (cond-> '[p-target p-limit] t (conj 'p-type))
+                                  args (cond-> [target n] t (conj t))]
                               (query-fn
                                node
-                               (list '->
-                                     (hyperedge-from
-                                      '[xt/id hx/type hx/endpoints] temporal)
-                                     (list 'unnest '{:ep hx/endpoints})
-                                     (cons 'where clauses)
-                                     (list 'return 'xt/id)
-                                     (list 'order-by {:val 'xt/id :dir :asc})
-                                     (list 'limit n))))))
+                               (apply fxt/pq params
+                                      (list '->
+                                            (hyperedge-from
+                                             '[xt/id hx/type hx/endpoints] temporal)
+                                            '(unnest {:ep hx/endpoints})
+                                            (cons 'where clauses)
+                                            '(return xt/id)
+                                            '(order-by {:val xt/id :dir :asc})
+                                            '(limit p-limit))
+                                      args)))))
                          (reduce (fn [by-id row]
                                    (assoc by-id (:xt/id row) row)) {})
                          vals
@@ -728,40 +763,50 @@
 
     type
     (let [t (normalize-type type)
-          clauses (cond-> [(list '= 'hx/type t)]
-                    ;; denormalized :prop/* columns (H4) let repo/source-file
-                    ;; push down — the [*] whole-type pull timed out live on
-                    ;; the 259k-doc edits type (2026-07-11)
-                    repo (conj (list '= 'prop/repo repo))
-                    source-file (conj (list '= 'prop/source-file source-file))
-                    after (conj (list '> 'xt/id after)))
+          limited? (and (not latest?) (int? limit) (pos? limit))
+          ;; Values ride as parameters (fxt/pq) so the compiled plan is keyed
+          ;; on which filters are present, not on their values.
+          specs (cond-> [['p-type '(= hx/type p-type) t]]
+                  ;; denormalized :prop/* columns (H4) let repo/source-file
+                  ;; push down — the [*] whole-type pull timed out live on
+                  ;; the 259k-doc edits type (2026-07-11)
+                  repo (conj ['p-repo '(= prop/repo p-repo) repo])
+                  source-file (conj ['p-source-file '(= prop/source-file p-source-file)
+                                     source-file])
+                  after (conj ['p-after '(> xt/id p-after) after])
+                  limited? (conj ['p-limit nil limit]))
+          params (mapv first specs)
+          args (mapv #(nth % 2) specs)
+          clauses (keep second specs)
           query-tail (cond-> [(cons 'where clauses)]
-                       latest? (conj (list 'order-by
-                                           {:val 'prop/timestamp :dir :desc})
+                       latest? (conj '(order-by {:val prop/timestamp :dir :desc})
                                      '(limit 1))
-                       (and (not latest?) (int? limit) (pos? limit))
-                       (conj (list 'order-by {:val 'xt/id :dir :asc})
-                             (list 'limit limit)))
+                       limited? (conj '(order-by {:val xt/id :dir :asc})
+                                      '(limit p-limit)))
           bounded? (or latest? (and (int? limit) (pos? limit)))
           selected (query-fn
                     node
-                    (cons '->
-                          (cons (hyperedge-from
-                                 (if bounded?
-                                   hyperedge-window-cols
-                                   '[*])
-                                 temporal)
-                                query-tail)))
+                    (apply fxt/pq params
+                           (cons '->
+                                 (cons (hyperedge-from
+                                        (if bounded?
+                                          hyperedge-window-cols
+                                          '[*])
+                                        temporal)
+                                       query-tail))
+                           args))
           docs (if bounded?
                  (hydrate-hyperedge-window node selected temporal query-fn)
                  selected)
           total (when include-total?
                   (if (or latest? repo source-file)
                     (count docs)
-                    (count (query-fn node (list '->
-                                                (hyperedge-from
-                                                 '[xt/id hx/type] temporal)
-                                                (list 'where (list '= 'hx/type t)))))))
+                    (count (query-fn node (fxt/pq '[p-type]
+                                                  (list '->
+                                                        (hyperedge-from
+                                                         '[xt/id hx/type] temporal)
+                                                        '(where (= hx/type p-type)))
+                                                  t)))))
           prop-get (fn [d k kw-col]
                      (or (get d kw-col)
                          (get-in d [:hx/props (keyword k)])
@@ -928,10 +973,12 @@
                (recur))))))))
 
 (defn- any-equals
-  [binding values]
-  (if (= 1 (count values))
-    (list '= binding (first values))
-    (cons 'or (map #(list '= binding %) values))))
+  "Disjunction of equalities against PARAM-SYMS (one per value; the values
+  ride as query parameters — see fxt/pq)."
+  [binding param-syms]
+  (if (= 1 (count param-syms))
+    (list '= binding (first param-syms))
+    (cons 'or (map #(list '= binding %) param-syms))))
 
 (defn- hydrate-memory-components
   "Hydrate selected ids through bounded indexed point reads.
@@ -956,10 +1003,10 @@
                               (when (string? memory-id)
                                 (fxt/q1
                                  node
-                                 (list '->
-                                       '(from :evidence [*])
-                                       (list 'where
-                                             (list '= 'xt/id memory-id)))))]
+                                 (fxt/pq '[p-id]
+                                         '(-> (from :evidence [*])
+                                              (where (= xt/id p-id)))
+                                         memory-id)))]
                           (when entry
                             {:hyperedge-id edge-id
                              :hx/type (:hx/type edge)
@@ -1165,15 +1212,17 @@
         temporal {:valid-as-of valid-as-of :system-as-of system-as-of}
         raw-limit (* endpoint-count limit)
         selection-start (System/nanoTime)
+        endpoint-params (mapv #(symbol (str "p-ep" %)) (range endpoint-count))
         selected-rows+
         (fxt/safe-q
          node
+         (apply fxt/pq endpoint-params
          (list '->
                (hyperedge-from '[xt/id hx/type hx/endpoints] temporal)
                (list 'unnest '{:matched-endpoint hx/endpoints})
                (list 'where
                      (list '= 'hx/type :memory/assert)
-                     (any-equals 'matched-endpoint endpoints))
+                     (any-equals 'matched-endpoint endpoint-params))
                (list 'return 'xt/id 'matched-endpoint)
                ;; A temporal scan can expose several system-time versions of
                ;; one edge. Collapse those versions before applying the
@@ -1183,7 +1232,8 @@
                (list 'order-by
                      {:val 'matched-endpoint :dir :asc}
                      {:val 'xt/id :dir :asc})
-               (list 'limit (inc raw-limit))))
+               (list 'limit (inc raw-limit)))
+         endpoints))
         ;; Keep the invariant explicit at the application boundary as well:
         ;; XTDB should already have grouped these rows, but repeated identical
         ;; projections must never consume the distinct-result budget.
@@ -1289,10 +1339,13 @@
   (cond
     type
     {:type type :kind :hyperedge
-     :count (count (fxt/safe-q node (list '-> '(from :hyperedges [xt/id hx/type])
-                                    (list 'where (list '= 'hx/type (normalize-type type))))))}
+     :count (count (fxt/safe-q node (fxt/pq '[p-type]
+                                            '(-> (from :hyperedges [xt/id hx/type])
+                                                 (where (= hx/type p-type)))
+                                            (normalize-type type))))}
     entity-type
     {:type entity-type :kind :entity
-     :count (count (fxt/safe-q node (list '-> '(from :entities [xt/id entity/type])
-                                    (list 'where (list '= 'entity/type
-                                                       (normalize-type entity-type))))))}))
+     :count (count (fxt/safe-q node (fxt/pq '[p-type]
+                                            '(-> (from :entities [xt/id entity/type])
+                                                 (where (= entity/type p-type)))
+                                            (normalize-type entity-type))))}))
