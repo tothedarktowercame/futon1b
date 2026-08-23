@@ -7,8 +7,12 @@
 ;; hyperedge no-op guard's read-before-first-ever-write and /health. Treat
 ;; exactly that error as an empty result; everything else propagates.
 (ns futon1b-xt
-  (:require [xtdb.api :as xt])
-  (:import [java.util.concurrent Semaphore]))
+  (:require [xtdb.api :as xt]
+            [next.jdbc :as jdbc]
+            [xtdb.next.jdbc :as xt-jdbc])
+  (:import [java.sql Connection]
+           [java.util.concurrent Executors Semaphore ThreadFactory]
+           [xtdb.api DataSource]))
 
 (def ^:private query-width 4)
 
@@ -29,13 +33,15 @@
   every boot after ~9.5k new pattern/clause records were written."
   5)
 
-(defn safe-q
-  [node form]
+(defn- run-guarded
+  "Run THUNK under the process-wide query budget with the two known-benign
+  failure mappings (unbound-column → [], invalidated cached plan → retry)."
+  [thunk]
   (.acquire query-permits)
   (try
     (loop [attempt 1]
       (let [r (try
-                (xt/q node form)
+                (thunk)
                 (catch Exception e
                   (let [msg (str (.getMessage e))]
                     (cond
@@ -54,6 +60,108 @@
           r)))
     (finally
       (.release query-permits))))
+
+(defn safe-q
+  [node form]
+  (run-guarded #(xt/q node form)))
+
+;; ---------------------------------------------------------------------------
+;; Deadlined reads (E-futon1b-gc-wedge, 2026-08-23).
+;;
+;; `xt/q` hands next.jdbc a fixed option map with no :timeout, and the pgwire
+;; socket read it blocks in does not honour thread interruption — two evidence
+;; page reads sat in `Net.poll` for four days holding both expensive-read
+;; permits. A Clojure future around `xt/q` cannot fix that. `timed-q` opens
+;; the node's own JDBC connection and sets two deadlines on it:
+;;   - `setNetworkTimeout`: the socket itself gives up (the real guarantee —
+;;     the blocked read throws, `finally` blocks run, permits return);
+;;   - `setQueryTimeout`: pgjdbc's best-effort cancel. Measured 2026-08-23: XTDB
+;;     2.1.0 pgwire does NOT act on it, so the effective deadline is
+;;     timeout + 5s (the network margin). Once the client socket drops, the
+;;     server-side scan stops within ~3s (probed: CPU → 0, no operator threads).
+;; Everything else mirrors xtdb.api/plan-q (BEGIN READ ONLY with the node's
+;; await-token, ROLLBACK, the same row builder and key-fn).
+;; ---------------------------------------------------------------------------
+
+(def default-query-timeout-s
+  "Server-side deadline for one expensive read. 60s initially (see the
+  excursion); the network timeout sits 5s above it so the cancel gets a chance
+  to land before the socket is abandoned."
+  60)
+
+(defonce ^:private network-timeout-executor
+  (Executors/newSingleThreadExecutor
+   (reify ThreadFactory
+     (newThread [_ r]
+       (doto (Thread. r "futon1b-jdbc-network-timeout")
+         (.setDaemon true))))))
+
+(defn- xtql->sql
+  "Same envelope xtdb.api uses (private there): one `?` per `fn` parameter."
+  [xtql]
+  (let [n-params (or (when (seq? xtql)
+                       (let [[op params] xtql]
+                         (when (and (or (= 'fn op) (= 'fn* op)) (vector? params))
+                           (count params))))
+                     0)]
+    (format "XTQL ($$ %s $$ %s)" (pr-str xtql)
+            (apply str (repeat n-params ", ?")))))
+
+(defn timeout-error?
+  "True when E is (or wraps) a JDBC deadline expiry from `timed-q`."
+  [^Throwable e]
+  (loop [e e]
+    (cond
+      (nil? e) false
+      (= ::timeout (:futon1b/error (ex-data e))) true
+      (instance? java.net.SocketTimeoutException e) true
+      (re-find #"(?i)canceling statement due to user request|query timeout|socket.?timeout|read timed out"
+               (str (.getMessage e)))
+      true
+      :else (recur (.getCause e)))))
+
+(defn timed-q
+  "Run QUERY+ARGS (an XTQL form, a `[(fn [..] ..) args*]` vector, or
+  `[sql args*]`) against NODE with a hard deadline of TIMEOUT-S seconds.
+  Returns a vector of maps like `xt/q`. On expiry the connection is torn down
+  and an ex-info with `{:futon1b/error ::timeout}` is thrown."
+  ([node query+args] (timed-q node query+args default-query-timeout-s))
+  ([^DataSource node query+args timeout-s]
+   (let [[query args] (if (vector? query+args)
+                        [(first query+args) (vec (rest query+args))]
+                        [query+args []])
+         sql (cond (string? query) query
+                   (seq? query) (xtql->sql query)
+                   :else (throw (ex-info "Unknown query type" {:query query})))
+         run (fn []
+               (let [^Connection conn (.build (.createConnectionBuilder node))]
+                 (try
+                   (.setNetworkTimeout conn network-timeout-executor
+                                       (int (* 1000 (+ timeout-s 5))))
+                   (if-let [token (.getAwaitToken node)]
+                     (jdbc/execute! conn ["BEGIN READ ONLY WITH (AWAIT_TOKEN = ?)" token])
+                     (jdbc/execute! conn ["BEGIN READ ONLY"]))
+                   (try
+                     (into [] (map #(into {} %))
+                           (jdbc/plan conn (into [sql] args)
+                                      {:builder-fn xt-jdbc/builder-fn
+                                       ::xt-jdbc/key-fn :kebab-case-keyword
+                                       :timeout (long timeout-s)}))
+                     (catch Exception e
+                       (if (timeout-error? e)
+                         (throw (ex-info (format "query exceeded %ds deadline" timeout-s)
+                                         {:futon1b/error ::timeout
+                                          :timeout-s timeout-s
+                                          :sql sql}
+                                         e))
+                         (throw e)))
+                     (finally
+                       ;; A timed-out socket will not take a ROLLBACK; closing
+                       ;; the connection below discards the transaction anyway.
+                       (try (jdbc/execute! conn ["ROLLBACK"]) (catch Exception _))))
+                   (finally
+                     (try (.close conn) (catch Exception _))))))]
+     (run-guarded run))))
 
 (defn q1 [node form]
   (first (safe-q node form)))

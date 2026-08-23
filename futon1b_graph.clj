@@ -788,7 +788,10 @@
   exact total. The cache is invalidated synchronously by every server mutation."
   [node opts]
   (let [{:keys [type limit include-total?]} opts
-        cacheable? (and type (int? limit) (pos? limit) (false? include-total?))
+        ;; Only windows at or below the served ceiling are retained; anything
+        ;; larger is served uncached (E-futon1b-gc-wedge).
+        cacheable? (and type (int? limit) (pos? limit) (<= limit 1000)
+                        (false? include-total?))
         cache-key [node opts]]
     (if-not cacheable?
       (hyperedges-query-uncached node opts)
