@@ -372,6 +372,37 @@
                      (= 2 (count (get-in r [:body :hyperedges])))
                      (= 3 @calls))
                 {:response r :timed-q-calls @calls})))
+    (println "— A4 hyperedge cache invalidation")
+    (let [target-url (str HXS "?type=test/cache-target&limit=100&include-total=false")
+            target-edge {:hx/type :test/cache-target
+                         :hx/endpoints ["cache-target-a" "cache-target-b"]}
+            other-edge {:hx/type :test/cache-unrelated
+                        :hx/endpoints ["cache-unrelated-a" "cache-unrelated-b"]}]
+        (graph/invalidate-hyperedge-query-cache!)
+        (check! "target cache starts empty"
+                (zero? (get-in (req "GET" target-url) [:body :count]))
+                target-url)
+        (req "POST" HX other-edge ph)
+        (let [calls (atom 0)
+              timed-q fxt/timed-q
+              cached (with-redefs [fxt/timed-q (fn [& args]
+                                                 (swap! calls inc)
+                                                 (if (= 2 (count args))
+                                                   (apply timed-q (conj (vec args) 60))
+                                                   (apply timed-q args)))]
+                       (req "GET" target-url))]
+          (check! "unrelated keyword-type write retains string-type cache window"
+                  (and (zero? @calls)
+                       (zero? (get-in cached [:body :count])))
+                  {:response cached :timed-q-calls @calls}))
+        (req "POST" HX target-edge ph)
+        (check! "same-type write invalidates cached window"
+                (= 1 (get-in (req "GET" target-url) [:body :count]))
+                target-edge)
+        (req "POST" HX (assoc target-edge :hx/op "retract") ph)
+        (check! "same-type retract invalidates cached window"
+                (zero? (get-in (req "GET" target-url) [:body :count]))
+                target-edge))
     (let [page-1 (req "GET" (str HXS "?type=test/edge&limit=1&include-total=false"))
           cursor-1 (get-in page-1 [:body :next-cursor])
           page-2 (req "GET" (str HXS "?type=test/edge&limit=1&after="

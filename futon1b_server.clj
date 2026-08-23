@@ -134,7 +134,7 @@
                                             valid-from
                                             (assoc :valid-from valid-from))
                                           id]])
-                    (graph/invalidate-hyperedge-query-cache!)
+                    (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
                     (when (= :memory/assert (:hx/type doc))
                       (graph/refresh-memory-projection-component! node id))
                     {:ok true :hx/id id :retracted? true})
@@ -168,7 +168,7 @@
                            node :hyperedges doc nil valid-from)]
                       (if (present? node id)
                         (do
-                          (graph/invalidate-hyperedge-query-cache!)
+                          (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
                           (when (= :memory/assert (:hx/type doc))
                             (graph/refresh-memory-projection-component! node id))
                           {:ok true :hx/id id
