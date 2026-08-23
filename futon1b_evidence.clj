@@ -78,12 +78,16 @@
 ;; ---------------------------------------------------------------------------
 
 (defn fetch-by-id [node id]
-  (first (fxt/safe-q node (list '-> '(from :evidence [*])
-                          (list 'where (list '= 'xt/id id))))))
+  (first (fxt/safe-q node (fxt/pq '[p-id]
+                                  '(-> (from :evidence [*])
+                                       (where (= xt/id p-id)))
+                                  id))))
 
 (defn- exists? [node id]
-  (seq (fxt/safe-q node (list '-> '(from :evidence [xt/id])
-                        (list 'where (list '= 'xt/id id))))))
+  (seq (fxt/safe-q node (fxt/pq '[p-id]
+                                '(-> (from :evidence [xt/id])
+                                     (where (= xt/id p-id)))
+                                id))))
 
 (defn- public-doc [doc]
   (dissoc doc :xt/id))

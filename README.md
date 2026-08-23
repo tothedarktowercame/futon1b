@@ -135,7 +135,9 @@ one. Zone's `futon1b-dionysus.service` uses `48G`/`50G`; Dionysus used `20G`/`21
 after that incident. See `futon0/holes/…` and the oomd notes for the full story.
 
 Tests: `clojure -M:node -m test-a1a2` (HTTP smoke suite against an
-in-memory node; 26/26 as of `d171150`). Gates for any Clojure change:
+in-memory node; 26/26 as of `d171150`). `clojure -M:node -m test-query-classes`
+measures that every read path keeps the JVM class count flat across distinct
+query values (the 2026-08-23 metaspace incident — see `fxt/pq`). Gates for any Clojure change:
 `clj-kondo` (0 errors) and `futon4/dev/check-parens.el`.
 
 ## Env

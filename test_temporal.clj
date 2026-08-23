@@ -220,9 +220,14 @@
                  (mapv :hyperedge-id
                        (get-in result [:groups 0 :components]))))
           (is (= 1 (get-in result [:audit :selected-row-count])))
-          (is (= '(aggregate xt/id matched-endpoint)
-                 (nth @captured 5)))
-          (is (= '(limit 2) (last @captured))))))))
+          ;; safe-q receives the parameterised vector `[(fn params body) & args]`
+          ;; (fxt/pq): the endpoints ride as args, the shape is in `body`.
+          (let [[[_ params body] & args] @captured]
+            (is (= '[p-ep0] params))
+            (is (= ["pattern/versioned"] (vec args)))
+            (is (= '(aggregate xt/id matched-endpoint)
+                   (nth body 5)))
+            (is (= '(limit 2) (last body)))))))))
 
 (deftest system-time-versions-of-one-memory-count-once
   (let [endpoint "pattern/system-version-history"
@@ -348,10 +353,15 @@
       (is (= {:entities expected :count 2 :next-cursor "entity-b"}
              (graph/entities-query
               ::capturing-node {:type :generation-test :limit 2}))))
-    (is (= (list 'order-by
-                 {:val 'xt/id :dir :asc})
-           (nth (first @captured) 3)))
-    (is (= '(limit 2) (last (first @captured)))))
+    ;; Parameterised (fxt/pq): the limit is pushed down as `(limit p-limit)`
+    ;; with the value riding as a query arg, so the compiled plan is reused.
+    (let [[[_ params body] & args] (first @captured)]
+      (is (= '[p-type p-limit] params))
+      (is (= [:generation-test 2] (vec args)))
+      (is (= (list 'order-by
+                   {:val 'xt/id :dir :asc})
+             (nth body 3)))
+      (is (= '(limit p-limit) (last body)))))
   (let [docs [{:xt/id "entity-limit-c"
                :entity/id "entity-limit-c"
                :entity/name "C"

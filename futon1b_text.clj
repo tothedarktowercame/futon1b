@@ -210,15 +210,14 @@
    on :at alone spun there, found live on the first full build)."
   [node [after-at after-id] page]
   (fxt/safe-q node
-              (list '-> (list 'from :evidence scan-cols)
-                    (list 'where
-                          (list 'or
-                                (list '> 'evidence/at (str after-at))
-                                (list 'and
-                                      (list '= 'evidence/at (str after-at))
-                                      (list '> 'xt/id (str after-id)))))
-                    '(order-by evidence/at xt/id)
-                    (list 'limit page))))
+              (fxt/pq '[p-at p-id p-page]
+                      (list '-> (list 'from :evidence scan-cols)
+                            '(where (or (> evidence/at p-at)
+                                        (and (= evidence/at p-at)
+                                             (> xt/id p-id))))
+                            '(order-by evidence/at xt/id)
+                            '(limit p-page))
+                      (str after-at) (str after-id) page)))
 
 (defonce ^:private !catch-up-running? (atom false))
 
@@ -460,8 +459,10 @@
 
 (defn- fetch-doc
   [node id cols]
-  (first (fxt/safe-q node (list '-> (list 'from :evidence cols)
-                                (list 'where (list '= 'xt/id id))))))
+  (first (fxt/safe-q node (fxt/pq '[p-id]
+                                  (list '-> (list 'from :evidence cols)
+                                        '(where (= xt/id p-id)))
+                                  id))))
 
 (defn- fetch-wave
   "Fetch one candidate wave with four queries in flight. `safe-q` owns the
