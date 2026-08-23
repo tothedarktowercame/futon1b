@@ -113,3 +113,60 @@ This closes the open SQL question recorded in
 [`TN-xtdb2-query-ceilings-and-ingest-memory-2026-08-02.md`](../TN-xtdb2-query-ceilings-and-ingest-memory-2026-08-02.md):
 the SQL syntax works and returns complete data, but its live hyperedge plan is
 the same wrong scan class as the reverted XTQL batching for this workload.
+
+## Addendum (claude-13 review, 2026-08-23): it is a crossover, not a transfer failure
+
+The verdict above is right for the case it measured, but the "Consequence"
+paragraph generalises it wrongly, and it leaves a live contradiction unexamined:
+`fxt/hydrate-by-ids` (`futon1b_xt.clj:189`) is a shipped `_id IN` hydration,
+landed the SAME DAY (`523c2ac`, `ee8f41e`) as the fix for the 27 s
+`fetch-entity` miss path, whose docstring says `_id IN (1351 ids)` takes ~1 s
+and beats point lookups. A reader hitting both notes sees a flat contradiction.
+
+Both are correct. The planner facts, measured here:
+
+| query | table | pages | rows scanned | time |
+|---|---|---:|---:|---:|
+| `WHERE _id = '<id>'` | hyperedges | **1** | **1** | 0.045 s |
+| `WHERE _id IN (1 id)` | hyperedges | 2,962 | 508,013 | 2.491 s |
+| `WHERE _id = '<id>'` | entities | **1** | **1** | 0.278 s |
+| `WHERE _id IN (3 ids)` | entities | 989 | 49,196 | 1.718 s |
+
+**XTDB pushes `_id =` into the scan as a key seek; it does not push `_id IN`.**
+`IN` becomes a materialised values table joined by semi-join over a completely
+unfiltered scan — `predicates: []` — on *any* table, not just this one. That is
+a planner property, not a hyperedges property, and it is the sharper statement
+of §"Plan" above.
+
+So the cost model is:
+
+    IN     ~ scan_cost(table)              -- fixed, independent of N
+    points ~ N * per_id_cost / concurrency -- linear in N
+
+and the crossover is `scan_cost / effective_per_id_cost`:
+
+- **hyperedges**, 508k rows: scan ~2.5 s, points ~11 ms effective (measured
+  above, 1,134 ms warm / 100). Crossover ≈ 220 ids. A page is **100** — points
+  win, which is exactly what the sweep shows and why the verdict is *no*.
+- **entities**, 49k rows: scan ~1.7 s, points ~22 ms effective (4-way over the
+  0.278 s cold seek; the 2026-08-23 figure was 4.4 s / 50). Crossover ≈ 77 ids.
+  `hydrate-by-ids` runs at chunk size **500** — `IN` wins, which is why that fix
+  worked.
+
+Two consequences the body of this note does not draw:
+
+1. **`hydrate-by-ids` is paying a full entities scan per 500-id chunk.** It wins
+   today on N, not on indexing. Its margin shrinks as `entities` grows and
+   disappears entirely if it is ever called with small id lists. Anyone reusing
+   it should check N against the crossover, and the docstring's "because the IID
+   index selects the rows before the wide columns are materialised" is not what
+   the plan shows — there is no index probe.
+2. **This strengthens follow-up 6, not just follow-up 4.** The 1.1 s type-window
+   floor and this 2.5 s `IN` floor are the same defect seen twice: XTDB 2 serves
+   only key equality from an index, so every set-valued or non-key predicate in
+   this stack degrades linearly with corpus size. See
+   `TN-xtdb-derived-secondary-index.md`.
+
+Unchanged: do not build `IN` hydration for the 100-row hyperedge page. The
+reason is N relative to table size, and it should be recorded that way so the
+next person can evaluate their own case instead of inheriting a verdict.
