@@ -15,6 +15,17 @@
 #   systemd-run --user --unit=futon1b-restart --collect \
 #     /home/joe/code/futon1b/scripts/restart-futon1b-detached.sh
 #
+# If the store is wedged and a deep census would itself add unsafe heap
+# pressure, explicitly opt into a blind restart:
+#
+#   systemd-run --user --unit=futon1b-restart --collect \
+#     --setenv=FUTON1B_RESTART_ALLOW_NO_CENSUS=1 \
+#     /home/joe/code/futon1b/scripts/restart-futon1b-detached.sh
+#
+# This skips BOTH deep-health census calls and their shrink diff. The receipt
+# marks the missing evidence loudly. Backlog, PID-change, and write-path checks
+# still run. Without the exact value 1, the censused path is unchanged.
+#
 # Then read /tmp/futon1b-restart-receipt.txt once :7073 answers again.
 set -uo pipefail
 
@@ -42,12 +53,19 @@ say "  restart_safe=true"
 
 # ---- PRE-CHECK 2: table census, EVERY population ---------------------------
 say "PRE-CHECK 2: table census before"
-BEFORE=$(census)
-if [ -z "$BEFORE" ]; then
-  say "  *** store did not answer /health?deep=true - ABORTING ***"
-  say "RESULT=aborted"; exit 3
+if [ "${FUTON1B_RESTART_ALLOW_NO_CENSUS:-}" = "1" ]; then
+  BEFORE=""
+  say "  *** BEFORE-CENSUS UNAVAILABLE: BLIND RESTART EXPLICITLY OPTED IN ***"
+  say "  *** /health?deep=true was NOT requested; shrink diff will be skipped ***"
+  say "  CENSUS_MODE=blind-no-census"
+else
+  BEFORE=$(census)
+  if [ -z "$BEFORE" ]; then
+    say "  *** store did not answer /health?deep=true - ABORTING ***"
+    say "RESULT=aborted"; exit 3
+  fi
+  echo "    $BEFORE" >> "$R"
 fi
-echo "    $BEFORE" >> "$R"
 
 # ---- RESTART ---------------------------------------------------------------
 OLD_PID=$(pgrep -f -- '-m futon1b-server' | while read -r p; do
@@ -90,9 +108,12 @@ fi
 
 # ---- POST-CHECK 1: census again, diff EVERY row ----------------------------
 say "POST-CHECK 1: table census after, every row diffed"
-AFTER=$(census)
-echo "    $AFTER" >> "$R"
-DIFF=$(BEFORE="$BEFORE" AFTER="$AFTER" python3 - <<'PY'
+if [ "${FUTON1B_RESTART_ALLOW_NO_CENSUS:-}" = "1" ]; then
+  say "  *** SKIPPED: no before-census exists; no shrink claim is possible ***"
+else
+  AFTER=$(census)
+  echo "    $AFTER" >> "$R"
+  DIFF=$(BEFORE="$BEFORE" AFTER="$AFTER" python3 - <<'PY'
 import os, re
 def tables(s):
     m = re.search(r':tables\s*\{(.*?)\}', s, re.S)
@@ -108,13 +129,14 @@ for k in sorted(set(b) | set(a)):
             lost.append(k)
 print("LOST" if lost else "NO-TABLE-SHRANK")
 PY
-)
-echo "$DIFF" | grep -v '^LOST$\|^NO-TABLE-SHRANK$' >> "$R"
-if echo "$DIFF" | grep -q '^LOST$'; then
-  say "  *** A TABLE SHRANK ACROSS THE RESTART - investigate before writing anything ***"
-  say "RESULT=degraded"; exit 2
+  )
+  echo "$DIFF" | grep -v '^LOST$\|^NO-TABLE-SHRANK$' >> "$R"
+  if echo "$DIFF" | grep -q '^LOST$'; then
+    say "  *** A TABLE SHRANK ACROSS THE RESTART - investigate before writing anything ***"
+    say "RESULT=degraded"; exit 2
+  fi
+  say "  no table shrank"
 fi
-say "  no table shrank"
 
 # ---- POST-CHECK 2: the write path, which is the easiest one to forget ------
 # READ-ONLY BY CONSTRUCTION. README-fts §6: evidence is append-only and cannot

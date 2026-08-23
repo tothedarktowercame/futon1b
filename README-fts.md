@@ -546,6 +546,21 @@ See §4.
       /home/joe/code/futon1b/scripts/restart-futon1b-detached.sh
     cat /tmp/futon1b-restart-receipt.txt
 
+If the store is wedged, **do not probe `/health?deep=true`**: that census runs
+queries inside the already pressured JVM. The restart script has an explicit
+blind mode for this exceptional case:
+
+    systemd-run --user --unit=futon1b-restart --collect \
+      --setenv=FUTON1B_RESTART_ALLOW_NO_CENSUS=1 \
+      /home/joe/code/futon1b/scripts/restart-futon1b-detached.sh
+
+The exact value `1` is required. In this mode the receipt says
+`BEFORE-CENSUS UNAVAILABLE` and `CENSUS_MODE=blind-no-census`, neither deep
+census is requested, and the table-shrink diff is explicitly skipped. The
+XTDB backlog gate, process-ID change check, and read-only write-path check still
+run. Without this opt-in, failure to obtain the before-census still aborts
+before touching the service, exactly as on the normal censused path.
+
 `scripts/futon1b-zone.service` is Zone's unit — **not**
 `scripts/futon1b-server.service`, which still carries lucy's `switchover-store`
 / `:7074`. Installing that one here starts against a different store on a
