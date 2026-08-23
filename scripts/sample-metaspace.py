@@ -41,7 +41,29 @@ def dynamic_classloaders(pid: int) -> tuple[int, int, str]:
     return (sum(row[0] for row in matches), sum(row[1] for row in matches), ";".join(row[2] for row in matches))
 
 
+def metaspace_from_jcmd(pid: int) -> int | None:
+    """Metaspace used, in MB, from `jcmd GC.heap_info`.
+
+    The cheap /health endpoint does NOT expose :metaspace-used-mb -- confirmed
+    2026-08-23 against the live server, whose keys are node-open?, permits/*,
+    holders, oldest-holder-ms, heap, gc, ok, deep, stats. Reading it from there
+    yielded `null` + "field-absent" on every row, which meant the
+    metaspace-over-1gb alert could never fire no matter how bad things got. At
+    the moment that was found the real figure was 867 MB against a 1024 MB
+    threshold, so the alarm was silently ~85% of the way to ringing.
+
+    jcmd is already invoked for the class histogram, so this adds no new
+    dependency and no load on the JVM's HTTP path.
+    """
+    for line in run("jcmd", str(pid), "GC.heap_info").splitlines():
+        match = re.search(r"Metaspace\s+used\s+(\d+)K", line)
+        if match:
+            return int(match.group(1)) // 1024
+    return None
+
+
 def cheap_health(url: str) -> tuple[int | None, str | None]:
+    """Retained so the health probe is still exercised and stays deep-free."""
     if "?" in url:
         raise ValueError("health URL must be the cheap endpoint without a query string")
     with urllib.request.urlopen(url, timeout=10) as response:
@@ -75,7 +97,9 @@ def main() -> int:
     timestamp = now.isoformat(timespec="seconds").replace("+00:00", "Z")
     pid = service_pid(args.unit)
     count, bytes_used, class_names = dynamic_classloaders(pid)
-    metaspace_mb, health_error = cheap_health(args.health_url)
+    health_mb, health_error = cheap_health(args.health_url)
+    metaspace_mb = health_mb if health_mb is not None else metaspace_from_jcmd(pid)
+    metaspace_source = "health" if health_mb is not None else "jcmd:GC.heap_info"
     previous = prior_rows(args.output_dir, pid)
     cutoff = now - dt.timedelta(hours=MONOTONIC_WINDOW_HOURS)
     before = [row for row in previous
@@ -111,6 +135,7 @@ def main() -> int:
         "dynamic-classloader-bytes": bytes_used,
         "dynamic-classloader-classes": class_names,
         "metaspace-used-mb": metaspace_mb,
+        "metaspace-source": metaspace_source,
         "health-error": health_error,
         "alerts": {
             "metaspace-over-1gb": metaspace_mb is not None and metaspace_mb > METASPACE_ALERT_MB,
