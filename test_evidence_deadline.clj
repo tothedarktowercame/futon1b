@@ -127,6 +127,44 @@
   (let [r (req "GET" (str base "/api/alpha/entities?type=deadline-fixture&limit=1") nil)]
     (check! "fast /entities limit=1 remains 200" (= 200 (:status r))))
 
+  ;; Hold the route's XTDB read until its holder is observable, then simulate
+  ;; the deadline raised by timed-q. This exercises the HTTP error mapping and
+  ;; the permit/holder finally block without making the suite wait 60 seconds;
+  ;; timed-q's real deadline is covered by the JDBC deadline probe below.
+  (let [entered (promise)
+        release (promise)
+        timeout-key (keyword "futon1b-xt" "timeout")
+        t0 (System/currentTimeMillis)]
+    (with-redefs [fxt/timed-q
+                  (fn [& _]
+                    (deliver entered true)
+                    @release
+                    (throw (ex-info "test query deadline"
+                                    {:futon1b/error timeout-key
+                                     :timeout-s 60})))]
+      (let [response (future
+                       (req "GET"
+                            (str base "/api/alpha/entities/latest?type=deadline-fixture&limit=1")
+                            nil))]
+        (check! "stalled /entities/latest query enters timed-q"
+                (true? (deref entered 5000 false)))
+        (check! "cheap /health observes the stalled /entities/latest holder"
+                (= 1 (count (:holders
+                             (:body (req "GET" (str base "/health") nil))))))
+        (deliver release true)
+        (let [r (deref response 5000 ::response-timeout)
+              elapsed (- (System/currentTimeMillis) t0)]
+          (check! "stalled /entities/latest returns 504 within 65s"
+                  (and (map? r) (= 504 (:status r)) (< elapsed 65000)))
+          (check! "/entities/latest timeout reports query-deadline-exceeded"
+                  (= :query-deadline-exceeded (get-in r [:body :error])))
+          (check! "cheap /health holder disappears after /entities/latest timeout"
+                  (empty? (:holders
+                           (:body (req "GET" (str base "/health") nil)))))))))
+
+  (let [r (req "GET" (str base "/api/alpha/entities/latest?type=deadline-fixture&limit=1") nil)]
+    (check! "fast /entities/latest remains 200" (= 200 (:status r))))
+
   ;; --- whole-request scan bound ---------------------------------------
   (let [ev-ns (find-ns 'futon1b-evidence)
         v (ns-resolve ev-ns 'max-scanned-rows-per-request)

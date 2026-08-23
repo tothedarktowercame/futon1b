@@ -618,7 +618,8 @@
     (with-expensive-read!
       ex #(respond! ex 200 (graph/entities-latest
                             @!node {:type (p "type")
-                                    :limit (parse-limit p)})))))
+                                    :limit (parse-limit p)}
+                            fxt/timed-q)))))
 
 (defn- entities-route [^HttpExchange ex]
   (let [p (query-params ex)]

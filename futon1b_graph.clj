@@ -342,34 +342,36 @@
   0 returned, no error a consumer could see. Sigil presence is now an
   ATTRIBUTE (`:sigiled? true`) and the envelope carries `:sigil-join` so an
   empty library and a broken join are distinguishable."
-  [node {:keys [type limit]}]
-  (let [t (normalize-type type)
-        n (long (max 1 (or limit 1)))
-        all (fxt/safe-q node (list '-> '(from :entities [*])
-                             (list 'where (list '= 'entity/type t))))
-        library? (= t :pattern/library)
-        sigil-src-ids (when library?
-                        (->> (fxt/safe-q node '(-> (from :relations [relation/type relation/src])
-                                             (where (= relation/type :pattern/has-sigil))))
-                             (map :relation/src) set))
-        sigiled? (fn [d] (contains? sigil-src-ids (:entity/id d)))
-        matched (when library? (count (filter sigiled? all)))
-        docs (->> all
-                  (group-by :entity/name)
-                  (map (fn [[_ ds]] (first (sort-by #(str (:entity/id %)) ds))))
-                  (sort-by #(str (:entity/name %)))
-                  (take n)
-                  (mapv (fn [d] (cond-> (public-entity d)
-                                  library? (assoc :sigiled? (sigiled? d))))))]
-    (when (and library? (seq all) (zero? matched))
-      (println (format "[futon1b-sigil-join] BROKEN: %d pattern/library rows, %d has-sigil relation srcs, 0 matched"
-                       (count all) (count sigil-src-ids))))
-    (cond-> {:profile "default"
-             :type (if t (subs (str t) 1) (str type))
-             :entities docs}
-      library? (assoc :sigil-join {:patterns (count all)
-                                   :relation-srcs (count sigil-src-ids)
-                                   :matched matched}))))
+  ([node opts]
+   (entities-latest node opts fxt/safe-q))
+  ([node {:keys [type limit]} query-fn]
+   (let [t (normalize-type type)
+         n (long (max 1 (or limit 1)))
+         all (query-fn node (list '-> '(from :entities [*])
+                                  (list 'where (list '= 'entity/type t))))
+         library? (= t :pattern/library)
+         sigil-src-ids (when library?
+                         (->> (query-fn node '(-> (from :relations [relation/type relation/src])
+                                                  (where (= relation/type :pattern/has-sigil))))
+                              (map :relation/src) set))
+         sigiled? (fn [d] (contains? sigil-src-ids (:entity/id d)))
+         matched (when library? (count (filter sigiled? all)))
+         docs (->> all
+                   (group-by :entity/name)
+                   (map (fn [[_ ds]] (first (sort-by #(str (:entity/id %)) ds))))
+                   (sort-by #(str (:entity/name %)))
+                   (take n)
+                   (mapv (fn [d] (cond-> (public-entity d)
+                                   library? (assoc :sigiled? (sigiled? d))))))]
+     (when (and library? (seq all) (zero? matched))
+       (println (format "[futon1b-sigil-join] BROKEN: %d pattern/library rows, %d has-sigil relation srcs, 0 matched"
+                        (count all) (count sigil-src-ids))))
+     (cond-> {:profile "default"
+              :type (if t (subs (str t) 1) (str type))
+              :entities docs}
+       library? (assoc :sigil-join {:patterns (count all)
+                                    :relation-srcs (count sigil-src-ids)
+                                    :matched matched})))))
 
 (defn entities-query
   "Backend-neutral typed entity read. Returns raw entity documents so callers
