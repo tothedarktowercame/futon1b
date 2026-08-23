@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly futon1b metaspace vitality sampling
+
+[Timer]
+OnCalendar=hourly
+AccuracySec=5m
+Persistent=true
+Unit=futon1b-metaspace-sampler.service
+
+[Install]
+WantedBy=timers.target
