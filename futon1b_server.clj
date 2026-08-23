@@ -448,6 +448,12 @@
      :stats @!expensive-read-stats
      :heap {:used-mb (quot (- (.totalMemory rt) (.freeMemory rt)) 1048576)
             :max-mb (quot (.maxMemory rt) 1048576)}
+     ;; Metaspace tracks generated query classes (DynamicClassLoader count
+     ;; crept ~130/request after the 2026-08-23 repair) — watch for monotonic
+     ;; growth; it is the next thing that would need a restart.
+     :metaspace-used-mb (quot (.getUsed (.getNonHeapMemoryUsage
+                                          (java.lang.management.ManagementFactory/getMemoryMXBean)))
+                              1048576)
      :gc (into {} (map (fn [^java.lang.management.GarbageCollectorMXBean b]
                          [(.getName b) {:count (.getCollectionCount b)
                                         :time-ms (.getCollectionTime b)}])
@@ -692,10 +698,13 @@
 (defn- hyperedges-route [^HttpExchange ex]
   (let [p (query-params ex)]
     (if (or (p "type") (p "end"))
-      (with-expensive-read!
-        ex #(respond! ex 200 (graph/hyperedges-query
-                              @!node {:type (p "type") :end (p "end")
-                                      :limit (parse-hyperedge-limit p)
+      ;; Validate the window before taking a permit: a 400 must not count as
+      ;; an admitted-then-errored read in the holder stats.
+      (let [limit (parse-hyperedge-limit p)]
+        (with-expensive-read!
+         ex #(respond! ex 200 (graph/hyperedges-query
+                               @!node {:type (p "type") :end (p "end")
+                                      :limit limit
                                       :after (p "after")
                                       :repo (p "repo")
                                       :source-file (p "source-file")
@@ -706,7 +715,7 @@
                                       :system-as-of
                                       (parse-instant (p "system-as-of"))
                                       :include-total? (not= "false" (p "include-total"))
-                                      :latest? (= "true" (p "latest"))})))
+                                      :latest? (= "true" (p "latest"))}))))
       (respond! ex 400 (pr-str {:error "type or end parameter required"})))))
 
 (defn- census-route [^HttpExchange ex]
