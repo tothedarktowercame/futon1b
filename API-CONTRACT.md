@@ -412,11 +412,14 @@ returned hyperedge contains only the requested paths. A path absent from a
 particular sparse document is omitted; this is not a 400 because heterogeneous
 hyperedges legitimately do not share every property.
 
-For bounded type queries, the fields `hx/id`, `hx/type`, `prop/timestamp`,
-`prop/repo`, and `prop/source-file` are served directly from the ordered window
-and skip full-document hydration entirely. Any other requested path still
-hydrates the bounded documents before projecting the response. Omitting
-`fields` preserves the existing full-document response byte-for-byte.
+For bounded type queries, `fields` drives the ordered window projection.
+`hx/id`, `hx/type`, `hx/endpoints`, `prop/timestamp`, `prop/repo`,
+`prop/source-file`, and any nested `hx/props.<path>` resolve directly to storage
+columns and skip full-document hydration entirely. Mixed requests skip
+hydration when every path resolves this way; an unknown top-level path still
+uses the full document and is omitted when absent. Omitting `fields` preserves
+both the existing narrow window columns and full-document response
+byte-for-byte.
 
 The futon1b compatibility server additionally accepts `as-of` (alias
 `valid-as-of`) and `system-as-of`, each as a strict ISO-8601 instant.

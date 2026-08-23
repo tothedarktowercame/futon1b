@@ -711,9 +711,16 @@
 (def ^:private hyperedge-window-field-sources
   {"hx/id" :xt/id
    "hx/type" :hx/type
+   "hx/endpoints" :hx/endpoints
    "prop/timestamp" :prop/timestamp
    "prop/repo" :prop/repo
    "prop/source-file" :prop/source-file})
+
+(defn- hyperedge-window-field-source
+  [field]
+  (or (hyperedge-window-field-sources field)
+      (when (str/starts-with? field "hx/props.")
+        :hx/props)))
 
 (defn- field-path
   [field]
@@ -725,9 +732,7 @@
     (reduce
      (fn [out field]
        (let [path (field-path field)
-             source-path (if-let [source (hyperedge-window-field-sources field)]
-                           [source]
-                           path)
+             source-path (if (= "hx/id" field) [:xt/id] path)
              value (get-in doc source-path missing)]
          (if (identical? missing value)
            out
@@ -738,7 +743,23 @@
 (defn- fields-fit-hyperedge-window?
   [fields]
   (and (seq fields)
-       (every? hyperedge-window-field-sources fields)))
+       (every? hyperedge-window-field-source fields)))
+
+(defn- column-symbol
+  [column]
+  (symbol (namespace column) (name column)))
+
+(defn- hyperedge-window-columns
+  [{:keys [fields latest? repo source-file]}]
+  (if-not (seq fields)
+    hyperedge-window-cols
+    (->> (concat [:xt/id :hx/type]
+                 (when latest? [:prop/timestamp])
+                 (when repo [:prop/repo])
+                 (when source-file [:prop/source-file])
+                 (keep hyperedge-window-field-source fields))
+         distinct
+         (mapv column-symbol))))
 
 (defn- temporal-filter
   [instant]
@@ -885,7 +906,7 @@
                            (cons '->
                                  (cons (hyperedge-from
                                         (if bounded?
-                                          hyperedge-window-cols
+                                          (hyperedge-window-columns opts)
                                           '[*])
                                         temporal)
                                        query-tail))
