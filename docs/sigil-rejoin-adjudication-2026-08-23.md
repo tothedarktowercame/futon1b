@@ -1,9 +1,25 @@
 # Sigil rejoin — items needing a human (2026-08-23)
 
-Source: `docs/sigil-rejoin-2026-08-23.edn` (codex-10, `f56ecd9`). The 326 exact-title matches are being
-written by the apply packet; nothing below has been written. For each row, decide: which pattern slug the
-sigil belongs to (or "retire the sigil"). Source-file hits are `grep -F` of the title over futon3b/futon3c/futon3
-library, futon4/docs, futon5 — a hit suggests the pattern was renamed/re-filed rather than deleted.
+> **REVISED 2026-08-23 (Joe + a Dionysus-local agent's analysis). Do NOT apply the original instruction
+> "decide the slug or retire the sigil" row by row — applied naively it retires 46 valid sigils.**
+>
+> Resolution, by category:
+>
+> | category | n | resolution |
+> |---|---|---|
+> | Ambiguous `or/` vs `p4ng/` duplicates | 15 | **`or/`** is the library these belong to (Joe). |
+> | Unmatched: title truncated at ` -> ` or parenthetical abbreviated (`(I2)` for `(Invariant 2)`, also I0/I3/I4/A5) | 15 | auto-join after normalising both sides: truncate at ` -> `, drop the parenthetical. Matches the `@title` lines in `futon3/library/**/*.flexiarg`. |
+> | Unmatched: namespace pick (`futon-theory/` vs `storage/`) | 2 | human picks. |
+> | Unmatched: **devmap prototypes** (P0–P12 in `futon4/docs/VSATARCS.md`; ids `f<N>/p<M>` per `futon3/resources/sigils/rationale-examples.edn`) | 46 | **re-route, not retire**: relation type `:prototype/has-sigil`, src = the `devmap/prototype` entity. Zone has 73 `devmap/prototype` entities (names `f2/p7` …) still keyed by `#uuid` literals — that population was never re-ingested to slugs, so its own `prototype/has-sigil` rows may still join; check before writing. Devmaps are a recognised use of the flexiarg format, not non-patterns (Joe). |
+> | True orphan: "Meme Layer (ANN Search)" | 1 | retire (zero hits anywhere in the corpus). |
+>
+> The consumable output is a sibling file, `docs/sigil-rejoin-resolution-2026-08-23.edn`, in the shape the
+> apply script reads (see "After adjudication" at the bottom). The tables below are the raw input, kept for
+> audit.
+
+Source: `docs/sigil-rejoin-2026-08-23.edn` (codex-10, `f56ecd9`). The 326 exact-title matches were written
+by `scripts/sigil-rejoin-apply.py` (`4f5d192`). Source-file hits are `grep -F` of the title over
+futon3b/futon3c/futon3 library, futon4/docs, futon5.
 
 ## Ambiguous — duplicate pattern titles (15)
 
@@ -96,5 +112,23 @@ library, futon4/docs, futon5 — a hit suggests the pattern was renamed/re-filed
 
 ## After adjudication
 
-Append decided rows as `{:pattern-id … :sigil-id … :by :human}` to a `:matched-human` bucket in the receipt
-and re-run `scripts/sigil-rejoin-apply.py --apply` (it must be idempotent, so the 326 already written are no-ops).
+Write `docs/sigil-rejoin-resolution-2026-08-23.edn`:
+
+```clojure
+{:resolved-at "…" :by "<agent/human>" :input-sha "<sha of sigil-rejoin-2026-08-23.edn>"
+ :rows [;; pattern sigils — same relation type the apply script already writes
+        {:sigil-id "sigil|ante|也" :pattern-id "or/overlay-bridges"
+         :relation-type :pattern/has-sigil :by :human :note "or/ not p4ng/"}
+        {:sigil-id "sigil|ala|乃" :pattern-id "hdm/deep-storage-to-active-graph"
+         :relation-type :pattern/has-sigil :by :title-normalised :note "truncated at ->"}
+        ;; devmap prototypes — different relation type AND different src population
+        {:sigil-id "sigil|…" :prototype-id "f2/p7"           ; the devmap/prototype :entity/name
+         :relation-type :prototype/has-sigil :by :human :note "P7 Query Workflows"}
+        ;; retirements are explicit, never implied by absence
+        {:sigil-id "sigil|…" :retire true :note "Meme Layer (ANN Search): no corpus hits"}]}
+```
+
+Every sigil-id from the ambiguous + unmatched buckets (79) must appear exactly once. Then extend
+`scripts/sigil-rejoin-apply.py` to read this file in addition to `:matched` (it is idempotent, so the 326
+already written are no-ops), resolving `:prototype-id` against `GET /api/alpha/entities?type=devmap/prototype`
+by `:entity/name`. Retirement rows are reported, not executed, by the apply script.
