@@ -388,6 +388,37 @@
                    (every? #(= #{:hx/id :hx/type} (set (keys %)))
                            (get-in r [:body :hyperedges])))
               {:response r :timed-q-calls @calls}))
+    (let [unprojected (req "GET" (str HXS "?type=test/edge&limit=2&include-total=false"))
+          fields-url (str HXS "?type=test/edge&limit=2&include-total=false"
+                          "&fields=hx/id,hx/type,hx/endpoints,"
+                          "hx/props.repo,hx/props.source-file")
+          calls (atom 0)
+          timed-q fxt/timed-q
+          projected (with-redefs [fxt/timed-q (fn [& args]
+                                                (swap! calls inc)
+                                                (if (= 2 (count args))
+                                                  (apply timed-q (conj (vec args) 60))
+                                                  (apply timed-q args)))]
+                      (req "GET" fields-url))
+          expected (mapv (fn [doc]
+                           (cond-> (select-keys doc [:hx/id :hx/type :hx/endpoints])
+                             (get-in doc [:hx/props :repo])
+                             (assoc-in [:hx/props :repo]
+                                       (get-in doc [:hx/props :repo]))
+                             (get-in doc [:hx/props :source-file])
+                             (assoc-in [:hx/props :source-file]
+                                       (get-in doc [:hx/props :source-file]))))
+                         (get-in unprojected [:body :hyperedges]))]
+      (check! "mixed endpoint and props projection skips hydration"
+              (and (= 1 @calls)
+                   (= expected (get-in projected [:body :hyperedges])))
+              {:expected expected :response projected :timed-q-calls @calls})
+      (check! "unprojected response retains full document fields"
+              (and (= '[xt/id hx/type prop/timestamp prop/repo prop/source-file]
+                      (#'graph/hyperedge-window-columns {}))
+                   (every? #(and (:hx/endpoints %) (:hx/props %) (:hx/ends %))
+                           (get-in unprojected [:body :hyperedges])))
+              unprojected))
     (let [r (req "GET" (str HXS "?type=test/edge&limit=1&include-total=false"
                                 "&fields=hx/endpoints,hx/props.repo"))]
       (check! "hydrated field projection returns nested paths only"
