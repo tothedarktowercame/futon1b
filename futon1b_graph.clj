@@ -355,10 +355,15 @@
   ([node {:keys [type limit]} query-fn]
    (let [t (normalize-type type)
          n (long (max 1 (or limit 1)))
-         all (query-fn node (fxt/pq '[p-type]
-                                    '(-> (from :entities [*])
-                                         (where (= entity/type p-type)))
-                                    t))
+         ;; ids first, hydrate by `_id IN` (see fxt/hydrate-by-ids): the
+         ;; whole-type `[*]` pull was ~12 s for 1,351 pattern/library rows.
+         all (fxt/hydrate-by-ids node :entities
+                                 (mapv :xt/id
+                                       (query-fn node (fxt/pq '[p-type]
+                                                              '(-> (from :entities [xt/id entity/type])
+                                                                   (where (= entity/type p-type)))
+                                                              t)))
+                                 query-fn)
          library? (= t :pattern/library)
          sigil-src-ids (when library?
                          (->> (query-fn node '(-> (from :relations [relation/type relation/src])
@@ -406,19 +411,25 @@
          query-tail (cond-> [(cons 'where clauses)
                              '(order-by {:val xt/id :dir :asc})]
                       limited? (conj '(limit p-limit)))
-         docs (query-fn node
-                        (apply fxt/pq params
-                               (cons '-> (cons '(from :entities [*]) query-tail))
-                               args))
+         ;; Ordered id window on narrow columns, then hydrate by `_id IN` —
+         ;; `[*]` under a type predicate is ~13 s here (see fxt/hydrate-by-ids).
+         window-ids (mapv :xt/id
+                          (query-fn node
+                                    (apply fxt/pq params
+                                           (cons '-> (cons '(from :entities [xt/id entity/type]) query-tail))
+                                           args)))
+         docs (fxt/hydrate-by-ids node :entities window-ids query-fn)
          total (count (query-fn node
                                 (fxt/pq '[p-type]
                                         '(-> (from :entities [xt/id entity/type])
                                              (where (= entity/type p-type)))
                                         t)))
          window (vec docs)
+         ;; The cursor advances over the SERVER window (ids), not the hydrated
+         ;; docs, so a dropped row cannot end a walk early.
          next-cursor (when (and (int? limit) (pos? limit)
-                                (= limit (count window)))
-                       (:xt/id (peek window)))]
+                                (= limit (count window-ids)))
+                       (peek window-ids))]
      (cond-> {:entities (mapv #(dissoc % :xt/id) window)
               :count total}
        next-cursor (assoc :next-cursor next-cursor)))))

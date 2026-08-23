@@ -7,7 +7,8 @@
 ;; hyperedge no-op guard's read-before-first-ever-write and /health. Treat
 ;; exactly that error as an empty result; everything else propagates.
 (ns futon1b-xt
-  (:require [xtdb.api :as xt]
+  (:require [clojure.string :as str]
+            [xtdb.api :as xt]
             [next.jdbc :as jdbc]
             [xtdb.next.jdbc :as xt-jdbc])
   (:import [java.sql Connection]
@@ -179,6 +180,40 @@
   is keyed on query SHAPE and the class count stays bounded."
   [params body & args]
   (into [(list 'fn params body)] args))
+
+(def ^:private hydrate-chunk-size
+  "Ids per `_id IN (?…)` statement. pgjdbc caps bind parameters at 32767; 500
+  keeps each statement small and lets the permit budget interleave readers."
+  500)
+
+(defn hydrate-by-ids
+  "Full documents (`SELECT *`) for IDS from TABLE, in the order of IDS, via
+  chunked SQL `_id IN (?, …)` through QUERY-FN (default `timed-q`). Missing ids
+  are dropped.
+
+  Why this exists (2026-08-23, /entities ~13 s/call): a wide projection driven
+  by a non-key predicate — `(-> (from :entities [*]) (where (= entity/type t)))`
+  — reads every row's nested `entity/props` across the whole 49k-row table,
+  12.7 s for a 1,351-row type even without order-by, 15 s with one. The same
+  rows by `_id IN (1351 ids)` take ~1 s because the IID index selects the rows
+  before the wide columns are materialised. So typed reads select an ordered
+  window of `[xt/id entity/type]` (~0.7 s) and hydrate here. 50 point lookups
+  cost 4.4 s, so per-id hydration is not the answer either; IN is."
+  ([node table ids] (hydrate-by-ids node table ids timed-q))
+  ([node table ids query-fn]
+   (let [ids (vec ids)
+         table-name (name table)
+         by-id (into {}
+                     (comp (mapcat (fn [chunk]
+                                     (query-fn node
+                                               (into [(str "SELECT * FROM " table-name
+                                                           " WHERE _id IN ("
+                                                           (str/join ", " (repeat (count chunk) "?"))
+                                                           ")")]
+                                                     chunk))))
+                           (map (fn [doc] [(:xt/id doc) doc])))
+                     (partition-all hydrate-chunk-size ids))]
+     (into [] (keep by-id) ids))))
 
 (defn present? [node table id]
   (seq (safe-q node (pq '[p-id]
