@@ -228,7 +228,20 @@
                                     :document {:table table :id id}})))
                          {:table table :id id})))
                distinct
-               vec)]
+               vec)
+          retracted-hyperedge-types
+          (->> documents
+               (keep (fn [{:keys [table id]}]
+                       (when (= :hyperedges table)
+                         (:hx/type
+                          (first
+                           (fxt/safe-q
+                            node
+                            (fxt/pq '[p-id]
+                                    '(-> (from :hyperedges [hx/type])
+                                         (where (= xt/id p-id)))
+                                    id)))))))
+               set)]
       (with-memory-projection-mutation
         node
         (fn []
@@ -242,8 +255,8 @@
             (when (seq remaining)
               (throw (gates/layered-error 0 :postcommit-retraction-failed
                                           {:remaining remaining}))))
-          (when (some #(= :hyperedges (:table %)) documents)
-            (invalidate-hyperedge-query-cache!))
+          (doseq [t retracted-hyperedge-types]
+            (invalidate-hyperedge-query-cache! t))
           (doseq [{:keys [table id]} documents
                   :when (= :hyperedges table)]
             (refresh-memory-projection-component! node id))
@@ -876,13 +889,49 @@
                :count-exact? (boolean include-total?)}
         next-cursor (assoc :next-cursor next-cursor))))))
 
-(defonce ^:private !hyperedge-query-cache (atom {}))
+(def ^:private max-hyperedge-query-cache-entries 48)
+
+(defonce ^:private !hyperedge-query-cache
+  (atom {:entries {}
+         :insertion-order []}))
+
+(defn- normalize-hyperedge-query-opts
+  [opts]
+  (cond-> opts
+    (:type opts) (update :type normalize-type)))
+
+(defn- cache-entry
+  [cache-key]
+  (get-in @!hyperedge-query-cache [:entries cache-key]))
+
+(defn- cache-put!
+  [cache-key result]
+  (swap! !hyperedge-query-cache
+         (fn [{:keys [entries insertion-order]}]
+           (let [new-key? (not (contains? entries cache-key))
+                 order (cond-> insertion-order new-key? (conj cache-key))
+                 entries (assoc entries cache-key result)
+                 overflow (max 0 (- (count order)
+                                    max-hyperedge-query-cache-entries))
+                 evicted (take overflow order)]
+             {:entries (apply dissoc entries evicted)
+              :insertion-order (vec (drop overflow order))}))))
 
 (defn invalidate-hyperedge-query-cache!
-  "Invalidate materialized bounded query windows after a hyperedge mutation."
-  []
-  (reset! !hyperedge-query-cache {})
-  nil)
+  "Invalidate materialized bounded query windows after a hyperedge mutation.
+  With a type, retain windows for every other normalized hyperedge type. The
+  zero-arity form remains a full safety/test flush."
+  ([]
+   (reset! !hyperedge-query-cache {:entries {} :insertion-order []})
+   nil)
+  ([type]
+   (let [t (normalize-type type)]
+     (swap! !hyperedge-query-cache
+            (fn [{:keys [entries insertion-order]}]
+              (let [keep-key? (fn [[_ opts]] (not= t (:type opts)))]
+                {:entries (into {} (filter (comp keep-key? key)) entries)
+                 :insertion-order (filterv keep-key? insertion-order)}))))
+   nil))
 
 (defn hyperedges-query
   "Read hyperedges, materializing bounded type windows that explicitly waive an
@@ -890,7 +939,8 @@
   ([node opts]
    (hyperedges-query node opts fxt/safe-q))
   ([node opts query-fn]
-   (let [{:keys [type limit include-total?]} opts
+   (let [opts (normalize-hyperedge-query-opts opts)
+         {:keys [type limit include-total?]} opts
          ;; Only windows at or below the served ceiling are retained; anything
          ;; larger is served uncached (E-futon1b-gc-wedge).
          cacheable? (and type (int? limit) (pos? limit) (<= limit 1000)
@@ -898,12 +948,10 @@
          cache-key [node opts]]
      (if-not cacheable?
        (hyperedges-query-uncached node opts query-fn)
-       (if-let [cached (get @!hyperedge-query-cache cache-key)]
+       (if-let [cached (cache-entry cache-key)]
          cached
          (let [result (hyperedges-query-uncached node opts query-fn)]
-           (when (>= (count @!hyperedge-query-cache) 32)
-             (reset! !hyperedge-query-cache {}))
-           (swap! !hyperedge-query-cache assoc cache-key result)
+           (cache-put! cache-key result)
            result))))))
 
 (def ^:private max-memory-projection-endpoints 20)
