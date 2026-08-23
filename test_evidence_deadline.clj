@@ -7,6 +7,7 @@
 (ns test-evidence-deadline
   (:require [clojure.edn :as edn]
             [futon1b-gates :as gates]
+            [futon1b-graph :as graph]
             [futon1b-server :as srv]
             [futon1b-xt :as fxt]
             [xtdb.node :as xtn])
@@ -125,6 +126,41 @@
     (check! "hyperedges limit=1001 -> 400" (= 400 (:status r))))
   (let [r (req "GET" (str base "/api/alpha/hyperedges?type=x&limit=1000") nil)]
     (check! "hyperedges limit=1000 -> 200" (= 200 (:status r))))
+
+  ;; Hold the route's XTDB read until its holder is observable, then simulate
+  ;; the deadline raised by timed-q. This exercises the HTTP error mapping and
+  ;; the permit/holder finally block without making the suite wait 60 seconds.
+  (let [entered (promise)
+        release (promise)
+        timeout-key (keyword "futon1b-xt" "timeout")
+        t0 (System/currentTimeMillis)]
+    (graph/invalidate-hyperedge-query-cache!)
+    (with-redefs [fxt/timed-q
+                  (fn [& _]
+                    (deliver entered true)
+                    @release
+                    (throw (ex-info "test query deadline"
+                                    {:futon1b/error timeout-key
+                                     :timeout-s 60})))]
+      (let [response (future
+                       (req "GET"
+                            (str base "/api/alpha/hyperedges?type=deadline-fixture&limit=1")
+                            nil))]
+        (check! "stalled /hyperedges query enters timed-q"
+                (true? (deref entered 5000 false)))
+        (check! "cheap /health observes the stalled /hyperedges holder"
+                (= 1 (count (:holders
+                             (:body (req "GET" (str base "/health") nil))))))
+        (deliver release true)
+        (let [r (deref response 5000 ::response-timeout)
+              elapsed (- (System/currentTimeMillis) t0)]
+          (check! "stalled /hyperedges returns 504 within 65s"
+                  (and (map? r) (= 504 (:status r)) (< elapsed 65000)))
+          (check! "/hyperedges timeout reports query-deadline-exceeded"
+                  (= :query-deadline-exceeded (get-in r [:body :error])))
+          (check! "cheap /health holder disappears after /hyperedges timeout"
+                  (empty? (:holders
+                           (:body (req "GET" (str base "/health") nil)))))))))
 
   ;; --- health observability --------------------------------------------
   (let [b (:body (req "GET" (str base "/health") nil))]
