@@ -127,3 +127,57 @@ has no projection parameter; that is a futon1b API change, not a cascade one.
 Not in scope here: the `/api/alpha/hyperedges?end` holder seen in `/health`
 during measurement (701 ms, pool-2-thread-1) is the ordinary permit traffic,
 not this incident.
+
+## Follow-up 3 outcome (claude-13 review, 2026-08-23): projection landed, but not for its caller
+
+`4783c87` adds `fields=` to `/api/alpha/hyperedges`. The implementation is
+correct and correctly additive — omitting `fields` preserves the old response
+byte-for-byte, `hydrate-hyperedge-window` is untouched, the caching path is
+untouched, and the window-only test observes exactly ONE `timed-q` call, which
+is real proof that hydration is skipped rather than filtered. 78/78 pass.
+
+**But it cannot help the cascade, which is why it was built.** Hydration is
+skipped only when every requested field is in `hyperedge-window-cols`:
+
+```clojure
+(def hyperedge-window-cols '[xt/id hx/type prop/timestamp prop/repo prop/source-file])
+```
+
+The cascade needs the two endpoints (mission, pattern) and two `hx/props`
+entries (`pattern/ident`, `pattern/state`). Neither `hx/endpoints` nor
+`hx/props` is in that list, so the cascade's projected walk still hydrates. It
+gets the payload win (187,560 bytes computed over the live 971 documents, from
+~2.66 MB) and none of the latency win.
+
+The author flagged this honestly and did not widen the window. That was correct
+behaviour — my dispatch packet explicitly forbade widening it "to make the
+feature look better." **That instruction was mine and it was wrong**: it was
+written to stop metric-gaming and it also blocked the only change that makes
+the feature work. Recording that here rather than quietly fixing it.
+
+**Measured, live, post-restart** (100-row `mission-scope/pattern` windows via
+pgwire — note the port is now 44505, see the type-index note):
+
+| selection | cost |
+|---|---:|
+| `_id, hx$type` — the current window | 0.10 s |
+| `+ hx$ends` | 0.11 s |
+| `+ hx$ends, hx$props` — everything the cascade reads | 0.45 s |
+| `SELECT *` — what hydration effectively fetches | 0.93 s |
+
+And the current path is window (0.10 s) **plus** 100 point lookups (~1.26 s
+measured separately) ≈ 1.36 s per page.
+
+So a window carrying ends and props answers the cascade in **one query at
+0.45 s instead of ~1.36 s across 101 queries — roughly 3x per page.**
+
+**Do not simply widen `hyperedge-window-cols`.** Adding `hx$props`
+unconditionally costs every bounded reader 0.35 s per page, including the
+unprojected ones who then hydrate anyway and discard it — a regression for
+today's callers to benefit one. The right shape is to let `fields` **drive the
+column list**: extend `hyperedge-window-field-sources` to cover `hx/endpoints`
+and `hx/props.*`, select exactly the columns the request needs, and skip
+hydration whenever every requested field resolves to a storage column. Callers
+who ask for nothing keep today's narrow window and today's cost.
+
+Dispatched separately with these numbers as the acceptance bar.
