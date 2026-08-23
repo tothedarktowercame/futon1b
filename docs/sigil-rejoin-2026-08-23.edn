@@ -1,0 +1,1381 @@
+{:generated-at "2026-08-23T11:36:04.911036Z"
+ :store "migration-store-21"
+ :host "zone"
+ :counts {:patterns 1372
+  :sigils 405
+  :has-sigil-relations 1780
+  :distinct-rel-srcs 1506
+  :distinct-rel-dsts 976}
+ :matched [{:pattern-id "vsatlas/isolarion-drift"
+   :sigil-id "sigil|akesi|田"
+   :by :title-exact}
+  {:pattern-id "realtime/branch-parallelism"
+   :sigil-id "sigil|alasa|义"
+   :by :title-exact}
+  {:pattern-id "vsatlas/connected-story-world"
+   :sigil-id "sigil|alasa|书"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-12-pi"
+   :sigil-id "sigil|alasa|天"
+   :by :title-exact}
+  {:pattern-id "devmap-coherence/ifr-f3-piti"
+   :sigil-id "sigil|alasa|心"
+   :by :title-exact}
+  {:pattern-id "p4ng/shared-memory-architecture"
+   :sigil-id "sigil|ala|史"
+   :by :title-exact}
+  {:pattern-id "exotic/dual-windowing"
+   :sigil-id "sigil|ale|乃"
+   :by :title-exact}
+  {:pattern-id "exotic/hybrid-execution-semantics"
+   :sigil-id "sigil|ale|井"
+   :by :title-exact}
+  {:pattern-id "exotic/full-lift-registry"
+   :sigil-id "sigil|ale|入"
+   :by :title-exact}
+  {:pattern-id "fulab/tradeoff-record"
+   :sigil-id "sigil|ale|化"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-55-feng"
+   :sigil-id "sigil|ale|王"
+   :by :title-exact}
+  {:pattern-id "corps/seeing-the-surrounding-conditions"
+   :sigil-id "sigil|ale|田"
+   :by :title-exact}
+  {:pattern-id "musn/off-trail-brief-log"
+   :sigil-id "sigil|ale|计"
+   :by :title-exact}
+  {:pattern-id "vsatlas/pluriversal-infrastructure"
+   :sigil-id "sigil|ale|门"
+   :by :title-exact}
+  {:pattern-id "p4ng/pattern-diffusion"
+   :sigil-id "sigil|ante|以"
+   :by :title-exact}
+  {:pattern-id "vsatlas/interpretive-views"
+   :sigil-id "sigil|ante|几"
+   :by :title-exact}
+  {:pattern-id "p4ng/pattern-the-play"
+   :sigil-id "sigil|ante|只"
+   :by :title-exact}
+  {:pattern-id "p4ng/disruption-traceback"
+   :sigil-id "sigil|ante|引"
+   :by :title-exact}
+  {:pattern-id "p4ng/reflect-in-layers"
+   :sigil-id "sigil|ante|节"
+   :by :title-exact}
+  {:pattern-id "vsatlas/festival-model"
+   :sigil-id "sigil|anu|门"
+   :by :title-exact}
+  {:pattern-id "mojo/east"
+   :sigil-id "sigil|awen|东"
+   :by :title-exact}
+  {:pattern-id "futon-theory/retrospective-stability"
+   :sigil-id "sigil|awen|久"
+   :by :title-exact}
+  {:pattern-id "or2/ukrn-horizon-bridge"
+   :sigil-id "sigil|awen|旦"
+   :by :title-exact}
+  {:pattern-id "p4ng/timebox-the-core-agent"
+   :sigil-id "sigil|e|了"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-14-dayou"
+   :sigil-id "sigil|e|功"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-20-guan"
+   :sigil-id "sigil|ilo|万"
+   :by :title-exact}
+  {:pattern-id "aif/structured-observation-vector"
+   :sigil-id "sigil|ilo|了"
+   :by :title-exact}
+  {:pattern-id "fulab/blast-radius"
+   :sigil-id "sigil|ilo|化"
+   :by :title-exact}
+  {:pattern-id "control/agential-oss-infrastructure"
+   :sigil-id "sigil|ilo|本"
+   :by :title-exact}
+  {:pattern-id "musn/tool-name-hygiene"
+   :sigil-id "sigil|ilo|计"
+   :by :title-exact}
+  {:pattern-id "pattern-coherence/applicability-signals"
+   :sigil-id "sigil|insa|内"
+   :by :title-exact}
+  {:pattern-id "realtime/structured-events-only"
+   :sigil-id "sigil|insa|天"
+   :by :title-exact}
+  {:pattern-id "eight-gates/peng-ward-off"
+   :sigil-id "sigil|insa|山"
+   :by :title-exact}
+  {:pattern-id "agent/state-is-hypothesis"
+   :sigil-id "sigil|insa|计"
+   :by :title-exact}
+  {:pattern-id "futon-theory/agent-contract"
+   :sigil-id "sigil|jan|义"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-02-kun"
+   :sigil-id "sigil|jan|土"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-01-qian"
+   :sigil-id "sigil|jan|天"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-36-mingyi"
+   :sigil-id "sigil|jelo|上"
+   :by :title-exact}
+  {:pattern-id "liberation/mundane/right-intention"
+   :sigil-id "sigil|jelo|世"
+   :by :title-exact}
+  {:pattern-id "or2/bioliteracy-open-value"
+   :sigil-id "sigil|jelo|仁"
+   :by :title-exact}
+  {:pattern-id "t4r/value"
+   :sigil-id "sigil|jelo|以"
+   :by :title-exact}
+  {:pattern-id "liberation/noble/right-intention"
+   :sigil-id "sigil|jelo|天"
+   :by :title-exact}
+  {:pattern-id "vsatlas/economic-resonance-layer"
+   :sigil-id "sigil|jo|义"
+   :by :title-exact}
+  {:pattern-id "vsatlas/askew-layer"
+   :sigil-id "sigil|jo|只"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-34-dazhuang"
+   :sigil-id "sigil|kalama|己"
+   :by :title-exact}
+  {:pattern-id "p4ng/name-the-frame"
+   :sigil-id "sigil|kalama|术"
+   :by :title-exact}
+  {:pattern-id "eight-gates/pluck-extract"
+   :sigil-id "sigil|kala|爪"
+   :by :title-exact}
+  {:pattern-id "hdm/hyperreal-capital"
+   :sigil-id "sigil|kama|才"
+   :by :title-exact}
+  {:pattern-id "hdm/outline-first-detail-later"
+   :sigil-id "sigil|kama|白"
+   :by :title-exact}
+  {:pattern-id "meta/designing-thoughts-not-text"
+   :sigil-id "sigil|kasi|甲"
+   :by :title-exact}
+  {:pattern-id "vsatlas/community-problem-solving-substrate"
+   :sigil-id "sigil|ken|井"
+   :by :title-exact}
+  {:pattern-id "musn/pattern-action-helper-command"
+   :sigil-id "sigil|ken|力"
+   :by :title-exact}
+  {:pattern-id "pacspine/indicators-checker"
+   :sigil-id "sigil|ken|只"
+   :by :title-exact}
+  {:pattern-id "realtime/loop-recovery-actions"
+   :sigil-id "sigil|kepeken|令"
+   :by :title-exact}
+  {:pattern-id "pattern-coherence/causal-clarity"
+   :sigil-id "sigil|kepeken|允"
+   :by :title-exact}
+  {:pattern-id "devmap-coherence/ifr-f4-passaddhi"
+   :sigil-id "sigil|kepeken|工"
+   :by :title-exact}
+  {:pattern-id "realtime/learn-as-you-go"
+   :sigil-id "sigil|kepeken|日"
+   :by :title-exact}
+  {:pattern-id "musn/use-requires-evidence"
+   :sigil-id "sigil|kepeken|示"
+   :by :title-exact}
+  {:pattern-id "vsatlas/proof-of-concept-scope"
+   :sigil-id "sigil|kin|专"
+   :by :title-exact}
+  {:pattern-id "p4ng/candidate-move-generation"
+   :sigil-id "sigil|kin|丛"
+   :by :title-exact}
+  {:pattern-id "p4ng/tension-detection"
+   :sigil-id "sigil|kin|义"
+   :by :title-exact}
+  {:pattern-id "library-coherence/library-evidence-ledger"
+   :sigil-id "sigil|kin|了"
+   :by :title-exact}
+  {:pattern-id "workflow-coherence/sphere-equilibrium"
+   :sigil-id "sigil|kin|五"
+   :by :title-exact}
+  {:pattern-id "pacspine/inception-move"
+   :sigil-id "sigil|kin|以"
+   :by :title-exact}
+  {:pattern-id "p4ng/pattern-priming"
+   :sigil-id "sigil|kin|勿"
+   :by :title-exact}
+  {:pattern-id "musn/fulab-report-block"
+   :sigil-id "sigil|kin|卡"
+   :by :title-exact}
+  {:pattern-id "ants/pheromone-trail-tuner"
+   :sigil-id "sigil|kin|去"
+   :by :title-exact}
+  {:pattern-id "fulab/proof-commit"
+   :sigil-id "sigil|kin|双"
+   :by :title-exact}
+  {:pattern-id "devmap-coherence/ifr-state-convergence"
+   :sigil-id "sigil|kin|广"
+   :by :title-exact}
+  {:pattern-id "fulab/pattern-dep"
+   :sigil-id "sigil|kin|才"
+   :by :title-exact}
+  {:pattern-id "stack-coherence/evidence-ledger"
+   :sigil-id "sigil|kin|本"
+   :by :title-exact}
+  {:pattern-id "p4ng/meta-reflection-loop"
+   :sigil-id "sigil|kin|术"
+   :by :title-exact}
+  {:pattern-id "eight-gates/split-isolate"
+   :sigil-id "sigil|kipisi|分"
+   :by :title-exact}
+  {:pattern-id "pattern-coherence/evidence-alignment"
+   :sigil-id "sigil|kipisi|卜"
+   :by :title-exact}
+  {:pattern-id "software-design/observer-pattern"
+   :sigil-id "sigil|kiwen|介"
+   :by :title-exact}
+  {:pattern-id "musn/expensive-move-consent"
+   :sigil-id "sigil|kiwen|允"
+   :by :title-exact}
+  {:pattern-id "vsatlas/non-destructive-relational-layers"
+   :sigil-id "sigil|kule|义"
+   :by :title-exact}
+  {:pattern-id "or2/shared-futures-beyond-atomised-incentives"
+   :sigil-id "sigil|kule|公"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-15-qian"
+   :sigil-id "sigil|kule|节"
+   :by :title-exact}
+  {:pattern-id "realtime/rendezvous-handshake"
+   :sigil-id "sigil|kulupu|一"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-26-dachu"
+   :sigil-id "sigil|kulupu|功"
+   :by :title-exact}
+  {:pattern-id "ai4ci/funding-justification"
+   :sigil-id "sigil|kulupu|匀"
+   :by :title-exact}
+  {:pattern-id "realtime/listener-leases"
+   :sigil-id "sigil|kute|万"
+   :by :title-exact}
+  {:pattern-id "library-coherence/pattern-differentiation-alarms"
+   :sigil-id "sigil|kute|习"
+   :by :title-exact}
+  {:pattern-id "meta/sigil-differentiation"
+   :sigil-id "sigil|kute|归"
+   :by :title-exact}
+  {:pattern-id "agent/pause-is-not-failure"
+   :sigil-id "sigil|lape|不"
+   :by :title-exact}
+  {:pattern-id "vsatlas/audience-shift"
+   :sigil-id "sigil|lape|也"
+   :by :title-exact}
+  {:pattern-id "ai4ci/technical-grounding"
+   :sigil-id "sigil|lawa|了"
+   :by :title-exact}
+  {:pattern-id "software-design/proxy-pattern"
+   :sigil-id "sigil|lawa|介"
+   :by :title-exact}
+  {:pattern-id "futon-theory/theory-as-exotype"
+   :sigil-id "sigil|lawa|元"
+   :by :title-exact}
+  {:pattern-id "stack-coherence/futon1-determinism"
+   :sigil-id "sigil|lawa|申"
+   :by :title-exact}
+  {:pattern-id "vsat/embedded-annotation"
+   :sigil-id "sigil|la|大"
+   :by :title-exact}
+  {:pattern-id "p4ng/agent-pattern-triad"
+   :sigil-id "sigil|len|井"
+   :by :title-exact}
+  {:pattern-id "vsatlas/facilitation-scaffolds"
+   :sigil-id "sigil|len|几"
+   :by :title-exact}
+  {:pattern-id "contributing/stack-scan-logging-protocol"
+   :sigil-id "sigil|len|本"
+   :by :title-exact}
+  {:pattern-id "stack-coherence/stack-blocker-detection"
+   :sigil-id "sigil|len|示"
+   :by :title-exact}
+  {:pattern-id "musn/intent-restatement"
+   :sigil-id "sigil|lete|令"
+   :by :title-exact}
+  {:pattern-id "p4ng/start-with-sense"
+   :sigil-id "sigil|lete|去"
+   :by :title-exact}
+  {:pattern-id "realtime/loop-failure-signals"
+   :sigil-id "sigil|lete|示"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-13-tongren"
+   :sigil-id "sigil|lete|门"
+   :by :title-exact}
+  {:pattern-id "aif/expected-free-energy-scorecard"
+   :sigil-id "sigil|lili|专"
+   :by :title-exact}
+  {:pattern-id "realtime/loop-success-signals"
+   :sigil-id "sigil|lili|予"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-16-yu"
+   :sigil-id "sigil|lili|允"
+   :by :title-exact}
+  {:pattern-id "devmap-coherence/ifr-f2-viriya"
+   :sigil-id "sigil|lili|己"
+   :by :title-exact}
+  {:pattern-id "fulab/notebook-cell"
+   :sigil-id "sigil|linja|亡"
+   :by :title-exact}
+  {:pattern-id "musn/off-trail-budget"
+   :sigil-id "sigil|linja|分"
+   :by :title-exact}
+  {:pattern-id "futon-theory/four-types"
+   :sigil-id "sigil|linja|四"
+   :by :title-exact}
+  {:pattern-id "realtime/authoritative-transcript"
+   :sigil-id "sigil|lipu|三"
+   :by :title-exact}
+  {:pattern-id "workday/external-project-index"
+   :sigil-id "sigil|lipu|入"
+   :by :title-exact}
+  {:pattern-id "devmap-coherence/prototype-structure-checklist"
+   :sigil-id "sigil|lipu|工"
+   :by :title-exact}
+  {:pattern-id "agent/provisional-claims-ledger"
+   :sigil-id "sigil|lipu|未"
+   :by :title-exact}
+  {:pattern-id "agent/evidence-over-assertion"
+   :sigil-id "sigil|lipu|示"
+   :by :title-exact}
+  {:pattern-id "paramitas/proper-routing-of-craving"
+   :sigil-id "sigil|li|今"
+   :by :title-exact}
+  {:pattern-id "eight-gates/ji-press"
+   :sigil-id "sigil|li|力"
+   :by :title-exact}
+  {:pattern-id "p4ng/borrow-the-situation"
+   :sigil-id "sigil|li|平"
+   :by :title-exact}
+  {:pattern-id "ants/white-space-scout"
+   :sigil-id "sigil|loje|刊"
+   :by :title-exact}
+  {:pattern-id "iiching/exotype-XYZ"
+   :sigil-id "sigil|loje|己"
+   :by :title-exact}
+  {:pattern-id "repository-transition/identity-space"
+   :sigil-id "sigil|loje|门"
+   :by :title-exact}
+  {:pattern-id "vsatlas/three-layer-architecture"
+   :sigil-id "sigil|lon|几"
+   :by :title-exact}
+  {:pattern-id "transition/prototype1a-workbench"
+   :sigil-id "sigil|luka|支"
+   :by :title-exact}
+  {:pattern-id "vsatlas/peeragogical-infrastructures"
+   :sigil-id "sigil|luka|门"
+   :by :title-exact}
+  {:pattern-id "liberation/mundane/right-view"
+   :sigil-id "sigil|lukin|世"
+   :by :title-exact}
+  {:pattern-id "repository-transition/diagnostics"
+   :sigil-id "sigil|lukin|们"
+   :by :title-exact}
+  {:pattern-id "eight-gates/press-mechanism"
+   :sigil-id "sigil|lukin|力"
+   :by :title-exact}
+  {:pattern-id "vsat-next/narrative-arc-infographics"
+   :sigil-id "sigil|lukin|只"
+   :by :title-exact}
+  {:pattern-id "liberation/noble/right-view"
+   :sigil-id "sigil|lukin|天"
+   :by :title-exact}
+  {:pattern-id "repository-transition/invariants"
+   :sigil-id "sigil|lukin|支"
+   :by :title-exact}
+  {:pattern-id "futon-stack/argument"
+   :sigil-id "sigil|lukin|本"
+   :by :title-exact}
+  {:pattern-id "vsatlas/minimal-linking-pilot"
+   :sigil-id "sigil|lukin|石"
+   :by :title-exact}
+  {:pattern-id "agent/commitment-varies-with-confidence"
+   :sigil-id "sigil|lukin|认"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-62-xiaoguo"
+   :sigil-id "sigil|lupa|入"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-37-jiaren"
+   :sigil-id "sigil|mama|工"
+   :by :title-exact}
+  {:pattern-id "liberation/mundane/right-livelihood"
+   :sigil-id "sigil|mani|世"
+   :by :title-exact}
+  {:pattern-id "agent/budget-bounds-exploration"
+   :sigil-id "sigil|mani|分"
+   :by :title-exact}
+  {:pattern-id "liberation/noble/right-livelihood"
+   :sigil-id "sigil|mani|天"
+   :by :title-exact}
+  {:pattern-id "mojo/north"
+   :sigil-id "sigil|ma|上"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-52-gen"
+   :sigil-id "sigil|ma|仍"
+   :by :title-exact}
+  {:pattern-id "stack-coherence/staleness-scan"
+   :sigil-id "sigil|ma|止"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-30-li"
+   :sigil-id "sigil|ma|火"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-46-sheng"
+   :sigil-id "sigil|mije|万"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-11-tai"
+   :sigil-id "sigil|mi|天"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-04-meng"
+   :sigil-id "sigil|mi|少"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-54-guimei"
+   :sigil-id "sigil|mi|山"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-64-weiji"
+   :sigil-id "sigil|mi|比"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-43-guai"
+   :sigil-id "sigil|mi|王"
+   :by :title-exact}
+  {:pattern-id "aif/policy-precision-commitment-temperature"
+   :sigil-id "sigil|moku|由"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-25-wuwang"
+   :sigil-id "sigil|monsi|上"
+   :by :title-exact}
+  {:pattern-id "pacspine/quick-intro"
+   :sigil-id "sigil|monsi|刊"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-31-xian"
+   :sigil-id "sigil|monsi|口"
+   :by :title-exact}
+  {:pattern-id "or2/spread-effort-assurance"
+   :sigil-id "sigil|monsi|布"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-17-sui"
+   :sigil-id "sigil|monsi|引"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-35-jin"
+   :sigil-id "sigil|mun|内"
+   :by :title-exact}
+  {:pattern-id "or2/progress-cylinder-assurance"
+   :sigil-id "sigil|mun|引"
+   :by :title-exact}
+  {:pattern-id "realtime/mode-gate"
+   :sigil-id "sigil|musi|下"
+   :by :title-exact}
+  {:pattern-id "pacspine/channel-upgrade"
+   :sigil-id "sigil|musi|业"
+   :by :title-exact}
+  {:pattern-id "workflow-coherence/wip-cap"
+   :sigil-id "sigil|musi|弓"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-18-gu"
+   :sigil-id "sigil|mute|一"
+   :by :title-exact}
+  {:pattern-id "stack-coherence/commit-intent-alignment"
+   :sigil-id "sigil|mute|上"
+   :by :title-exact}
+  {:pattern-id "vsatlas/proof-through-pilots"
+   :sigil-id "sigil|mute|亏"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-23-bo"
+   :sigil-id "sigil|mute|们"
+   :by :title-exact}
+  {:pattern-id "contributing/devmap-contribution-protocol"
+   :sigil-id "sigil|mute|工"
+   :by :title-exact}
+  {:pattern-id "code-coherence/dead-code-hygiene"
+   :sigil-id "sigil|mute|本"
+   :by :title-exact}
+  {:pattern-id "repository-transition/counterstrawman-indicators"
+   :sigil-id "sigil|mute|门"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-57-xun"
+   :sigil-id "sigil|mute|风"
+   :by :title-exact}
+  {:pattern-id "p4ng/legitimate-iteration"
+   :sigil-id "sigil|mu|由"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-59-huan"
+   :sigil-id "sigil|nasa|卜"
+   :by :title-exact}
+  {:pattern-id "realtime/transport-pivot"
+   :sigil-id "sigil|nasin|丁"
+   :by :title-exact}
+  {:pattern-id "p4ng/agent-strategy-pattern"
+   :sigil-id "sigil|nasin|义"
+   :by :title-exact}
+  {:pattern-id "futon-theory/symbolic-geodesic"
+   :sigil-id "sigil|nasin|小"
+   :by :title-exact}
+  {:pattern-id "futon-theory/proof-path"
+   :sigil-id "sigil|nasin|归"
+   :by :title-exact}
+  {:pattern-id "realtime/single-line-transport"
+   :sigil-id "sigil|nasin|文"
+   :by :title-exact}
+  {:pattern-id "p4ng/outcome-synthesizer"
+   :sigil-id "sigil|nasin|末"
+   :by :title-exact}
+  {:pattern-id "stack-coherence/ready-blocked-triage"
+   :sigil-id "sigil|nasin|本"
+   :by :title-exact}
+  {:pattern-id "stack-coherence/futon-bridge-health"
+   :sigil-id "sigil|nasin|门"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-05-xu"
+   :sigil-id "sigil|nena|叼"
+   :by :title-exact}
+  {:pattern-id "or2/topology-dungeon-crawl"
+   :sigil-id "sigil|nena|山"
+   :by :title-exact}
+  {:pattern-id "p4ng/method-documentary-split"
+   :sigil-id "sigil|nena|术"
+   :by :title-exact}
+  {:pattern-id "musn/pattern-action-rpc"
+   :sigil-id "sigil|nimi|力"
+   :by :title-exact}
+  {:pattern-id "musn/selection-before-write"
+   :sigil-id "sigil|nimi|功"
+   :by :title-exact}
+  {:pattern-id "or2/xiangqi-decorators"
+   :sigil-id "sigil|nimi|艺"
+   :by :title-exact}
+  {:pattern-id "mojo/up"
+   :sigil-id "sigil|ni|云"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-19-lin"
+   :sigil-id "sigil|ni|比"
+   :by :title-exact}
+  {:pattern-id "liberation/mundane/right-mindfulness"
+   :sigil-id "sigil|oko|世"
+   :by :title-exact}
+  {:pattern-id "devmap-coherence/ifr-f1-dhammavicaya"
+   :sigil-id "sigil|oko|乃"
+   :by :title-exact}
+  {:pattern-id "vsatlas/current-strength-gap"
+   :sigil-id "sigil|oko|卜"
+   :by :title-exact}
+  {:pattern-id "liberation/noble/right-mindfulness"
+   :sigil-id "sigil|oko|天"
+   :by :title-exact}
+  {:pattern-id "devmap-coherence/next-steps-to-done"
+   :sigil-id "sigil|oko|本"
+   :by :title-exact}
+  {:pattern-id "corps/working-where-others-can-see"
+   :sigil-id "sigil|oko|示"
+   :by :title-exact}
+  {:pattern-id "or2/two-joes-one-mandate"
+   :sigil-id "sigil|ona|中"
+   :by :title-exact}
+  {:pattern-id "vsatlas/stewardship-layer"
+   :sigil-id "sigil|ona|义"
+   :by :title-exact}
+  {:pattern-id "corps/standing-in-the-circle"
+   :sigil-id "sigil|ona|仁"
+   :by :title-exact}
+  {:pattern-id "agent/intent-handshake-is-binding"
+   :sigil-id "sigil|ona|令"
+   :by :title-exact}
+  {:pattern-id "vsatlas/contributor-pathways"
+   :sigil-id "sigil|ona|只"
+   :by :title-exact}
+  {:pattern-id "p4ng/role-reveal"
+   :sigil-id "sigil|ona|己"
+   :by :title-exact}
+  {:pattern-id "p4ng/role-reveal-agent"
+   :sigil-id "sigil|ona|支"
+   :by :title-exact}
+  {:pattern-id "hdm/non-capture"
+   :sigil-id "sigil|open|公"
+   :by :title-exact}
+  {:pattern-id "vsatlas/open-progression-ecosystem"
+   :sigil-id "sigil|open|门"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-45-cui"
+   :sigil-id "sigil|o|专"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-08-bi"
+   :sigil-id "sigil|o|亏"
+   :by :title-exact}
+  {:pattern-id "pacspine/simple-close"
+   :sigil-id "sigil|o|只"
+   :by :title-exact}
+  {:pattern-id "ai4ci/collective-intelligence-evaluation"
+   :sigil-id "sigil|palisa|上"
+   :by :title-exact}
+  {:pattern-id "futon-theory/interface-loop"
+   :sigil-id "sigil|palisa|介"
+   :by :title-exact}
+  {:pattern-id "ai4ci/sota-distinction"
+   :sigil-id "sigil|palisa|未"
+   :by :title-exact}
+  {:pattern-id "workday/single-focus-amidst-agenda"
+   :sigil-id "sigil|pali|专"
+   :by :title-exact}
+  {:pattern-id "liberation/mundane/right-effort"
+   :sigil-id "sigil|pali|世"
+   :by :title-exact}
+  {:pattern-id "vsatlas/open-infrastructure-expert-practice"
+   :sigil-id "sigil|pali|也"
+   :by :title-exact}
+  {:pattern-id "t4r/supplement"
+   :sigil-id "sigil|pali|了"
+   :by :title-exact}
+  {:pattern-id "corps/five-arrows-fit"
+   :sigil-id "sigil|pali|五"
+   :by :title-exact}
+  {:pattern-id "vsatlas/capacity-building-sustainability"
+   :sigil-id "sigil|pali|以"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-63-jiji"
+   :sigil-id "sigil|pali|们"
+   :by :title-exact}
+  {:pattern-id "vsatlas/shared-stewardship-compact"
+   :sigil-id "sigil|pali|公"
+   :by :title-exact}
+  {:pattern-id "pacspine/crisp-success"
+   :sigil-id "sigil|pali|只"
+   :by :title-exact}
+  {:pattern-id "liberation/noble/right-effort"
+   :sigil-id "sigil|pali|天"
+   :by :title-exact}
+  {:pattern-id "p4ng/proportional-load-sharing"
+   :sigil-id "sigil|pali|布"
+   :by :title-exact}
+  {:pattern-id "repository-transition/transformation-engine"
+   :sigil-id "sigil|pali|旦"
+   :by :title-exact}
+  {:pattern-id "paramitas/equanimity"
+   :sigil-id "sigil|pali|止"
+   :by :title-exact}
+  {:pattern-id "vsat/community-engagement"
+   :sigil-id "sigil|pali|节"
+   :by :title-exact}
+  {:pattern-id "vsatlas/cooperative-learning-environment"
+   :sigil-id "sigil|pana|人"
+   :by :title-exact}
+  {:pattern-id "agent/handoff-preserves-context"
+   :sigil-id "sigil|pana|代"
+   :by :title-exact}
+  {:pattern-id "corps/letting-the-trace-teach"
+   :sigil-id "sigil|pana|文"
+   :by :title-exact}
+  {:pattern-id "vsatlas/sustainable-trajectory"
+   :sigil-id "sigil|pata|女"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-24-fu"
+   :sigil-id "sigil|pata|归"
+   :by :title-exact}
+  {:pattern-id "realtime/liveness-heartbeats"
+   :sigil-id "sigil|pilin|七"
+   :by :title-exact}
+  {:pattern-id "paramitas/good-will"
+   :sigil-id "sigil|pilin|仁"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-27-yi"
+   :sigil-id "sigil|pilin|布"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-38-kui"
+   :sigil-id "sigil|pilin|引"
+   :by :title-exact}
+  {:pattern-id "corps/carrying-ones-own-question"
+   :sigil-id "sigil|pilin|心"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-41-sun"
+   :sigil-id "sigil|pilin|斥"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-49-ge"
+   :sigil-id "sigil|pimeja|二"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-50-ding"
+   :sigil-id "sigil|pimeja|旦"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-44-gou"
+   :sigil-id "sigil|pimeja|见"
+   :by :title-exact}
+  {:pattern-id "p4ng/harvest-before-close"
+   :sigil-id "sigil|pini|以"
+   :by :title-exact}
+  {:pattern-id "vsatlas/accountable-poc"
+   :sigil-id "sigil|pini|卜"
+   :by :title-exact}
+  {:pattern-id "fulab/session-resume"
+   :sigil-id "sigil|pini|才"
+   :by :title-exact}
+  {:pattern-id "futon-theory/stop-the-line"
+   :sigil-id "sigil|pini|止"
+   :by :title-exact}
+  {:pattern-id "ai4ci/pilot-feasibility"
+   :sigil-id "sigil|poka|六"
+   :by :title-exact}
+  {:pattern-id "t4r/training"
+   :sigil-id "sigil|poka|友"
+   :by :title-exact}
+  {:pattern-id "ai4ci/project-summary-core"
+   :sigil-id "sigil|poka|才"
+   :by :title-exact}
+  {:pattern-id "vsatlas/pilot-offers"
+   :sigil-id "sigil|poka|长"
+   :by :title-exact}
+  {:pattern-id "vsat/reflective-container"
+   :sigil-id "sigil|poki|了"
+   :by :title-exact}
+  {:pattern-id "vsat/360-story-container"
+   :sigil-id "sigil|poki|氏"
+   :by :title-exact}
+  {:pattern-id "paramitas/ethical-containment-vs-moral-totalisation"
+   :sigil-id "sigil|pona|仁"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-47-kun"
+   :sigil-id "sigil|pona|平"
+   :by :title-exact}
+  {:pattern-id "vsat-next/ai-assisted-professional-storycrafting"
+   :sigil-id "sigil|sama|未"
+   :by :title-exact}
+  {:pattern-id "repository-transition/strawman"
+   :sigil-id "sigil|seli|亏"
+   :by :title-exact}
+  {:pattern-id "control/agential-efficiency-measurement"
+   :sigil-id "sigil|seli|功"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-33-dun"
+   :sigil-id "sigil|seli|右"
+   :by :title-exact}
+  {:pattern-id "devmap-coherence/ifr-f5-samadhi"
+   :sigil-id "sigil|seli|己"
+   :by :title-exact}
+  {:pattern-id "vsatlas/upful-learning-trajectory"
+   :sigil-id "sigil|seme|人"
+   :by :title-exact}
+  {:pattern-id "eight-gates/an-push"
+   :sigil-id "sigil|seme|力"
+   :by :title-exact}
+  {:pattern-id "transition/f0-f4-boundary"
+   :sigil-id "sigil|seme|生"
+   :by :title-exact}
+  {:pattern-id "vsatlas/open-ecosystem-mandate"
+   :sigil-id "sigil|seme|门"
+   :by :title-exact}
+  {:pattern-id "pacspine/goodwill"
+   :sigil-id "sigil|sijelo|业"
+   :by :title-exact}
+  {:pattern-id "p4ng/timebox-the-core"
+   :sigil-id "sigil|sijelo|了"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-60-jie"
+   :sigil-id "sigil|sijelo|允"
+   :by :title-exact}
+  {:pattern-id "futon-theory/baldwin-cycle"
+   :sigil-id "sigil|sike|三"
+   :by :title-exact}
+  {:pattern-id "futon-theory/event-protocol"
+   :sigil-id "sigil|sike|令"
+   :by :title-exact}
+  {:pattern-id "p4ng/self-patterning-mandate"
+   :sigil-id "sigil|sike|勿"
+   :by :title-exact}
+  {:pattern-id "vsatlas/value-flow-constellation"
+   :sigil-id "sigil|sike|卜"
+   :by :title-exact}
+  {:pattern-id "agent/sense-deliberate-act"
+   :sigil-id "sigil|sike|工"
+   :by :title-exact}
+  {:pattern-id "musn/pause-backtrace"
+   :sigil-id "sigil|sike|归"
+   :by :title-exact}
+  {:pattern-id "library-coherence/library-readme-sync"
+   :sigil-id "sigil|sike|本"
+   :by :title-exact}
+  {:pattern-id "repository-transition/job-argument"
+   :sigil-id "sigil|sina|义"
+   :by :title-exact}
+  {:pattern-id "meta/layering-design-into-argument"
+   :sigil-id "sigil|sina|以"
+   :by :title-exact}
+  {:pattern-id "paramitas/generosity"
+   :sigil-id "sigil|sin|习"
+   :by :title-exact}
+  {:pattern-id "library-coherence/library-embedding-refresh"
+   :sigil-id "sigil|sin|归"
+   :by :title-exact}
+  {:pattern-id "stack-coherence/maturity-evidence-audit"
+   :sigil-id "sigil|suli|升"
+   :by :title-exact}
+  {:pattern-id "library-coherence/llm-argument-scan"
+   :sigil-id "sigil|suli|支"
+   :by :title-exact}
+  {:pattern-id "hdm/bootstrap-kernel"
+   :sigil-id "sigil|suno|公"
+   :by :title-exact}
+  {:pattern-id "vsatlas/offer-ladder"
+   :sigil-id "sigil|suno|六"
+   :by :title-exact}
+  {:pattern-id "mojo/south"
+   :sigil-id "sigil|suno|心"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-58-dui"
+   :sigil-id "sigil|supa|亏"
+   :by :title-exact}
+  {:pattern-id "pattern-coherence/scope-boundaries"
+   :sigil-id "sigil|supa|仁"
+   :by :title-exact}
+  {:pattern-id "musn/declare-scope"
+   :sigil-id "sigil|supa|内"
+   :by :title-exact}
+  {:pattern-id "devmap-coherence/ifr-f6-upekkha"
+   :sigil-id "sigil|supa|十"
+   :by :title-exact}
+  {:pattern-id "devmap-coherence/prototype-alignment-embedding"
+   :sigil-id "sigil|supa|工"
+   :by :title-exact}
+  {:pattern-id "ants/cargo-return-discipline"
+   :sigil-id "sigil|supa|归"
+   :by :title-exact}
+  {:pattern-id "t4r/dtp-fit"
+   :sigil-id "sigil|tan|氏"
+   :by :title-exact}
+  {:pattern-id "musn/read-aif-plus-one"
+   :sigil-id "sigil|taso|三"
+   :by :title-exact}
+  {:pattern-id "eight-gates/ward-off-boundary"
+   :sigil-id "sigil|taso|山"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-22-bi"
+   :sigil-id "sigil|taso|术"
+   :by :title-exact}
+  {:pattern-id "stack-coherence/futon1-storage-coherence"
+   :sigil-id "sigil|taso|正"
+   :by :title-exact}
+  {:pattern-id "aif/evidence-precision-registry"
+   :sigil-id "sigil|taso|由"
+   :by :title-exact}
+  {:pattern-id "futon-theory/xenotype-portability"
+   :sigil-id "sigil|tawa|以"
+   :by :title-exact}
+  {:pattern-id "transition/persistence-conditions"
+   :sigil-id "sigil|tawa|功"
+   :by :title-exact}
+  {:pattern-id "ai4ci/umbrella"
+   :sigil-id "sigil|tawa|支"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-32-heng"
+   :sigil-id "sigil|tawa|斥"
+   :by :title-exact}
+  {:pattern-id "pattern-coherence/internal-coherence"
+   :sigil-id "sigil|telo|介"
+   :by :title-exact}
+  {:pattern-id "eight-gates/lu-roll-back"
+   :sigil-id "sigil|telo|川"
+   :by :title-exact}
+  {:pattern-id "eight-gates/roll-back-hold"
+   :sigil-id "sigil|telo|止"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-29-kan"
+   :sigil-id "sigil|telo|水"
+   :by :title-exact}
+  {:pattern-id "liberation/mundane/right-concentration"
+   :sigil-id "sigil|tenpo|世"
+   :by :title-exact}
+  {:pattern-id "paramitas/endurance"
+   :sigil-id "sigil|tenpo|久"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-39-jian"
+   :sigil-id "sigil|tenpo|介"
+   :by :title-exact}
+  {:pattern-id "pacspine/frictionless-next"
+   :sigil-id "sigil|tenpo|力"
+   :by :title-exact}
+  {:pattern-id "liberation/noble/right-concentration"
+   :sigil-id "sigil|tenpo|天"
+   :by :title-exact}
+  {:pattern-id "workday/sign-off-affordance"
+   :sigil-id "sigil|tenpo|止"
+   :by :title-exact}
+  {:pattern-id "control/effort-estimation"
+   :sigil-id "sigil|tenpo|计"
+   :by :title-exact}
+  {:pattern-id "liberation/mundane/right-speech"
+   :sigil-id "sigil|toki|世"
+   :by :title-exact}
+  {:pattern-id "ai4ci/dual-layer-proof-patterns"
+   :sigil-id "sigil|toki|二"
+   :by :title-exact}
+  {:pattern-id "pacspine/ghost-move"
+   :sigil-id "sigil|toki|匀"
+   :by :title-exact}
+  {:pattern-id "p4ng/pattern-dispute-dialogue"
+   :sigil-id "sigil|toki|口"
+   :by :title-exact}
+  {:pattern-id "liberation/noble/right-speech"
+   :sigil-id "sigil|toki|天"
+   :by :title-exact}
+  {:pattern-id "paramitas/truth"
+   :sigil-id "sigil|toki|白"
+   :by :title-exact}
+  {:pattern-id "vsatlas/story-emporium"
+   :sigil-id "sigil|tomo|门"
+   :by :title-exact}
+  {:pattern-id "exotic/dual-track-generation"
+   :sigil-id "sigil|tu|二"
+   :by :title-exact}
+  {:pattern-id "ai4ci/process-vs-exposition"
+   :sigil-id "sigil|tu|才"
+   :by :title-exact}
+  {:pattern-id "sidecar/validation-enforcement-gate"
+   :sigil-id "sigil|unknown|?"
+   :by :title-exact}
+  {:pattern-id "liberation/mundane/right-action"
+   :sigil-id "sigil|utala|世"
+   :by :title-exact}
+  {:pattern-id "eight-gates/zhou-elbow"
+   :sigil-id "sigil|utala|力"
+   :by :title-exact}
+  {:pattern-id "iching/hexagram-06-song"
+   :sigil-id "sigil|utala|口"
+   :by :title-exact}
+  {:pattern-id "liberation/noble/right-action"
+   :sigil-id "sigil|utala|天"
+   :by :title-exact}
+  {:pattern-id "eight-gates/push-warrant"
+   :sigil-id "sigil|utala|正"
+   :by :title-exact}
+  {:pattern-id "devmap-coherence/prototype-alignment-tension"
+   :sigil-id "sigil|wawa|义"
+   :by :title-exact}
+  {:pattern-id "pattern-coherence/facet-integrity"
+   :sigil-id "sigil|wawa|予"
+   :by :title-exact}
+  {:pattern-id "vsatlas/reasons-to-causes"
+   :sigil-id "sigil|wawa|力"
+   :by :title-exact}
+  {:pattern-id "devmap-coherence/prototype-alignment-bridge"
+   :sigil-id "sigil|wawa|工"
+   :by :title-exact}
+  {:pattern-id "agent/escalation-cost-vs-risk"
+   :sigil-id "sigil|wawa|平"
+   :by :title-exact}
+  {:pattern-id "or2/data-intensive-infrastructure-gap"
+   :sigil-id "sigil|weka|中"
+   :by :title-exact}
+  {:pattern-id "p4ng/reflection-scaffold-upgrade"
+   :sigil-id "sigil|weka|介"
+   :by :title-exact}
+  {:pattern-id "or2/open-practice-beyond-hypothesis"
+   :sigil-id "sigil|weka|文"
+   :by :title-exact}
+  {:pattern-id "dsc/traversal-first-chaptering"
+   :sigil-id "sigil|weka|甲"
+   :by :title-exact}
+  {:pattern-id "library-coherence/library-template-discipline"
+   :sigil-id "sigil|wile|万"
+   :by :title-exact}
+  {:pattern-id "library-coherence/library-staleness-scan"
+   :sigil-id "sigil|wile|习"
+   :by :title-exact}
+  {:pattern-id "xed-roads/live-recording-bridge"
+   :sigil-id "sigil|wile|内"
+   :by :title-exact}
+  {:pattern-id "exotic/live-sync-source-truth"
+   :sigil-id "sigil|wile|本"
+   :by :title-exact}]
+ :ambiguous [{:sigil-id "sigil|ante|也"
+   :candidates ["or/overlay-bridges"
+    "p4ng/overlay-bridges"]
+   :title "Overlay Bridges"
+   :by :title-exact}
+  {:sigil-id "sigil|ante|了"
+   :candidates ["or/readiness-windows"
+    "p4ng/readiness-windows"]
+   :title "Readiness Windows"
+   :by :title-exact}
+  {:sigil-id "sigil|ante|支"
+   :candidates ["or/overlay-bridges"
+    "p4ng/overlay-bridges"]
+   :title "Overlay Bridges"
+   :by :title-exact}
+  {:sigil-id "sigil|kasi|田"
+   :candidates ["or/identifier-garden"
+    "p4ng/identifier-garden"]
+   :title "Identifier Garden"
+   :by :title-exact}
+  {:sigil-id "sigil|li|工"
+   :candidates ["or/license-laddering"
+    "p4ng/license-laddering"]
+   :title "License Laddering"
+   :by :title-exact}
+  {:sigil-id "sigil|lukin|介"
+   :candidates ["or/attribution-forward-review"
+    "p4ng/attribution-forward"]
+   :title "Attribution-Forward Review"
+   :by :title-exact}
+  {:sigil-id "sigil|ma|只"
+   :candidates ["or/dream-audit-per-release"
+    "p4ng/dream-audit"]
+   :title "DREAM Audit (Per Release)"
+   :by :title-exact}
+  {:sigil-id "sigil|ma|旦"
+   :candidates ["or/readiness-windows"
+    "p4ng/readiness-windows"]
+   :title "Readiness Windows"
+   :by :title-exact}
+  {:sigil-id "sigil|ni|友"
+   :candidates ["or/maintainer-care"
+    "p4ng/maintainer-care"]
+   :title "Maintainer Care"
+   :by :title-exact}
+  {:sigil-id "sigil|ni|史"
+   :candidates ["or/retirement-shelf"
+    "p4ng/retirement-shelf"]
+   :title "Retirement Shelf"
+   :by :title-exact}
+  {:sigil-id "sigil|palisa|工"
+   :candidates ["or/quality-by-design-crowd"
+    "p4ng/quality-by-design"]
+   :title "Quality-by-Design Crowd"
+   :by :title-exact}
+  {:sigil-id "sigil|pali|亏"
+   :candidates ["or/peripheral-to-core-pathways"
+    "p4ng/peripheral-to-core"]
+   :title "Peripheral-to-Core Pathways"
+   :by :title-exact}
+  {:sigil-id "sigil|pata|人"
+   :candidates ["or/citizen-co-learning-track"
+    "p4ng/citizen-colearning"]
+   :title "Citizen Co-Learning Track"
+   :by :title-exact}
+  {:sigil-id "sigil|seli|石"
+   :candidates ["or/friction-as-feature"
+    "p4ng/friction-as-feature"]
+   :title "Friction-as-Feature"
+   :by :title-exact}
+  {:sigil-id "sigil|weka|节"
+   :candidates ["or/tune-audits-quarterly"
+    "p4ng/tune-audits"]
+   :title "Tune Audits (Quarterly)"
+   :by :title-exact}]
+ :unmatched-sigils [{:sigil-id "sigil|alasa|正"
+   :title-prefix "Pilot Storage (fulab, MMCA)"
+   :nearest ["cascades/on-the-fly-cascade"
+    "hdm/deep-storage-to-active-graph"
+    "storage/deterministic-substrate"]}
+  {:sigil-id "sigil|ala|乃"
+   :title-prefix "HDM - Deep Storage"
+   :nearest ["hdm/bootstrap-kernel"
+    "hdm/deep-storage-to-active-graph"
+    "stack-coherence/readme-devmap-sync"]}
+  {:sigil-id "sigil|ala|久"
+   :title-prefix "Graph Storage Layer"
+   :nearest ["exotic/tri-store-lineage"
+    "hdm/deep-storage-to-active-graph"
+    "vsatlas/askew-layer"]}
+  {:sigil-id "sigil|ala|也"
+   :title-prefix "Literary Interface"
+   :nearest ["futon-theory/interface-loop"
+    "portal/first-class-query-interface"
+    "storage/canonical-interface"]}
+  {:sigil-id "sigil|ala|叉"
+   :title-prefix "StackExchange Import"
+   :nearest ["agent/state-is-hypothesis"
+    "blues/quick-change"
+    "stack-coherence/evidence-ledger"]}
+  {:sigil-id "sigil|ala|双"
+   :title-prefix "Design Pattern Templates"
+   :nearest ["or3/design-around-the-red-line"
+    "p4ng/pattern-the-play"
+    "p4ng/self-patterning-mandate"]}
+  {:sigil-id "sigil|ala|无"
+   :title-prefix "Agent Protocol"
+   :nearest ["fulab/clock-out"
+    "fulab/pattern-propose"
+    "futon-theory/event-protocol"]}
+  {:sigil-id "sigil|ale|及"
+   :title-prefix "HTTP API (Canonical Interface)"
+   :nearest ["portal/first-class-query-interface"
+    "storage/canonical-interface"
+    "vsatlas/peeragogical-infrastructures"]}
+  {:sigil-id "sigil|ale|无"
+   :title-prefix "All-or-Nothing Integrity (I2)"
+   :nearest ["futon-theory/all-or-nothing"
+    "storage/all-or-nothing-startup"
+    "storage/startup-integrity-gate"]}
+  {:sigil-id "sigil|awen|功"
+   :title-prefix "Local Gain Persistence"
+   :nearest ["futon-theory/local-gain-persistence"
+    "paramitas/persistence"
+    "storage/canonical-interface"]}
+  {:sigil-id "sigil|e|小"
+   :title-prefix "Reusable Mathematical Models"
+   :nearest ["music/authentic-cadence"
+    "t3/implementation-modes"
+    "vsatlas/festival-model"]}
+  {:sigil-id "sigil|ilo|下"
+   :title-prefix "Proof-Theoretic Digest/Compression"
+   :nearest ["f6/proof-as-social-process"
+    "fulab/proof-commit"
+    "vsatlatarium/vapor-as-affect"]}
+  {:sigil-id "sigil|ilo|平"
+   :title-prefix "Stabilization & Hub Demonstration"
+   :nearest ["agent/escalation-cost-vs-risk"
+    "math-formalization/notation-semantics-traps"
+    "sidecar/validation-enforcement-gate"]}
+  {:sigil-id "sigil|ilo|才"
+   :title-prefix "F0-F2 Interface (Agent Perception)"
+   :nearest ["math-formalization/tactic-algebra-interference"
+    "math-informal/find-the-right-abstraction"
+    "p4ng/candidate-move-generation"]}
+  {:sigil-id "sigil|insa|习"
+   :title-prefix "Interactive Tutorials"
+   :nearest ["futon-theory/interface-loop"
+    "t3/intervention-triad"
+    "vsatlas/interpretive-views"]}
+  {:sigil-id "sigil|ken|入"
+   :title-prefix "Open-World Ingest"
+   :nearest ["mojo/up"
+    "or/overlay-bridges"
+    "p4ng/overlay-bridges"
+    "storage/open-world-continuity"]}
+  {:sigil-id "sigil|kiwen|本"
+   :title-prefix "Xenotype CT Attachment"
+   :nearest ["futon-theory/xenotype-portability"
+    "iiching/exotype-174"
+    "iiching/exotype-206"]}
+  {:sigil-id "sigil|kulupu|人"
+   :title-prefix "Coordination Protocol"
+   :nearest ["agent/coordination-has-cost"
+    "coordination/cross-validation-protocol"
+    "war-machine/coordination-bottleneck"]}
+  {:sigil-id "sigil|lili|少"
+   :title-prefix "Minimum Viable Events (A5)"
+   :nearest ["blues/dominant-sevenths"
+    "futon-theory/minimum-viable-events"
+    "vsatlas/minimal-linking-pilot"]}
+  {:sigil-id "sigil|linja|双"
+   :title-prefix "Mission Dependency"
+   :nearest ["futon-theory/mission-dependency"
+    "vsatelier/decision-provenance"
+    "vsatelier/projection-independence"]}
+  {:sigil-id "sigil|lipu|业"
+   :title-prefix "Mission Queue & Supervisor"
+   :nearest ["fulab/session-resume"
+    "futon-theory/mission-lifecycle"
+    "popiii/discussion"]}
+  {:sigil-id "sigil|lipu|义"
+   :title-prefix "NLP Interface"
+   :nearest ["futon-theory/interface-loop"
+    "portal/first-class-query-interface"
+    "storage/canonical-interface"]}
+  {:sigil-id "sigil|lipu|忆"
+   :title-prefix "Sidecar Audit Trail"
+   :nearest ["fulab/changelog-trail"
+    "or/dream-audit-per-release"
+    "p4ng/dream-audit"
+    "war-machine/ideal-actual-gap"]}
+  {:sigil-id "sigil|lipu|文"
+   :title-prefix "F0-F4 Interface (Hypertext Navigation)"
+   :nearest ["musn/declare-scope"
+    "vsat/embedded-annotation"
+    "vsatlas/interpretation-offering"]}
+  {:sigil-id "sigil|li|另"
+   :title-prefix "Transfer Milestone"
+   :nearest ["iching/hexagram-63-jiji"
+    "math-informal/try-a-simpler-case"
+    "t3/transformation-space"]}
+  {:sigil-id "sigil|lon|乡"
+   :title-prefix "Predictive Coding Microcycle"
+   :nearest ["forward-model/price-your-own-moves"
+    "or/citizen-co-learning-track"
+    "p4ng/citizen-colearning"
+    "xed-roads/live-recording-bridge"]}
+  {:sigil-id "sigil|lon|亏"
+   :title-prefix "Core Infrastructure"
+   :nearest ["transition/persistence-conditions"
+    "vsatlas/peeragogical-infrastructures"
+    "vsatlas/pluriversal-infrastructure"]}
+  {:sigil-id "sigil|lukin|习"
+   :title-prefix "Portal Query Layer"
+   :nearest ["vsatlas/askew-layer"
+    "vsatlas/offer-ladder"
+    "war-machine/spatial-over-tabular"]}
+  {:sigil-id "sigil|lukin|入"
+   :title-prefix "F0-F7 Interface (Transparency/Simulation)"
+   :nearest ["fulab/pattern-dep"
+    "hdm/opacity-to-transparency"
+    "peripherals/surface-earns-inhabitation"]}
+  {:sigil-id "sigil|lukin|示"
+   :title-prefix "Rapid Debugging (I4)"
+   :nearest ["exotic/hybrid-execution-semantics"
+    "futon-theory/rapid-debugging"
+    "storage/rapid-debugging"]}
+  {:sigil-id "sigil|lukin|见"
+   :title-prefix "Query Workflows"
+   :nearest []}
+  {:sigil-id "sigil|moku|乡"
+   :title-prefix "Policy Layer Harness"
+   :nearest ["mojo/up"
+    "p4ng/proportional-load-sharing"
+    "storage/error-layer-hierarchy"]}
+  {:sigil-id "sigil|monsi|已"
+   :title-prefix "Informal Argument Support"
+   :nearest ["devmap-coherence/ifr-f6-upekkha"
+    "math-informal/local-to-global"
+    "math-informal/the-diagonal-argument"]}
+  {:sigil-id "sigil|nanpa|计"
+   :title-prefix "Counter-Ratchet (I2)"
+   :nearest ["futon-theory/counter-ratchet"
+    "futon-theory/interface-loop"
+    "or3/count-every-card-back"]}
+  {:sigil-id "sigil|nanpa|门"
+   :title-prefix "Progress Signal"
+   :nearest ["futon-theory/progress-signal"
+    "iching/hexagram-35-jin"
+    "realtime/loop-success-signals"]}
+  {:sigil-id "sigil|nasin|习"
+   :title-prefix "Scenario Simulations"
+   :nearest ["coordination/par-as-obligation"
+    "p4ng/boundary-oscillation"
+    "peripherals/surface-earns-inhabitation"]}
+  {:sigil-id "sigil|nasin|口"
+   :title-prefix "Mission Interface Signature"
+   :nearest ["futon-theory/mission-interface-signature"
+    "futon-theory/mission-lifecycle"
+    "or/friction-as-feature"
+    "p4ng/friction-as-feature"]}
+  {:sigil-id "sigil|nasin|止"
+   :title-prefix "Compass GFE Alignment"
+   :nearest ["math-strategy/compose-independent-lemmas"
+    "stack-coherence/commit-intent-alignment"
+    "vsatlas/cooperative-learning-environment"]}
+  {:sigil-id "sigil|nimi|乡"
+   :title-prefix "Curriculum & Behaviour Cards"
+   :nearest ["aif/currency-before-merge"
+    "enrichment/churn-as-signal"]}
+  {:sigil-id "sigil|palisa|门"
+   :title-prefix "Error Hierarchy (I3)"
+   :nearest ["futon-theory/error-hierarchy"
+    "storage/error-layer-hierarchy"
+    "t3/adaptive-delivery-spine"]}
+  {:sigil-id "sigil|pana|予"
+   :title-prefix "Futon3a→Futon0 Telemetry Bridge (Raw)"
+   :nearest ["math-strategy/convention-bridge"
+    "or3/ask-first-then-bring-the-expert"
+    "stack-coherence/futon-bridge-health"]}
+  {:sigil-id "sigil|pini|久"
+   :title-prefix "Self-Documenting Foundations"
+   :nearest ["agent/scope-before-action"
+    "f6/learning-event-detection"
+    "p4ng/self-patterning-mandate"]}
+  {:sigil-id "sigil|pi|王"
+   :title-prefix "Mission Scoping"
+   :nearest ["coordination/intent-to-mission-binding"
+    "futon-theory/mission-dependency"
+    "futon-theory/mission-scoping"]}
+  {:sigil-id "sigil|poka|本"
+   :title-prefix "Durability First (I0)"
+   :nearest ["futon-theory/durability-first"
+    "storage/durability-first"
+    "storage/durability-throughput-gate"]}
+  {:sigil-id "sigil|poki|文"
+   :title-prefix "Graph-Memory Schema & Mirroring"
+   :nearest ["storage/graph-memory-contract"
+    "storage/persistence-speed-mirroring"
+    "storage/reproducible-mirroring"]}
+  {:sigil-id "sigil|pona|正"
+   :title-prefix "F0-F3 Interface (Verification Visibility)"
+   :nearest ["peripherals/surface-earns-inhabitation"
+    "t3/intervention-triad"
+    "t4r/legacy"]}
+  {:sigil-id "sigil|sewi|六"
+   :title-prefix "Hunger & Precision Dynamics"
+   :nearest ["aif/evidence-precision-registry"
+    "ants/hunger-precision-coupling"
+    "exotic/hybrid-execution-semantics"]}
+  {:sigil-id "sigil|sike|予"
+   :title-prefix "Library Evidence Feedback"
+   :nearest ["library-coherence/library-evidence-ledger"
+    "stack-coherence/evidence-ledger"
+    "stack-coherence/maturity-evidence-audit"]}
+  {:sigil-id "sigil|sike|己"
+   :title-prefix "MetaCA Demonstrator"
+   :nearest ["coordination/artifact-registration"
+    "p4ng/candidate-move-generation"
+    "storage/graph-memory-contract"]}
+  {:sigil-id "sigil|sike|马"
+   :title-prefix "Mission Lifecycle"
+   :nearest ["futon-theory/baldwin-cycle"
+    "futon-theory/mission-dependency"
+    "futon-theory/mission-lifecycle"]}
+  {:sigil-id "sigil|sina|止"
+   :title-prefix "Invariant Enforcement"
+   :nearest ["sidecar/validation-enforcement-gate"
+    "storage/invariants-vs-repair"
+    "workflow-coherence/wip-cap"]}
+  {:sigil-id "sigil|sina|田"
+   :title-prefix "Reasoning Map"
+   :nearest ["ai4ci/project-summary-core"
+    "iching/hexagram-10-lu"
+    "storage/all-or-nothing-startup"]}
+  {:sigil-id "sigil|sitelen|双"
+   :title-prefix "Curry-Howard Operational"
+   :nearest ["futon-theory/curry-howard-operational"
+    "math-informal/structural-characterization"
+    "war-machine/half-blind-observation"]}
+  {:sigil-id "sigil|sona|久"
+   :title-prefix "Scholium Mode"
+   :nearest ["exotic/tri-store-lineage"
+    "futon-theory/symbolic-geodesic"
+    "vsatlas/festival-model"]}
+  {:sigil-id "sigil|sona|忆"
+   :title-prefix "Meme Layer (ANN Search)"
+   :nearest ["enrichment/layered-ingestion"
+    "storage/error-layer-hierarchy"
+    "vsatlas/three-layer-architecture"]}
+  {:sigil-id "sigil|suno|日"
+   :title-prefix "Morning Review Protocol"
+   :nearest ["futon-theory/event-protocol"
+    "futon-theory/stop-the-line"
+    "meta/sigil-differentiation"]}
+  {:sigil-id "sigil|suno|白"
+   :title-prefix "HDM - Opacity"
+   :nearest ["hdm/hyperreal-capital"
+    "hdm/opacity-to-transparency"
+    "or/five-p-rhythm-for-impact"
+    "p4ng/five-p-rhythm"]}
+  {:sigil-id "sigil|tan|已"
+   :title-prefix "Pivot Stream & Analyzer"
+   :nearest ["vsatlas/non-destructive-relational-layers"
+    "vsatlas/open-ecosystem-mandate"
+    "vsatlas/stewardship-layer"]}
+  {:sigil-id "sigil|tenpo|己"
+   :title-prefix "Hyperreal Enterprises as Seed Institution"
+   :nearest ["p4ng/agent-pattern-triad"
+    "popiii/patterns-as-reflexive-infrastructure"
+    "system-coherence/treat-content-refresh-as-second-order-when-conditions-bind"]}
+  {:sigil-id "sigil|toki|乃"
+   :title-prefix "Cross-Domain Reasoning Patterns"
+   :nearest ["ants/hunger-precision-coupling"
+    "eight-gates/press-mechanism"
+    "realtime/learn-as-you-go"]}
+  {:sigil-id "sigil|walo|四"
+   :title-prefix "Observation Layer Hardening"
+   :nearest ["p4ng/proportional-load-sharing"
+    "software-design/observer-pattern"
+    "storage/error-layer-hierarchy"]}
+  {:sigil-id "sigil|wan|一"
+   :title-prefix "Single Source of Truth (I1)"
+   :nearest ["agency/single-routing-authority"
+    "exotic/live-sync-source-truth"
+    "futon-theory/single-source-of-truth"]}
+  {:sigil-id "sigil|wawa|习"
+   :title-prefix "Viriya Metrics"
+   :nearest ["storage/graph-memory-contract"]}
+  {:sigil-id "sigil|wawa|二"
+   :title-prefix "Proof Hooks (futon1/futon2 Export)"
+   :nearest []}]
+ :patterns-without-sigil-count 1046
+ :method "The script takes each sigil title as the exact, trimmed prefix before the literal ' -> ' in :entity/source. It first joins that title byte-for-byte to trimmed pattern :entity/source titles; a unique title is :title-exact and duplicate-title hits are ambiguous. As a second pass it applies Unicode NFKC, case-folding, replacement of punctuation/non-word runs with one space, and whitespace collapse; unique hits are high-confidence :title-normalized matches and duplicate hits remain ambiguous. The normalized pass recovered 0 additional sigils and introduced 0 additional ambiguities. For still-unmatched sigils, :nearest lists up to three pattern-title groups selected by Python difflib.SequenceMatcher similarity over the same normalized titles (cutoff 0.45); nearest values are suggestions only and are not joins."}
