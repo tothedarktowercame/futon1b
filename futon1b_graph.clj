@@ -115,29 +115,53 @@
 ;; Entities (A3) — §5. Ensure-by-name minting + full gate stack.
 ;; ---------------------------------------------------------------------------
 
+(defn- uuid-shaped? [s]
+  (and (string? s)
+       (re-matches #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" s)))
+
+;; Alias scans (`entity/name`, `entity/external-id`) have no index, so they
+;; are full scans of :entities. With `[*]` each one is ~13 s (every row's
+;; nested `entity/props` is materialised — see fxt/hydrate-by-ids); on narrow
+;; columns the same scan is well under a second. So: narrow scan → ids →
+;; hydrate by `_id IN`. E-fetch-entity-miss-path (2026-08-23): a 404 from
+;; fetch-entity paid two `[*]` scans, 27 s.
+
+(defn- entities-by-alias
+  "Full docs whose `entity/name` or (when EXTERNAL? ) `entity/external-id`
+  equals V. Name matches sort before external-id matches; ties by id."
+  [node v external?]
+  (let [rows (if external?
+               (fxt/safe-q node (fxt/pq '[p-v]
+                                        '(-> (from :entities [xt/id entity/name entity/external-id])
+                                             (where (or (= entity/name p-v)
+                                                        (= entity/external-id p-v))))
+                                        v))
+               (fxt/safe-q node (fxt/pq '[p-v]
+                                        '(-> (from :entities [xt/id entity/name])
+                                             (where (= entity/name p-v)))
+                                        v)))
+        ordered (->> rows
+                     (sort-by (fn [r] [(if (= v (:entity/name r)) 0 1)
+                                       (str (:xt/id r))]))
+                     (map :xt/id)
+                     distinct)]
+    (when (seq ordered)
+      (fxt/hydrate-by-ids node :entities ordered fxt/safe-q))))
+
 (defn- entities-by-name [node name']
-  (fxt/safe-q node (fxt/pq '[p-name]
-                           '(-> (from :entities [*])
-                                (where (= entity/name p-name)))
-                           name')))
+  (entities-by-alias node name' false))
 
 (defn fetch-entity
   "futon1a f1g/fetch-entity: :xt/id → :entity/name → :entity/external-id,
-  deterministic smallest-id pick on duplicates."
+  deterministic smallest-id pick on duplicates. UUID-shaped ids are minted
+  ids, never names/external-ids, so the alias scan is skipped for them."
   [node id]
   (or (fxt/q1 node (fxt/pq '[p-id]
                            '(-> (from :entities [*])
                                 (where (= xt/id p-id)))
                            id))
-      (->> (entities-by-name node id)
-           (sort-by #(str (:entity/id %)))
-           first)
-      (->> (fxt/safe-q node (fxt/pq '[p-id]
-                                    '(-> (from :entities [*])
-                                         (where (= entity/external-id p-id)))
-                                    id))
-           (sort-by #(str (:entity/id %)))
-           first)))
+      (when-not (uuid-shaped? id)
+        (first (entities-by-alias node id true)))))
 
 (defn public-entity
   "futon1a normalize-entity: the compat public shape."
@@ -438,9 +462,6 @@
 ;; Relations (A3) — §6. Stable rel| ids, both key spellings.
 ;; ---------------------------------------------------------------------------
 
-(defn- uuid-shaped? [s]
-  (and (string? s)
-       (re-matches #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" s)))
 
 (defn- resolve-rel-endpoint
   "src/dst: entity name | :entity/id | raw UUID string | map with
