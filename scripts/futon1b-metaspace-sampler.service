@@ -1,0 +1,8 @@
+[Unit]
+Description=Sample futon1b DynamicClassLoader and cheap-health metaspace vitality
+ConditionPathExists=%h/code/futon1b/scripts/sample-metaspace.py
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/code/futon1b
+ExecStart=/usr/bin/python3 %h/code/futon1b/scripts/sample-metaspace.py
