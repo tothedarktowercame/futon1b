@@ -12,6 +12,38 @@
 
 (def ^:dynamic *node* nil)
 
+(deftest hyperedge-payload-normalization
+  (testing "plain string ends retain their existing document and stable id"
+    (is (= {:xt/id "hx:test/edge:a.b"
+            :hx/id "hx:test/edge:a.b"
+            :hx/type :test/edge
+            :hx/endpoints ["a" "b"]
+            :hx/ends [{:entity-id "a"} {:entity-id "b"}]}
+           (server/build-hyperedge-doc
+            {:hx/type :test/edge :hx/endpoints ["a" "b"]}))))
+  (testing "map ends contribute entity ids to identity and retain only roles"
+    (is (= {:xt/id "hx:test/edge:entity/a.entity/b"
+            :hx/id "hx:test/edge:entity/a.entity/b"
+            :hx/type :test/edge
+            :hx/endpoints ["entity/a" "entity/b"]
+            :hx/ends [{:entity-id "entity/a" :role :source}
+                      {:entity-id "entity/b" :role :target}]}
+           (server/build-hyperedge-doc
+            {:hx/type :test/edge
+             :hx/endpoints [{:entity-id "entity/a" :role :source :ignored true}
+                            {:entity-id "entity/b" :role "target"}]}))))
+  (testing "a map end without a string entity id is a layer-4 rejection"
+    (let [failure (try
+                    (server/build-hyperedge-doc
+                     {:hx/type :test/edge :hx/endpoints [{:role :target}]})
+                    (catch clojure.lang.ExceptionInfo e e))]
+      (is (= {:layer 4
+              :reason :invalid-hyperedge-end
+              :context {:end {:role :target}
+                        :required :entity-id
+                        :expected :string}}
+             (:error (ex-data failure)))))))
+
 (defn- state-at
   [endpoint valid-as-of]
   (get-in
