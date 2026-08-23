@@ -627,7 +627,8 @@
         ex #(respond! ex 200 (graph/entities-query
                               @!node {:type (p "type")
                                       :limit (parse-limit p)
-                                      :after (p "after")})))
+                                      :after (p "after")}
+                              fxt/timed-q)))
       (respond! ex 400 (pr-str {:error "entities requires ?type=<entity-type>"})))))
 
 (defn- entities-batch-route [^HttpExchange ex]
