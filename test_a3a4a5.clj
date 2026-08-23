@@ -372,6 +372,35 @@
                      (= 2 (count (get-in r [:body :hyperedges])))
                      (= 3 @calls))
                 {:response r :timed-q-calls @calls})))
+    (let [calls (atom 0)
+          timed-q fxt/timed-q
+          r (with-redefs [fxt/timed-q (fn [& args]
+                                        (swap! calls inc)
+                                        (if (= 2 (count args))
+                                          (apply timed-q (conj (vec args) 60))
+                                          (apply timed-q args)))]
+              (req "GET" (str HXS "?type=test/edge&limit=2&include-total=false"
+                                  "&fields=hx/id,hx/type")))]
+      (check! "window-only field projection skips document hydration"
+              (and (= 200 (:status r))
+                   (= 1 @calls)
+                   (= 2 (count (get-in r [:body :hyperedges])))
+                   (every? #(= #{:hx/id :hx/type} (set (keys %)))
+                           (get-in r [:body :hyperedges])))
+              {:response r :timed-q-calls @calls}))
+    (let [r (req "GET" (str HXS "?type=test/edge&limit=1&include-total=false"
+                                "&fields=hx/endpoints,hx/props.repo"))]
+      (check! "hydrated field projection returns nested paths only"
+              (and (= 200 (:status r))
+                   (= #{:hx/endpoints :hx/props}
+                      (set (keys (first (get-in r [:body :hyperedges])))))
+                   (= "r1" (get-in r [:body :hyperedges 0 :hx/props :repo])))
+              r))
+    (let [r (req "GET" (str HXS "?type=test/edge&limit=1&include-total=false"
+                                "&fields=unknown/path"))]
+      (check! "unknown sparse field is omitted rather than rejected"
+              (= [{}] (get-in r [:body :hyperedges]))
+              r))
     (println "— A4 hyperedge cache invalidation")
     (let [target-url (str HXS "?type=test/cache-target&limit=100&include-total=false")
             target-edge {:hx/type :test/cache-target

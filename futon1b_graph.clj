@@ -708,6 +708,38 @@
 (def ^:private hyperedge-window-cols
   '[xt/id hx/type prop/timestamp prop/repo prop/source-file])
 
+(def ^:private hyperedge-window-field-sources
+  {"hx/id" :xt/id
+   "hx/type" :hx/type
+   "prop/timestamp" :prop/timestamp
+   "prop/repo" :prop/repo
+   "prop/source-file" :prop/source-file})
+
+(defn- field-path
+  [field]
+  (mapv keyword (str/split field #"\.")))
+
+(defn- project-hyperedge-fields
+  [doc fields]
+  (let [missing (Object.)]
+    (reduce
+     (fn [out field]
+       (let [path (field-path field)
+             source-path (if-let [source (hyperedge-window-field-sources field)]
+                           [source]
+                           path)
+             value (get-in doc source-path missing)]
+         (if (identical? missing value)
+           out
+           (assoc-in out path value))))
+     {}
+     fields)))
+
+(defn- fields-fit-hyperedge-window?
+  [fields]
+  (and (seq fields)
+       (every? hyperedge-window-field-sources fields)))
+
 (defn- temporal-filter
   [instant]
   (when instant (list 'at instant)))
@@ -780,7 +812,7 @@
   optional pushed-down filter rather than a competing branch. :count is the
   true type total when unfiltered even if limit truncates; returned-count
   otherwise (contract §4)."
-  [node {:keys [type end limit repo source-file after latest? include-total?]
+  [node {:keys [type end limit repo source-file after latest? include-total? fields]
          :or {include-total? true}
          :as opts}
    query-fn]
@@ -818,7 +850,10 @@
                          (sort-by #(str (:xt/id %)))
                          (take n))
           docs (hydrate-hyperedge-window node projected temporal query-fn)
-          out (mapv #(dissoc % :xt/id) docs)]
+          out (mapv #(if (seq fields)
+                       (project-hyperedge-fields % fields)
+                       (dissoc % :xt/id))
+                    docs)]
       {:hyperedges out :count (count out)})
 
     type
@@ -855,7 +890,8 @@
                                         temporal)
                                        query-tail))
                            args))
-          docs (if bounded?
+          window-only? (and bounded? (fields-fit-hyperedge-window? fields))
+          docs (if (and bounded? (not window-only?))
                  (hydrate-hyperedge-window node selected temporal query-fn)
                  selected)
           total (when include-total?
@@ -884,7 +920,10 @@
                         (take limit sorted)
                         sorted)
           limited (vec limited-seq)
-          out (mapv #(dissoc % :xt/id) limited)
+          out (mapv #(if (seq fields)
+                       (project-hyperedge-fields % fields)
+                       (dissoc % :xt/id))
+                    limited)
           ;; The cursor advances over the SERVER window (`docs`), not the
           ;; client-filtered one. repo/source-file are re-filtered in Clojure
           ;; after the bounded read, so deriving the cursor from `limited` ended

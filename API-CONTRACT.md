@@ -405,7 +405,18 @@ because the tail is taken wholesale.
 or end parameter required"}`. `limit` = int (unparseable ignored). When both
 `end` and `type` are present they are conjunctive: endpoint membership is
 matched first with the type predicate pushed into the same bounded query.
-Extra params for type-only queries: `repo`, `source-file`.
+Extra params for type-only queries: `repo`, `source-file`. Both type and end
+queries additionally accept `fields`, a comma-separated list of document paths
+such as `hx/id,hx/type,hx/endpoints,hx/props.pattern/ref`. When present, each
+returned hyperedge contains only the requested paths. A path absent from a
+particular sparse document is omitted; this is not a 400 because heterogeneous
+hyperedges legitimately do not share every property.
+
+For bounded type queries, the fields `hx/id`, `hx/type`, `prop/timestamp`,
+`prop/repo`, and `prop/source-file` are served directly from the ordered window
+and skip full-document hydration entirely. Any other requested path still
+hydrates the bounded documents before projecting the response. Omitting
+`fields` preserves the existing full-document response byte-for-byte.
 
 The futon1b compatibility server additionally accepts `as-of` (alias
 `valid-as-of`) and `system-as-of`, each as a strict ISO-8601 instant.

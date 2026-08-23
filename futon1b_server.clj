@@ -717,6 +717,15 @@
                :hint "advance `after` to page"})))
     limit))
 
+(defn- parse-hyperedge-fields
+  [raw]
+  (when (some? raw)
+    (->> (str/split raw #",")
+         (map str/trim)
+         (remove str/blank?)
+         distinct
+         vec)))
+
 (defn- hyperedges-route [^HttpExchange ex]
   (let [p (query-params ex)]
     (if (or (p "type") (p "end"))
@@ -730,6 +739,7 @@
                                       :after (p "after")
                                       :repo (p "repo")
                                       :source-file (p "source-file")
+                                      :fields (parse-hyperedge-fields (p "fields"))
                                       :valid-as-of
                                       (parse-instant
                                        (or (p "valid-as-of")
