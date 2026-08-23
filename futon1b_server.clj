@@ -74,11 +74,26 @@
         (string? t) (keyword t)
         :else (throw (ex-info "hx/type required" {:got t}))))
 
+(defn- normalize-hyperedge-end [end]
+  (if (map? end)
+    (let [entity-id (:entity-id end)]
+      (when-not (string? entity-id)
+        (throw (gates/layered-error
+                4 :invalid-hyperedge-end
+                {:end end :required :entity-id :expected :string})))
+      {:endpoint entity-id
+       :end (cond-> {:entity-id entity-id}
+              (contains? end :role) (assoc :role (normalize-type (:role end))))})
+    (let [endpoint (str end)]
+      {:endpoint endpoint :end {:entity-id endpoint}})))
+
 (defn build-hyperedge-doc
   "Watcher payload → futon1b doc (pre-transform)."
   [payload]
   (let [hx-type (normalize-type (or (:hx/type payload) (:type payload)))
-        endpoints (mapv str (or (:hx/endpoints payload) (:endpoints payload)))
+        normalized-ends (mapv normalize-hyperedge-end
+                              (or (:hx/endpoints payload) (:endpoints payload)))
+        endpoints (mapv :endpoint normalized-ends)
         _ (when (empty? endpoints)
             (throw (ex-info "hx/endpoints must be non-empty" {:payload payload})))
         hx-id (or (:hx/id payload) (:id payload)
@@ -89,7 +104,7 @@
              :hx/id hx-id
              :hx/type hx-type
              :hx/endpoints endpoints
-             :hx/ends (mapv (fn [e] {:entity-id e}) endpoints)}
+             :hx/ends (mapv :end normalized-ends)}
       (seq labels) (assoc :hx/labels labels)
       (:hx/props payload) (assoc :hx/props (:hx/props payload))
       (:props payload) (assoc :hx/props (:props payload)))))
