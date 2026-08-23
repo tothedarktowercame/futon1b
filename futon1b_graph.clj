@@ -376,26 +376,28 @@
   can inspect domain fields written before the HTTP cutover as well as the
   equivalent fields carried in :entity/props by post-cutover writes. :count is
   the true type total; :next-cursor resumes the stable xt/id ordering."
-  [node {:keys [type limit after]}]
-  (let [t (normalize-type type)
-        clauses (cond-> [(list '= 'entity/type t)]
-                  after (conj (list '> 'xt/id after)))
-        query-tail (cond-> [(cons 'where clauses)
-                            (list 'order-by {:val 'xt/id :dir :asc})]
-                     (and (int? limit) (pos? limit))
-                     (conj (list 'limit limit)))
-        docs (fxt/safe-q node
-                         (cons '-> (cons '(from :entities [*]) query-tail)))
-        total (count (fxt/safe-q node
-                                 (list '-> '(from :entities [xt/id entity/type])
-                                       (list 'where (list '= 'entity/type t)))))
-        window (vec docs)
-        next-cursor (when (and (int? limit) (pos? limit)
-                               (= limit (count window)))
-                      (:xt/id (peek window)))]
-    (cond-> {:entities (mapv #(dissoc % :xt/id) window)
-             :count total}
-      next-cursor (assoc :next-cursor next-cursor))))
+  ([node opts]
+   (entities-query node opts fxt/safe-q))
+  ([node {:keys [type limit after]} query-fn]
+   (let [t (normalize-type type)
+         clauses (cond-> [(list '= 'entity/type t)]
+                   after (conj (list '> 'xt/id after)))
+         query-tail (cond-> [(cons 'where clauses)
+                             (list 'order-by {:val 'xt/id :dir :asc})]
+                      (and (int? limit) (pos? limit))
+                      (conj (list 'limit limit)))
+         docs (query-fn node
+                        (cons '-> (cons '(from :entities [*]) query-tail)))
+         total (count (query-fn node
+                                (list '-> '(from :entities [xt/id entity/type])
+                                      (list 'where (list '= 'entity/type t)))))
+         window (vec docs)
+         next-cursor (when (and (int? limit) (pos? limit)
+                                (= limit (count window)))
+                       (:xt/id (peek window)))]
+     (cond-> {:entities (mapv #(dissoc % :xt/id) window)
+              :count total}
+       next-cursor (assoc :next-cursor next-cursor)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Relations (A3) — §6. Stable rel| ids, both key spellings.
