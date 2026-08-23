@@ -1,0 +1,260 @@
+{:resolved-at "2026-08-23T13:10:51+01:00"
+ :by "claude-13 (Dionysus)"
+ :input-sha "3c8b1da9e0dbbdbb93f54d844c11027fd55020869591f6d63d23d97f58d1807d"
+ :supersedes "first revision of this file, 2026-08-23T13:05+01:00 (sha e03daeba…)"
+ :source-of-truth
+ {:sigil-index    "futon3/resources/sigils/patterns-index.tsv"  ; slug/prototype-id -> (okipona, hanzi, title)
+  :devmap-titles  "futon3/holes/features/futon*.devmap"          ; '! instantiated-by: Prototype <M> — <Title>'
+  :library-titles "futon*/library/**/*.flexiarg @title"
+  :prototype-names "GET /api/alpha/entities?type=devmap/prototype (73 names; every :prototype-id verified present on BOTH Dionysus and Zone)"}
+ :method
+ {:primary "join the sigil-id's (okipona, hanzi) against patterns-index.tsv, then require the index row's own title to match the sigil title after normalisation (truncate at '->', drop parentheticals, casefold)"
+  :fallback "library @title match, used only where the sigil is absent from the index (4 rows)"
+  :note "the exact-title join failed on (a) titles truncated at '->' e.g. 'HDM - Deep Storage' vs '@title HDM - Deep Storage -> Active Graph', and (b) abbreviated parentheticals e.g. '(I2)' vs '(Invariant 2)'"}
+ :or-p4ng-ruling
+ {:by "Joe, 2026-08-23" :rule "where an or/ and a p4ng/ pattern are twins, the p4ng/ twin is the duplicate and is to be deleted; or/ survives"
+  :applied-to "the 6 rows whose or/ and p4ng/ twins shared BOTH sigil and title — now resolved to or/, :by :human"
+  :second-ruling "Joe 2026-08-23 (via claude-17): do not worry about sigil collision — just dedupe the patterns. The 6 twin-sigil rows are resolved to or/ (:by :human); all 21 p4ng/ twins are to be deleted; an or/ survivor may carry two sigils."
+  :deletion-scope-note "21 p4ng/ patterns in the index have an or/ twin (10 share the twin's sigil, 11 hold a distinct one). Exactly 1 of the 326 already-applied relations targets a twin: p4ng/method-documentary-split -> or/method-documentary-split."}
+ :counts {:total 79 :pattern 32 :prototype 47 :twin-sigil-needs-ruling 0 :retire 0}
+ :retirements-note "none by absence. 'Meme Layer (ANN Search)' is prototype f3/p3 in the sigil index."
+ :rows
+ [
+  {:sigil-id "sigil|ante|也" :pattern-id "or/overlay-bridges"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Overlay Bridges — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|ante|了" :pattern-id "or/readiness-windows"
+   :relation-type :pattern/has-sigil :by :human
+   :note "Readiness Windows — Joe 2026-08-23 (second ruling): dedupe the patterns, do not worry about sigil collision; the p4ng/ twin p4ng/readiness-windows is deleted and its sigil MOVES to or/readiness-windows (an or/ pattern may carry two sigils)"}
+  {:sigil-id "sigil|ante|支" :pattern-id "or/overlay-bridges"
+   :relation-type :pattern/has-sigil :by :human
+   :note "Overlay Bridges — Joe 2026-08-23 (second ruling): dedupe the patterns, do not worry about sigil collision; the p4ng/ twin p4ng/overlay-bridges is deleted and its sigil MOVES to or/overlay-bridges (an or/ pattern may carry two sigils)"}
+  {:sigil-id "sigil|kasi|田" :pattern-id "or/identifier-garden"
+   :relation-type :pattern/has-sigil :by :human
+   :note "Identifier Garden — Joe 2026-08-23: the p4ng/ twin is the duplicate, or/ wins (twin p4ng/identifier-garden to be deleted)"}
+  {:sigil-id "sigil|li|工" :pattern-id "or/license-laddering"
+   :relation-type :pattern/has-sigil :by :human
+   :note "License Laddering — Joe 2026-08-23: the p4ng/ twin is the duplicate, or/ wins (twin p4ng/license-laddering to be deleted)"}
+  {:sigil-id "sigil|lukin|介" :pattern-id "or/attribution-forward-review"
+   :relation-type :pattern/has-sigil :by :human
+   :note "Attribution-Forward Review — Joe 2026-08-23 (second ruling): dedupe the patterns, do not worry about sigil collision; the p4ng/ twin p4ng/attribution-forward is deleted and its sigil MOVES to or/attribution-forward-review (an or/ pattern may carry two sigils)"}
+  {:sigil-id "sigil|ma|只" :pattern-id "or/dream-audit-per-release"
+   :relation-type :pattern/has-sigil :by :human
+   :note "DREAM Audit (Per Release) — Joe 2026-08-23 (second ruling): dedupe the patterns, do not worry about sigil collision; the p4ng/ twin p4ng/dream-audit is deleted and its sigil MOVES to or/dream-audit-per-release (an or/ pattern may carry two sigils)"}
+  {:sigil-id "sigil|ma|旦" :pattern-id "or/readiness-windows"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Readiness Windows — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|ni|友" :pattern-id "or/maintainer-care"
+   :relation-type :pattern/has-sigil :by :human
+   :note "Maintainer Care — Joe 2026-08-23: the p4ng/ twin is the duplicate, or/ wins (twin p4ng/maintainer-care to be deleted)"}
+  {:sigil-id "sigil|ni|史" :pattern-id "or/retirement-shelf"
+   :relation-type :pattern/has-sigil :by :human
+   :note "Retirement Shelf — Joe 2026-08-23 (second ruling): dedupe the patterns, do not worry about sigil collision; the p4ng/ twin p4ng/retirement-shelf is deleted and its sigil MOVES to or/retirement-shelf (an or/ pattern may carry two sigils)"}
+  {:sigil-id "sigil|palisa|工" :pattern-id "or/quality-by-design-crowd"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Quality-by-Design Crowd — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|pali|亏" :pattern-id "or/peripheral-to-core-pathways"
+   :relation-type :pattern/has-sigil :by :human
+   :note "Peripheral-to-Core Pathways — Joe 2026-08-23 (second ruling): dedupe the patterns, do not worry about sigil collision; the p4ng/ twin p4ng/peripheral-to-core is deleted and its sigil MOVES to or/peripheral-to-core-pathways (an or/ pattern may carry two sigils)"}
+  {:sigil-id "sigil|pata|人" :pattern-id "or/citizen-co-learning-track"
+   :relation-type :pattern/has-sigil :by :human
+   :note "Citizen Co-Learning Track — Joe 2026-08-23: the p4ng/ twin is the duplicate, or/ wins (twin p4ng/citizen-colearning to be deleted)"}
+  {:sigil-id "sigil|seli|石" :pattern-id "or/friction-as-feature"
+   :relation-type :pattern/has-sigil :by :human
+   :note "Friction-as-Feature — Joe 2026-08-23: the p4ng/ twin is the duplicate, or/ wins (twin p4ng/friction-as-feature to be deleted)"}
+  {:sigil-id "sigil|weka|节" :pattern-id "or/tune-audits-quarterly"
+   :relation-type :pattern/has-sigil :by :human
+   :note "Tune Audits (Quarterly) — Joe 2026-08-23: the p4ng/ twin is the duplicate, or/ wins (twin p4ng/tune-audits to be deleted)"}
+  {:sigil-id "sigil|alasa|正" :prototype-id "f1/p8"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Pilot Storage (fulab, MMCA) — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|ala|乃" :pattern-id "hdm/deep-storage-to-active-graph"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "HDM - Deep Storage — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|ala|久" :prototype-id "f4/p4"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Graph Storage Layer — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|ala|也" :prototype-id "f4/p7"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Literary Interface — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|ala|叉" :prototype-id "f6/p7"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "StackExchange Import — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|ala|双" :prototype-id "f4/p3"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Design Pattern Templates — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|ala|无" :prototype-id "f6/p8"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Agent Protocol — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|ale|及" :prototype-id "f1/p0"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "HTTP API (Canonical Interface) — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|ale|无" :pattern-id "futon-theory/all-or-nothing"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "All-or-Nothing Integrity (I2) — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|awen|功" :pattern-id "futon-theory/local-gain-persistence"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Local Gain Persistence — library @title (sigil absent from index)"}
+  {:sigil-id "sigil|e|小" :prototype-id "f6/p9"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Reusable Mathematical Models — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|ilo|下" :prototype-id "f3/p10"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Proof-Theoretic Digest/Compression — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|ilo|平" :prototype-id "f3/p11"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Stabilization & Hub Demonstration — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|ilo|才" :prototype-id "f0/p2"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "F0-F2 Interface (Agent Perception) — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|insa|习" :prototype-id "f6/p5"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Interactive Tutorials — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|ken|入" :prototype-id "f1/p5"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Open-World Ingest — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|kiwen|本" :prototype-id "f3/p7"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Xenotype CT Attachment — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|kulupu|人" :pattern-id "futon-theory/coordination-protocol"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Coordination Protocol — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|lili|少" :pattern-id "futon-theory/minimum-viable-events"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Minimum Viable Events (A5) — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|linja|双" :pattern-id "futon-theory/mission-dependency"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Mission Dependency — library @title (sigil absent from index)"}
+  {:sigil-id "sigil|lipu|业" :prototype-id "f3/p4"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Mission Queue & Supervisor — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|lipu|义" :prototype-id "f1/p4"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "NLP Interface — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|lipu|忆" :prototype-id "f3/p1"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Sidecar Audit Trail — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|lipu|文" :prototype-id "f0/p4"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "F0-F4 Interface (Hypertext Navigation) — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|li|另" :prototype-id "f5/p4"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Transfer Milestone — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|lon|乡" :prototype-id "f2/p2"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Predictive Coding Microcycle — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|lon|亏" :prototype-id "f0/p0"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Core Infrastructure — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|lukin|习" :prototype-id "f3/p0"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Portal Query Layer — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|lukin|入" :prototype-id "f0/p7"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "F0-F7 Interface (Transparency/Simulation) — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|lukin|示" :pattern-id "futon-theory/rapid-debugging"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Rapid Debugging (I4) — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|lukin|见" :prototype-id "f1/p7"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Query Workflows — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|moku|乡" :prototype-id "f2/p4"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Policy Layer Harness — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|monsi|已" :prototype-id "f6/p0"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Informal Argument Support — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|nanpa|计" :pattern-id "futon-theory/counter-ratchet"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Counter-Ratchet (I2) — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|nanpa|门" :pattern-id "futon-theory/progress-signal"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Progress Signal — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|nasin|习" :prototype-id "f7/p2"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Scenario Simulations — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|nasin|口" :pattern-id "futon-theory/mission-interface-signature"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Mission Interface Signature — library @title (sigil absent from index)"}
+  {:sigil-id "sigil|nasin|止" :prototype-id "f3/p2"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Compass GFE Alignment — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|nimi|乡" :prototype-id "f2/p11"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Curriculum & Behaviour Cards — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|palisa|门" :pattern-id "futon-theory/error-hierarchy"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Error Hierarchy (I3) — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|pana|予" :prototype-id "f3/p8"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Futon3a→Futon0 Telemetry Bridge (Raw) — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|pini|久" :prototype-id "f4/p0"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Self-Documenting Foundations — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|pi|王" :pattern-id "futon-theory/mission-scoping"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Mission Scoping — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|poka|本" :pattern-id "futon-theory/durability-first"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Durability First (I0) — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|poki|文" :prototype-id "f1/p3"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Graph-Memory Schema & Mirroring — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|pona|正" :prototype-id "f0/p3"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "F0-F3 Interface (Verification Visibility) — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|sewi|六" :prototype-id "f2/p3"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Hunger & Precision Dynamics — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|sike|予" :prototype-id "f3/p6"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Library Evidence Feedback — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|sike|己" :prototype-id "f5/p3"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "MetaCA Demonstrator — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|sike|马" :pattern-id "futon-theory/mission-lifecycle"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Mission Lifecycle — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|sina|止" :prototype-id "f1/p2"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Invariant Enforcement — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|sina|田" :prototype-id "f6/p4"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Reasoning Map — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|sitelen|双" :pattern-id "futon-theory/curry-howard-operational"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Curry-Howard Operational — library @title (sigil absent from index)"}
+  {:sigil-id "sigil|sona|久" :prototype-id "f4/p2"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Scholium Mode — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|sona|忆" :prototype-id "f3/p3"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Meme Layer (ANN Search) — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|suno|日" :prototype-id "f3/p5"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Morning Review Protocol — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|suno|白" :pattern-id "hdm/opacity-to-transparency"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "HDM - Opacity — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|tan|已" :prototype-id "f2/p6"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Pivot Stream & Analyzer — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|tenpo|己" :prototype-id "f7/p0"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Hyperreal Enterprises as Seed Institution — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|toki|乃" :prototype-id "f6/p2"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Cross-Domain Reasoning Patterns — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|walo|四" :prototype-id "f2/p1"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Observation Layer Hardening — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|wan|一" :pattern-id "futon-theory/single-source-of-truth"
+   :relation-type :pattern/has-sigil :by :title-normalised
+   :note "Single Source of Truth (I1) — sigil-index join, index title agrees"}
+  {:sigil-id "sigil|wawa|习" :prototype-id "f2/p12"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Viriya Metrics — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+  {:sigil-id "sigil|wawa|二" :prototype-id "f3/p9"
+   :relation-type :prototype/has-sigil :by :title-normalised
+   :note "Proof Hooks (futon1/futon2 Export) — devmap prototype, never a pattern; sigil-index join, index title agrees"}
+ ]}
