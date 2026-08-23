@@ -1,0 +1,207 @@
+{:applied-at "2026-08-23T12:55:27.792768Z"
+ :host "zone"
+ :manifest-commit "350634456ce667e5a712a41cf5753652a95b18e6"
+ :receipt-recovery "The first apply process completed all atomic twin batches but was interrupted during the first slow missing-entity point read. This idempotent resume performed no writes, re-observed all postconditions, and uses the pre-state emitted by its dry run immediately before apply."
+ :concurrent-observation {:event "sigil-resolution-apply-landed-during-dedupe"
+  :evidence "has-sigil 326->358 and matched 326->356 while all dedupe structural deltas and endpoint checks passed"}
+ :repoint {:verified true}
+ :selected 316
+ :retracted 316
+ :expected {:library-count 1351
+  :clause-count 10195
+  :sigil-matched 326
+  :deleted-sigiled 1
+  :survivor-already-sigiled false
+  :relation-counts {:pattern/has-because 1249
+   :pattern/has-conclusion 1343
+   :pattern/has-context 1310
+   :pattern/has-however 1319
+   :pattern/has-if 1301
+   :pattern/has-next-steps 1116
+   :pattern/has-sigil 326
+   :pattern/has-then 1345}}
+ :before {:library-count 1372
+  :clause-count 10342
+  :relation-counts {:pattern/has-because 1270
+   :pattern/has-conclusion 1364
+   :pattern/has-context 1331
+   :pattern/has-however 1340
+   :pattern/has-if 1322
+   :pattern/has-next-steps 1137
+   :pattern/has-sigil 326
+   :pattern/has-then 1366}
+  :sigil-join {:matched 326
+   :patterns 1372
+   :relation-srcs 326}}
+ :after {:library-count 1351
+  :clause-count 10195
+  :relation-counts {:pattern/has-because 1249
+   :pattern/has-conclusion 1343
+   :pattern/has-context 1310
+   :pattern/has-however 1319
+   :pattern/has-if 1301
+   :pattern/has-next-steps 1116
+   :pattern/has-sigil 358
+   :pattern/has-then 1345}
+  :sigil-join {:patterns 1351
+   :relation-srcs 356
+   :matched 356}}
+ :relation-deltas {:pattern/has-because -21
+  :pattern/has-conclusion -21
+  :pattern/has-context -21
+  :pattern/has-however -21
+  :pattern/has-if -21
+  :pattern/has-next-steps -21
+  :pattern/has-sigil 32
+  :pattern/has-then -21}
+ :per-twin [{:p4ng-id "p4ng/attribution-forward"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/bridge-before-portal"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/citizen-colearning"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/dream-audit"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/fit-for-use"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/five-p-rhythm"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/friction-as-feature"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/identifier-garden"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/license-as-story"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/license-laddering"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/maintainer-care"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/method-documentary-split"
+   :documents 16
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/overlay-bridges"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/peripheral-to-core"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/platform-choreography"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/quality-by-design"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/readiness-windows"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/retirement-shelf"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/snapshot-with-story"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/tune-audits"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}
+  {:p4ng-id "p4ng/two-stage-fidelity"
+   :documents 15
+   :status 200
+   :ok true
+   :evidence "all manifest documents absent after resume"}]
+ :p4ng-statuses {:p4ng/attribution-forward 404
+  :p4ng/bridge-before-portal 404
+  :p4ng/citizen-colearning 404
+  :p4ng/dream-audit 404
+  :p4ng/fit-for-use 404
+  :p4ng/five-p-rhythm 404
+  :p4ng/friction-as-feature 404
+  :p4ng/identifier-garden 404
+  :p4ng/license-as-story 404
+  :p4ng/license-laddering 404
+  :p4ng/maintainer-care 404
+  :p4ng/method-documentary-split 404
+  :p4ng/overlay-bridges 404
+  :p4ng/peripheral-to-core 404
+  :p4ng/platform-choreography 404
+  :p4ng/quality-by-design 404
+  :p4ng/readiness-windows 404
+  :p4ng/retirement-shelf 404
+  :p4ng/snapshot-with-story 404
+  :p4ng/tune-audits 404
+  :p4ng/two-stage-fidelity 404}
+ :or-survivor-statuses {:or/attribution-forward-review 200
+  :or/bridge-before-portal 200
+  :or/citizen-co-learning-track 200
+  :or/dream-audit-per-release 200
+  :or/fit-for-use-stars 200
+  :or/five-p-rhythm-for-impact 200
+  :or/friction-as-feature 200
+  :or/identifier-garden 200
+  :or/license-as-story 200
+  :or/license-laddering 200
+  :or/maintainer-care 200
+  :or/method-documentary-split 200
+  :or/overlay-bridges 200
+  :or/peripheral-to-core-pathways 200
+  :or/platform-choreography 200
+  :or/quality-by-design-crowd 200
+  :or/readiness-windows 200
+  :or/retirement-shelf 200
+  :or/snapshot-with-story-doi 200
+  :or/tune-audits-quarterly 200
+  :or/two-stage-fidelity 200}
+ :untouched-sample-statuses {:p4ng/agent-as-mana-unit-was-the-wrong-unit 200
+  :p4ng/agent-command-pattern 200
+  :p4ng/agent-decorator-pattern 200}
+ :failed []}
