@@ -1,0 +1,34 @@
+{:applied-at "2026-08-23T12:44:46.934482Z"
+ :host "zone"
+ :input-sha "b2e0986f33f0f521281f3c5c6dd41f927b6af73b"
+ :resolution
+ {:method
+  {:primary "join the sigil-id's (okipona, hanzi) against patterns-index.tsv, then require the index row's own title to match the sigil title after normalisation (truncate at '->', drop parentheticals, casefold)"
+   :fallback "library @title match, used only where the sigil is absent from the index (4 rows)"
+   :note "the exact-title join failed on titles truncated at '->' and abbreviated parentheticals"}
+  :or-p4ng-ruling
+  {:rule "where an or/ and a p4ng/ pattern are twins, the p4ng/ twin is the duplicate and is to be deleted; or/ survives"
+   :second-ruling "do not worry about sigil collision — just dedupe the patterns; an or/ survivor may carry two sigils"}}
+ :attempted 79
+ :by-type
+ {:pattern/has-sigil {:attempted 32 :written 32 :no-op 0 :failed []}
+  :prototype/has-sigil {:attempted 47 :written 47 :no-op 0 :failed []}}
+ :failed []
+ :verify
+ {:before
+  {:sigil-join {:patterns 1372 :relation-srcs 326 :matched 326}
+   :relation-counts {:pattern/has-sigil 326 :prototype/has-sigil 142}
+   :prototype-relation-shape
+   {:src "#uuid-literal-string" :dst "#uuid-literal-string"}}
+  :after
+  {:sigil-join {:patterns 1351 :relation-srcs 356 :matched 356}
+   :relation-counts {:pattern/has-sigil 358 :prototype/has-sigil 189}}
+  :pattern-source-note
+  "32 relations add 30 distinct pattern sources: or/overlay-bridges and or/readiness-windows each receive two sigils; concurrent p4ng dedupe changed the library population from 1372 to 1351"
+  :first-prototype
+  {:prototype-id "f1/p8"
+   :entity-id "#uuid \"8243b213-426c-4776-9135-896a78a3ef78\""
+   :stored-src "#uuid \"8243b213-426c-4776-9135-896a78a3ef78\""}}
+ :idempotence
+ {:second-run {:written 0 :no-op 79 :failed 0}
+  :receipt "/tmp/codex12-sigil-second-run.edn"}}
