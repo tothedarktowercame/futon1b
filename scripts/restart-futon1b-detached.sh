@@ -64,6 +64,7 @@ else
     say "  *** store did not answer /health?deep=true - ABORTING ***"
     say "RESULT=aborted"; exit 3
   fi
+  say "  CENSUS_MODE=full-census"
   echo "    $BEFORE" >> "$R"
 fi
 
