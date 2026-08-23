@@ -229,19 +229,32 @@
                          {:table table :id id})))
                distinct
                vec)
+          ;; Resolve each retracted hyperedge's type BEFORE the delete, so only
+          ;; that type's cached windows are dropped. Unresolved is not the same
+          ;; as "no types": `safe-q` swallows a tolerated error and returns
+          ;; EMPTY (see the hydration comment below), and a doc that is already
+          ;; gone also reads empty. Either way we would skip invalidation and
+          ;; keep serving a cached window that still contains the deleted edge
+          ;; -- stale data, which is strictly worse than the slowness this
+          ;; scoping exists to fix. So track resolution failure explicitly and
+          ;; fall back to the full flush: the cost of being wrong here is one
+          ;; slow rebuild, the cost of being wrong the other way is a lie.
           retracted-hyperedge-types
-          (->> documents
-               (keep (fn [{:keys [table id]}]
-                       (when (= :hyperedges table)
-                         (:hx/type
-                          (first
-                           (fxt/safe-q
-                            node
-                            (fxt/pq '[p-id]
-                                    '(-> (from :hyperedges [hx/type])
-                                         (where (= xt/id p-id)))
-                                    id)))))))
-               set)]
+          (reduce (fn [acc {:keys [table id]}]
+                    (if-not (= :hyperedges table)
+                      acc
+                      (if-let [t (:hx/type
+                                  (first
+                                   (fxt/safe-q
+                                    node
+                                    (fxt/pq '[p-id]
+                                            '(-> (from :hyperedges [hx/type])
+                                                 (where (= xt/id p-id)))
+                                            id))))]
+                        (update acc :types conj t)
+                        (assoc acc :unresolved? true))))
+                  {:types #{} :unresolved? false}
+                  documents)]
       (with-memory-projection-mutation
         node
         (fn []
@@ -255,8 +268,10 @@
             (when (seq remaining)
               (throw (gates/layered-error 0 :postcommit-retraction-failed
                                           {:remaining remaining}))))
-          (doseq [t retracted-hyperedge-types]
-            (invalidate-hyperedge-query-cache! t))
+          (if (:unresolved? retracted-hyperedge-types)
+            (invalidate-hyperedge-query-cache!)
+            (doseq [t (:types retracted-hyperedge-types)]
+              (invalidate-hyperedge-query-cache! t)))
           (doseq [{:keys [table id]} documents
                   :when (= :hyperedges table)]
             (refresh-memory-projection-component! node id))
@@ -889,7 +904,18 @@
                :count-exact? (boolean include-total?)}
         next-cursor (assoc :next-cursor next-cursor))))))
 
-(def ^:private max-hyperedge-query-cache-entries 48)
+(def ^:private max-hyperedge-query-cache-entries
+  "Entries retained before FIFO eviction. Sized against the WORST case, not the
+  typical one: `cacheable?` below admits any window up to limit 1000, and the
+  widest live type (`mission-scope/pattern`, ~2.5 KB/doc) measured 239 KB at
+  limit 100 -- so a single entry can hold ~2.4 MB, not the ~240 KB a page-sized
+  window suggests. 48 x 2.4 MB is ~115 MB worst case, under 3% of this JVM's
+  4 GB heap, which was ExitOnOOM-killed once on 2026-08-23 and is not to be
+  sized optimistically. One `cascade-real/graph` walk creates 20 entries (the
+  key includes `:after`), so 48 holds two concurrent walks -- which is the point:
+  the previous ceiling of 32 was BELOW that and full-flushed on reaching it, so
+  the cache destroyed itself mid-walk with no writes involved at all."
+  48)
 
 (defonce ^:private !hyperedge-query-cache
   (atom {:entries {}
