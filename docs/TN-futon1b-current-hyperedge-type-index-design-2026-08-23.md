@@ -225,3 +225,86 @@ If freshness cannot be proven from normalized per-partition processed offsets
 for every write surface, do not ship an in-memory answer. In that case the
 general log-maintained derived-index facility is the next honest design, not a
 cache that can silently omit new edges.
+
+## Operational addendum (claude-13, 2026-08-23): the pgwire port is EPHEMERAL
+
+Every measurement in this note, and in
+`TN-futon1b-sql-in-hyperedge-hydration-2026-08-23.md`, cites pgwire at
+`127.0.0.1:34257`. **That port is gone.** futon1b was restarted at 20:13 to
+activate the cache-scoping fix, and XTDB's pgwire listener came back on a
+different ephemeral port. Verified after the restart:
+
+```
+$ ss -ltnp | grep 783493          # 783493 = the futon1b-zone.service main pid
+127.0.0.1:44505   java,pid=783493   <- pgwire, was 34257
+0.0.0.0:7073      java,pid=783493   <- HTTP
+0.0.0.0:7072      java,pid=783493   <- health
+$ python3 /tmp/pgprobe.py "SELECT COUNT(*) FROM hyperedges" 60
+510134
+```
+
+So the `ConnectionRefusedError` recorded above was **not** the store being
+down — it was this. The author reported the failure honestly and refused to
+substitute a fixture number, which was the right call; the cause was simply
+not discoverable from inside that packet.
+
+**Consequences.**
+
+- Any doc, script, packet, or memory note that hardcodes `34257` is stale after
+  every restart. Known: this note, the SQL-IN note, and
+  `futon3c/holes/excursions/E-fetch-entity-miss-path.md`.
+- HTTP (`:7072`/`:7073`) is pinned and survives restarts; pgwire is not. Tools
+  that verify *independently of the HTTP layer* — which is the whole point of
+  probing pgwire — are exactly the ones that break on restart.
+- Discover it, do not hardcode it:
+  `ss -ltnp | grep "$(systemctl --user show futon1b-zone.service -p MainPID --value)"`
+  and take the 127.0.0.1 port that is not 7072/7073.
+- The durable fix is to pin XTDB's pgwire port in futon1b's node config so it is
+  stable across restarts, and to have the probe scripts resolve it from the
+  service pid rather than a literal. Neither is done; both are small.
+
+Cardinalities refreshed on the new port, for the record: **510,134 hyperedges**
+(was 509,498 pre-restart; live writes), 258 types.
+
+## Review correction (claude-13, 2026-08-23): the 5.2 s lower bound is not reachable
+
+The design above is sound and the recommendation stands. The **headline saving
+is overstated by roughly 3x**, and since "27.2 s -> ~5.2 s" is the number that
+will get quoted, it needs correcting before it becomes the bar someone is held to.
+
+**The error is a category mix, not optimism.** The note subtracts 20 pages x
+1.1 s = 22 s of scan cost from 27.2 s of measured *wall clock*. But 27.2 s is a
+**two-worker** number: the scans are already running in parallel, so their
+contribution to wall clock is about half their total cost. Sequential savings
+cannot be subtracted from a parallel wall time.
+
+**Re-measured after the 20:13 restart**, on the new pgwire/HTTP state, using
+distinct limits to force cold windows:
+
+| read | cost |
+|---|---:|
+| `cascade/hole-target` (0 rows) -- pure scan, no hydration | 0.62 / 0.65 / 0.64 s |
+| `mission-scope/pattern` limit 97/98/99 -- scan + hydration | 1.68 / 1.91 / 2.11 s |
+
+So per ~100-row page: **scan ~0.64 s, hydration ~1.26 s**. Two things follow.
+
+1. The 1.1 s scan floor quoted throughout is itself stale — post-restart it is
+   **0.64 s**, on a fresh heap with less GC pressure. The scan is ~34% of page
+   cost, not ~45%.
+2. The realistic prediction is: 21 pages x 1.26 s = 26.5 s of residual work
+   across 2 workers, and the longest cursor chain (`mission-scope/pattern`,
+   10 pages) is 10 x 1.26 = 12.6 s. Both bounds land near **13 s**.
+
+**So the honest costing is 27.2 s -> ~13-15 s: a halving, not an 80% cut.**
+
+That is still clearly worth building — it is the largest remaining cold-path
+win, and unlike client parallelism it does not concentrate load on a 2-permit
+semaphore and starve other readers (which is what blocked the O5 landing
+earlier today). But the implementation packet should carry ~13-15 s as its
+acceptance bar. A bar of 5.2 s would fail a correct implementation.
+
+Acceptance item 3 above should read: **cold type selection below 50 ms/page,
+and cold cascade wall time at or below ~15 s, with the actual number reported.**
+The rest of the acceptance bar — the forced-scan oracle, the temporal bypass,
+the watermark gate, the memory ceilings, the p95 write budget — is well
+specified and should be kept as written.
