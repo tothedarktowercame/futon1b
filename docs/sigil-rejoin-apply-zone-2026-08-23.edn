@@ -1,0 +1,1 @@
+{:applied-at "2026-08-23T11:51:08.738454Z" :host "zone" :input-sha "755a9a75f438f9efdb99909cf3e03f945a295d96" :attempted 326 :written 326 :no-op 0 :failed [] :verify {:before {:sigil-join {:patterns 1372 :relation-srcs 1506 :matched 0}} :after {:sigil-join {:patterns 1372 :relation-srcs 1832 :matched 326}} :relation-count 2106 :sigiled-entities 326}}
