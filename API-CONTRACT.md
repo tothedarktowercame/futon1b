@@ -518,9 +518,14 @@ Success **200**: `{:ok true :count N :documents [...]}`.
 - `type` **required** (string like `"pattern/library"`; missing → L4 400).
   `limit` parsed with `Long/parseLong` **unguarded** (bad value → 500);
   default effectively 1 (`max 1 (or limit 1)`).
-- Special case: `type=pattern/library` only returns patterns that have a
-  `:pattern/has-sigil` relation to a `:pattern/sigil` entity. De-dupes by
-  `:entity/name`, sorts by name, takes `limit`, normalizes.
+- De-dupes by `:entity/name`, sorts by name, takes `limit`, normalizes.
+- `type=pattern/library` (changed 2026-08-23): returns the whole library.
+  Each entity carries `:sigiled? <bool>` (has a `:pattern/has-sigil` relation
+  whose `:relation/src` equals its `:entity/id`), and the envelope carries
+  `:sigil-join {:patterns n :relation-srcs m :matched k}`. `:matched 0` with
+  `:patterns > 0` means the join is broken (the 08-14 slug re-ingest orphaned
+  UUID-keyed relations), not that the library is empty. Before this change
+  the join was a membership filter and Zone served `{:entities []}` / 200.
 - **200** `{:profile .. :type "pattern/library" :entities
   [<normalized-entity> ...]}` (`:type` echoed as string without colon).
 

@@ -333,28 +333,43 @@
 
 (defn entities-latest
   "GET /api/alpha/entities/latest — generic branch + the pattern/library
-  sigil special-case (contract §5)."
+  sigil annotation (contract §5).
+
+  Until 2026-08-23 the sigil join was a MEMBERSHIP filter: a pattern without
+  a `:pattern/has-sigil` relation was not returned at all. After the 08-14
+  re-ingest rewrote pattern ids to slugs the UUID-keyed relations matched
+  nothing and Zone served `{:entities []}` with HTTP 200 — 1,372 rows present,
+  0 returned, no error a consumer could see. Sigil presence is now an
+  ATTRIBUTE (`:sigiled? true`) and the envelope carries `:sigil-join` so an
+  empty library and a broken join are distinguishable."
   [node {:keys [type limit]}]
   (let [t (normalize-type type)
         n (long (max 1 (or limit 1)))
         all (fxt/safe-q node (list '-> '(from :entities [*])
                              (list 'where (list '= 'entity/type t))))
-        sigiled (if (= t :pattern/library)
-                  (let [sigil-src-ids
+        library? (= t :pattern/library)
+        sigil-src-ids (when library?
                         (->> (fxt/safe-q node '(-> (from :relations [relation/type relation/src])
                                              (where (= relation/type :pattern/has-sigil))))
-                             (map :relation/src) set)]
-                    (filter #(contains? sigil-src-ids (:entity/id %)) all))
-                  all)
-        docs (->> sigiled
+                             (map :relation/src) set))
+        sigiled? (fn [d] (contains? sigil-src-ids (:entity/id d)))
+        matched (when library? (count (filter sigiled? all)))
+        docs (->> all
                   (group-by :entity/name)
                   (map (fn [[_ ds]] (first (sort-by #(str (:entity/id %)) ds))))
                   (sort-by #(str (:entity/name %)))
                   (take n)
-                  (mapv public-entity))]
-    {:profile "default"
-     :type (if t (subs (str t) 1) (str type))
-     :entities docs}))
+                  (mapv (fn [d] (cond-> (public-entity d)
+                                  library? (assoc :sigiled? (sigiled? d))))))]
+    (when (and library? (seq all) (zero? matched))
+      (println (format "[futon1b-sigil-join] BROKEN: %d pattern/library rows, %d has-sigil relation srcs, 0 matched"
+                       (count all) (count sigil-src-ids))))
+    (cond-> {:profile "default"
+             :type (if t (subs (str t) 1) (str type))
+             :entities docs}
+      library? (assoc :sigil-join {:patterns (count all)
+                                   :relation-srcs (count sigil-src-ids)
+                                   :matched matched}))))
 
 (defn entities-query
   "Backend-neutral typed entity read. Returns raw entity documents so callers
@@ -613,9 +628,12 @@
       (list 'from :hyperedges opts)
       (list 'from :hyperedges bindings))))
 
-(defn- fetch-hyperedge-doc [node id temporal]
-  (fxt/q1 node (list '-> (hyperedge-from '[*] temporal)
-                     (list 'where (list '= 'xt/id id)))))
+(defn- fetch-hyperedge-doc
+  ([node id temporal]
+   (fetch-hyperedge-doc node id temporal fxt/safe-q))
+  ([node id temporal query-fn]
+   (first (query-fn node (list '-> (hyperedge-from '[*] temporal)
+                               (list 'where (list '= 'xt/id id)))))))
 
 ;; PER-DOC HYDRATION, deliberately. Restored 2026-08-02 after the batched form
 ;; measured as a large regression on the live store.
@@ -651,12 +669,13 @@
 (defn- hydrate-hyperedge-window
   "Hydrate an ordered projected window with bounded concurrency, preserving
   order. Full hyperedge bodies never participate in the corpus-wide sort."
-  [node projected temporal]
+  [node projected temporal query-fn]
   (->> projected
        (partition-all 4)
        (mapcat (fn [batch]
                  (->> batch
-                      (mapv #(future (fetch-hyperedge-doc node (:xt/id %) temporal)))
+                      (mapv #(future (fetch-hyperedge-doc node (:xt/id %) temporal
+                                                         query-fn)))
                       (mapv deref))))
        (keep identity)))
 
@@ -668,7 +687,8 @@
   otherwise (contract §4)."
   [node {:keys [type end limit repo source-file after latest? include-total?]
          :or {include-total? true}
-         :as opts}]
+         :as opts}
+   query-fn]
   (let [temporal (select-keys opts [:valid-as-of :system-as-of])]
   (cond
     end
@@ -683,7 +703,7 @@
                           (fn [target]
                             (let [clauses (cond-> [(list '= 'ep target)]
                                             t (conj (list '= 'hx/type t)))]
-                              (fxt/safe-q
+                              (query-fn
                                node
                                (list '->
                                      (hyperedge-from
@@ -698,7 +718,7 @@
                          vals
                          (sort-by #(str (:xt/id %)))
                          (take n))
-          docs (hydrate-hyperedge-window node projected temporal)
+          docs (hydrate-hyperedge-window node projected temporal query-fn)
           out (mapv #(dissoc % :xt/id) docs)]
       {:hyperedges out :count (count out)})
 
@@ -719,7 +739,7 @@
                        (conj (list 'order-by {:val 'xt/id :dir :asc})
                              (list 'limit limit)))
           bounded? (or latest? (and (int? limit) (pos? limit)))
-          selected (fxt/safe-q
+          selected (query-fn
                     node
                     (cons '->
                           (cons (hyperedge-from
@@ -729,15 +749,15 @@
                                  temporal)
                                 query-tail)))
           docs (if bounded?
-                 (hydrate-hyperedge-window node selected temporal)
+                 (hydrate-hyperedge-window node selected temporal query-fn)
                  selected)
           total (when include-total?
                   (if (or latest? repo source-file)
                     (count docs)
-                    (count (fxt/safe-q node (list '->
-                                                  (hyperedge-from
-                                                   '[xt/id hx/type] temporal)
-                                                  (list 'where (list '= 'hx/type t)))))))
+                    (count (query-fn node (list '->
+                                                (hyperedge-from
+                                                 '[xt/id hx/type] temporal)
+                                                (list 'where (list '= 'hx/type t)))))))
           prop-get (fn [d k kw-col]
                      (or (get d kw-col)
                          (get-in d [:hx/props (keyword k)])
@@ -786,22 +806,24 @@
 (defn hyperedges-query
   "Read hyperedges, materializing bounded type windows that explicitly waive an
   exact total. The cache is invalidated synchronously by every server mutation."
-  [node opts]
-  (let [{:keys [type limit include-total?]} opts
-        ;; Only windows at or below the served ceiling are retained; anything
-        ;; larger is served uncached (E-futon1b-gc-wedge).
-        cacheable? (and type (int? limit) (pos? limit) (<= limit 1000)
-                        (false? include-total?))
-        cache-key [node opts]]
-    (if-not cacheable?
-      (hyperedges-query-uncached node opts)
-      (if-let [cached (get @!hyperedge-query-cache cache-key)]
-        cached
-        (let [result (hyperedges-query-uncached node opts)]
-          (when (>= (count @!hyperedge-query-cache) 32)
-            (reset! !hyperedge-query-cache {}))
-          (swap! !hyperedge-query-cache assoc cache-key result)
-          result)))))
+  ([node opts]
+   (hyperedges-query node opts fxt/safe-q))
+  ([node opts query-fn]
+   (let [{:keys [type limit include-total?]} opts
+         ;; Only windows at or below the served ceiling are retained; anything
+         ;; larger is served uncached (E-futon1b-gc-wedge).
+         cacheable? (and type (int? limit) (pos? limit) (<= limit 1000)
+                         (false? include-total?))
+         cache-key [node opts]]
+     (if-not cacheable?
+       (hyperedges-query-uncached node opts query-fn)
+       (if-let [cached (get @!hyperedge-query-cache cache-key)]
+         cached
+         (let [result (hyperedges-query-uncached node opts query-fn)]
+           (when (>= (count @!hyperedge-query-cache) 32)
+             (reset! !hyperedge-query-cache {}))
+           (swap! !hyperedge-query-cache assoc cache-key result)
+           result))))))
 
 (def ^:private max-memory-projection-endpoints 20)
 (def ^:private max-memory-projection-limit 100)

@@ -185,6 +185,18 @@
               (= ["Gizmo" "Sprocket" "Widget"] names) r))
     (let [r (req "GET" (str base "/api/alpha/entities/latest"))]
       (check! "latest without type -> 400" (= 400 (:status r)) r))
+    ;; 2026-08-23: the pattern/library sigil join is an annotation, not a
+    ;; membership filter — an orphaned join must not read as an empty library.
+    (let [_ (req "POST" ENT {:name "lib/alpha" :type "pattern/library"} ph)
+          _ (req "POST" ENT {:name "lib/beta" :type "pattern/library"} ph)
+          r (req "GET" (str base "/api/alpha/entities/latest?type=pattern/library&limit=10"))
+          b (:body r)]
+      (check! "pattern/library latest returns patterns without sigils"
+              (= ["lib/alpha" "lib/beta"] (mapv :name (:entities b))) r)
+      (check! "…each marked :sigiled? false, envelope reports broken/empty join"
+              (and (every? false? (map :sigiled? (:entities b)))
+                   (= {:patterns 2 :relation-srcs 0 :matched 0} (:sigil-join b)))
+              r))
 
     (println "— A3 relations")
     (let [r (req "POST" REL {:type "uses" :src "Widget"} ph)]
@@ -336,11 +348,18 @@
                    (= 1 (count (get-in r [:body :hyperedges]))))
               r))
     (let [calls (atom 0)
-          safe-q fxt/safe-q]
+          timed-q fxt/timed-q]
       (graph/invalidate-hyperedge-query-cache!)
-      (let [r (with-redefs [fxt/safe-q (fn [& args]
-                                         (swap! calls inc)
-                                         (apply safe-q args))]
+      (let [r (with-redefs [fxt/timed-q (fn [& args]
+                                          (swap! calls inc)
+                                          ;; Invoke the captured implementation's
+                                          ;; three-argument body directly: its
+                                          ;; two-argument body dispatches through
+                                          ;; the redefined Var and would count each
+                                          ;; logical query twice.
+                                          (if (= 2 (count args))
+                                            (apply timed-q (conj (vec args) 60))
+                                            (apply timed-q args)))]
                 (req "GET" (str HXS "?type=test/edge&limit=2&include-total=false")))]
         ;; 3 = one projection + one point lookup PER DOC. The per-doc fan-out is
         ;; deliberate (see hydrate-hyperedge-window): a batched `or` of id
@@ -352,7 +371,7 @@
                 (and (= 200 (:status r))
                      (= 2 (count (get-in r [:body :hyperedges])))
                      (= 3 @calls))
-                {:response r :safe-q-calls @calls})))
+                {:response r :timed-q-calls @calls})))
     (let [page-1 (req "GET" (str HXS "?type=test/edge&limit=1&include-total=false"))
           cursor-1 (get-in page-1 [:body :next-cursor])
           page-2 (req "GET" (str HXS "?type=test/edge&limit=1&after="
