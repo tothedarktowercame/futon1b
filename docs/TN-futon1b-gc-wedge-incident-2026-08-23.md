@@ -106,10 +106,30 @@ treats `count < limit` as end-of-corpus will read "no such evidence".
   poller) and make it loop on `:next-cursor` while `:incomplete` is true, with
   its own request budget. Acceptance: a test that feeds a stubbed
   `:incomplete` page and asserts continuation.
-- **Step 2 (futon1b):** push `subject-type`/`subject-id` into the XTQL
-  `where` as parameters on the nested map (e.g. `(= (. evidence/subject
-  ref/type) p-subject-type)` — verify the accessor form XTDB 2.1.0 accepts;
-  `evidence/subject` is a union, so test a doc whose subject is absent/non-map).
+- **Step 2 (futon1b): TESTED 2026-08-23 (codex-13) — NOT POSSIBLE, and the
+  form suggested below is actively dangerous. Do not re-dispatch this.**
+  Against XTDB 2.1.0, seeded with a valid map subject, an absent subject and a
+  scalar subject:
+
+  | form | result |
+  |---|---|
+  | `(. evidence/subject ref/type)` parameterized | **`:OK []`** — silently drops the valid matching doc |
+  | `(get evidence/subject :ref/type)` | `:ERROR` `get not applicable to types utf8 and keyword` |
+  | `(. evidence/subject :ref/type)` | `xtql/malformed-get` |
+  | `(get evidence/subject ref/type)` | `Not all variables in expression are in scope` |
+  | from-binding `{:evidence/subject {:ref/type subject-type}}` | `Not all variables in expression are in scope` |
+
+  The baseline projection returned all three union shapes correctly, so the
+  fixture was sound. The dot form — the one this note originally guessed — is
+  the worst outcome available: it **compiles and returns a false zero**. Had it
+  shipped, `subject-type=portfolio` queries would have answered "no such
+  evidence" with no error anywhere. Subject filtering, `requires-post-filtering?`
+  and `pattern-id` are therefore left as post-filters, and the scan ceiling from
+  follow-up (a) Step 1 is what has to carry this instead.
+
+  *(Original text, kept because it is what a future reader will be tempted to
+  retry: push `subject-type`/`subject-id` into the XTQL `where` as parameters on
+  the nested map, e.g. `(= (. evidence/subject ref/type) p-subject-type)`.)*
   Then `requires-post-filtering?` drops those keys and the scan ceiling is
   rarely reached. Acceptance: the wedged shape answers < 2 s with
   `:scanned` ≤ `limit`; `test-evidence-deadline` subject checks still pass.
