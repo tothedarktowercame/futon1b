@@ -232,6 +232,23 @@ projection; full bodies are hydrated only after the exact window is selected.
 - Corpus-wide read routes share two admission permits. A contending scan gets
   **503** `{:error :expensive-read-busy :retry-after-seconds 1}` while write,
   point-read, and `/health` workers remain available.
+- **Scan bound (2026-08-23, E-futon1b-gc-wedge).** Post-filtered reads
+  (`tags`, `subject-type`, `subject-id`, `pattern-id`, `include-ephemeral=false`)
+  scan at most 20,000 projected rows per request. Every response carries
+  `:scanned <n>`. If the ceiling stopped the scan before `limit` matches were
+  found, the response carries `:incomplete true`, `:scan/max 20000` and a
+  `:next-cursor` — **fewer entries than `limit` is then NOT end-of-corpus**;
+  continue from the cursor. Callers that treated a short page as exhaustion
+  must check `:incomplete`.
+- **Deadline.** Every store read runs under a 60 s JDBC deadline. Expiry is
+  **504** `{:error :query-deadline-exceeded :timeout-s 60 :retry-after-seconds 5}`
+  and releases the admission permit.
+- `/api/alpha/hyperedges` `limit` is capped at 1000 (**400** above it);
+  advance `after` to page.
+- Cheap `/health` reports `:permits/available`, `:permits/waiters`, `:holders`
+  (id, sanitized shape, trace-id, thread, age-ms), `:oldest-holder-ms`,
+  `:stats` (admitted/rejected/timed-out/errored/completed), `:heap`,
+  `:metaspace-used-mb` and `:gc` without taking a permit.
 - Current `/api/alpha/memory/projection` reads use the synchronously maintained
   in-memory index and do not consume or contend for a corpus-scan permit.
   Explicit bitemporal projection still uses the expensive-read admission gate.
