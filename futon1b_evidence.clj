@@ -112,7 +112,7 @@
     (let [ids (mapv :xt/id projected)
           placeholders (str/join "," (repeat (count ids) "?"))
           sql (str "SELECT * FROM evidence WHERE _id IN (" placeholders ")")
-          docs (fxt/safe-q node (into [sql] ids))
+          docs (fxt/timed-q node (into [sql] ids))
           by-id (into {} (map (juxt :xt/id identity)) docs)]
       (into [] (keep #(get by-id (:xt/id %))) projected))))
 
@@ -175,48 +175,83 @@
     evidence/session-id evidence/fork-of
     evidence/ephemeral? evidence/tags evidence/subject evidence/pattern-id])
 
-(defn- filter-clauses
-  [{:keys [type claim-type author session-id fork-of since before]}]
-  (let [clauses (cond-> []
-                  type (conj (list '= 'evidence/type type))
-                  claim-type (conj (list '= 'evidence/claim-type claim-type))
-                  author (conj (list '= 'evidence/author author))
-                  session-id (conj (list '= 'evidence/session-id session-id))
-                  fork-of (conj (list '= 'evidence/fork-of fork-of))
-                  since (conj (list '>= 'evidence/at since))
-                  before (conj (list '< 'evidence/at before)))]
-    clauses))
+(def ^:private filter-param-specs
+  "Pushdown filters in a FIXED order, each a [query-key param-sym clause-fn].
+  The set of present keys selects the query shape; the values ride as
+  parameters, so the compiled plan text is stable across requests."
+  [[:type 'p-type #(list '= 'evidence/type %)]
+   [:claim-type 'p-claim-type #(list '= 'evidence/claim-type %)]
+   [:author 'p-author #(list '= 'evidence/author %)]
+   [:session-id 'p-session-id #(list '= 'evidence/session-id %)]
+   [:fork-of 'p-fork-of #(list '= 'evidence/fork-of %)]
+   [:since 'p-since #(list '>= 'evidence/at %)]
+   [:before 'p-before #(list '< 'evidence/at %)]])
+
+(defn- pushdown-params
+  "[param-syms args where-clauses] for the pushdown filters present in Q, in
+  the fixed `filter-param-specs` order."
+  [q]
+  (let [present (filter (fn [[k]] (some? (get q k))) filter-param-specs)]
+    [(mapv second present)
+     (mapv (fn [[k]] (get q k)) present)
+     (mapv (fn [[_ sym f]] (f sym)) present)]))
 
 (defn- fetch-filtered
   "Evidence docs with type/claim-type/author/session-id AND since/before
   (lexicographic string compare — the contract's own semantics) pushed
-  down to XTQL. cols = '[*] for full docs, filter-cols for cheap scans."
+  down to XTQL as parameters. cols = '[*] for full docs, filter-cols for
+  cheap scans. Deadlined (E-futon1b-gc-wedge)."
   [node q cols]
-  (let [clauses (filter-clauses q)]
-    (if (seq clauses)
-      (fxt/safe-q node (list '-> (list 'from :evidence cols)
-                       (cons 'where clauses)))
-      (fxt/safe-q node (list 'from :evidence cols)))))
+  (let [[params args clauses] (pushdown-params q)
+        body (if (seq clauses)
+               (list '-> (list 'from :evidence cols) (cons 'where clauses))
+               (list 'from :evidence cols))]
+    (fxt/timed-q node (into [(list 'fn params body)] args))))
 
-(defn- fetch-newest-projected-page
-  "Fetch one compact newest-first keyset page. Full evidence bodies never
-  participate in the corpus-wide order-by."
-  [node q cursor page-size]
-  (let [[cursor-at cursor-id] cursor
-        clauses (cond-> (filter-clauses q)
+(def ^:private scalar-filter-cols
+  "filter-cols minus the nested `evidence/subject` union. Projecting the
+  union on every keyset page was the most expensive part of the page shape
+  (E-futon1b-gc-wedge); it is only needed when subject post-filtering is."
+  (vec (remove #{'evidence/subject} filter-cols)))
+
+(defn- page-query
+  "Build `[(fn [params..] <xtql>) args..]` for one newest-first keyset page.
+
+  Every filter value, both cursor components and the page limit are
+  parameters (XTQL `limit` accepts a param; checked against xtdb.xtql.plan
+  2.1.0). Two cursor variants only: first page and after-cursor. The
+  previous form embedded the cursor as literals, so every page compiled a
+  fresh plan and XTDB retained the Arrow field tree of each — 9.3M `Field`
+  objects in a 3.75 GB live heap on 2026-08-23."
+  [q cursor page-size cols]
+  (let [[f-params f-args f-clauses] (pushdown-params q)
+        params (-> f-params
+                   (into (if cursor '[p-cursor-at p-cursor-id] []))
+                   (conj 'p-limit))
+        args (-> f-args
+                 (into (if cursor (vec cursor) []))
+                 (conj page-size))
+        clauses (cond-> f-clauses
                   cursor (conj (list 'or
-                                     (list '< 'evidence/at cursor-at)
+                                     (list '< 'evidence/at 'p-cursor-at)
                                      (list 'and
-                                           (list '= 'evidence/at cursor-at)
-                                           (list '< 'xt/id cursor-id)))))
+                                           (list '= 'evidence/at 'p-cursor-at)
+                                           (list '< 'xt/id 'p-cursor-id)))))
         tail (cond-> []
                (seq clauses) (conj (cons 'where clauses))
                true (conj (list 'order-by
                                 {:val 'evidence/at :dir :desc}
                                 {:val 'xt/id :dir :desc})
-                          (list 'limit page-size)))]
-    (fxt/safe-q node (cons '-> (cons (list 'from :evidence filter-cols)
-                                     tail)))))
+                          (list 'limit 'p-limit)))
+        form (list 'fn params
+                   (cons '-> (cons (list 'from :evidence cols) tail)))]
+    (into [form] args)))
+
+(defn- fetch-newest-projected-page
+  "Fetch one compact newest-first keyset page under the JDBC deadline. Full
+  evidence bodies never participate in the corpus-wide order-by."
+  [node q cursor page-size cols]
+  (fxt/timed-q node (page-query q cursor page-size cols)))
 
 (declare apply-post-filters)
 
@@ -228,6 +263,14 @@
 (defn- row-cursor [row]
   [(str (:evidence/at row)) (str (:xt/id row))])
 
+(def ^:private max-scanned-rows-per-request
+  "Whole-request ceiling on projected rows scanned for post-filtered reads.
+  Per-page limits bounded each query but not the loop around them: a sparse
+  post-filter (rare tag, subject) walked the corpus inside one HTTP request.
+  On exhaustion the response carries what matched plus a cursor and
+  `:incomplete true`; the caller continues from the cursor."
+  20000)
+
 (defn- bounded-window
   "Return a cursor page of at most LIMIT exact matches, newest first.
 
@@ -238,35 +281,52 @@
   already used by /count, apply the authoritative filters, retain only the
   newest LIMIT identities, and hydrate that bounded window with point reads.
   This keeps the expensive full-document cardinality at LIMIT while preserving
-  exact API ordering and filter semantics."
+  exact API ordering and filter semantics.
+
+  The scan is bounded per request by `max-scanned-rows-per-request`; the
+  result map carries :scanned (projected rows read) and, when the ceiling
+  stopped the scan early, :incomplete true with :next-cursor set."
   [node q limit initial-cursor]
-  (loop [cursor initial-cursor
-         selected []]
-    (let [page-size (if (requires-post-filtering? q)
-                      scan-page-size
-                      (max 1 (- limit (count selected))))
-          page (vec (fetch-newest-projected-page node q cursor page-size))
-          matches (vec (apply-post-filters page q))
-          selected' (into selected matches)]
-      (cond
-        (>= (count selected') limit)
-        (let [window (vec (take limit selected'))
-              next-cursor (some-> window peek row-cursor)]
-          {:entries (mapv public-doc (hydrate-projected node window))
-           ;; A full page may end exactly at EOF. Returning its cursor is safe:
-           ;; the next request proves exhaustion with an empty page.
-           :next-cursor next-cursor})
+  (let [post-filter? (requires-post-filtering? q)
+        cols (if (or (:subject-type q) (:subject-id q))
+               filter-cols
+               scalar-filter-cols)]
+    (loop [cursor initial-cursor
+           selected []
+           scanned 0]
+      (let [page-size (if post-filter?
+                        scan-page-size
+                        (max 1 (- limit (count selected))))
+            page (vec (fetch-newest-projected-page node q cursor page-size cols))
+            scanned' (+ scanned (count page))
+            matches (vec (apply-post-filters page q))
+            selected' (into selected matches)]
+        (cond
+          (>= (count selected') limit)
+          (let [window (vec (take limit selected'))
+                next-cursor (some-> window peek row-cursor)]
+            {:entries (mapv public-doc (hydrate-projected node window))
+             ;; A full page may end exactly at EOF. Returning its cursor is safe:
+             ;; the next request proves exhaustion with an empty page.
+             :next-cursor next-cursor
+             :scanned scanned'})
 
-        (< (count page) page-size)
-        {:entries (mapv public-doc (hydrate-projected node selected'))
-         :next-cursor nil}
+          (< (count page) page-size)
+          {:entries (mapv public-doc (hydrate-projected node selected'))
+           :next-cursor nil
+           :scanned scanned'}
 
-        :else
-        (let [next-cursor (row-cursor (peek page))]
-          (when (= cursor next-cursor)
-            (throw (ex-info "Evidence keyset scan made no progress"
-                            {:cursor cursor :limit limit})))
-          (recur next-cursor selected'))))))
+          :else
+          (let [next-cursor (row-cursor (peek page))]
+            (when (= cursor next-cursor)
+              (throw (ex-info "Evidence keyset scan made no progress"
+                              {:cursor cursor :limit limit})))
+            (if (>= scanned' max-scanned-rows-per-request)
+              {:entries (mapv public-doc (hydrate-projected node selected'))
+               :next-cursor next-cursor
+               :scanned scanned'
+               :incomplete true}
+              (recur next-cursor selected' scanned'))))))))
 
 (defn- name-of [x]
   (cond (keyword? x) (name x)
@@ -339,14 +399,20 @@
             :error "limit must be an integer between 1 and 1000"
             :limit/max max-page-size}]
       (let [q (parse-query-params http-params)
-            {:keys [entries next-cursor]}
+            {:keys [entries next-cursor scanned incomplete]}
             (bounded-window node q parsed-limit (:cursor q))]
         [200 (cond-> {:entries entries
                       :count (count entries)
-                      :limit parsed-limit}
+                      :limit parsed-limit
+                      :scanned scanned}
                next-cursor
                (assoc :next-cursor {:at (first next-cursor)
-                                    :id (second next-cursor)}))]))))
+                                    :id (second next-cursor)})
+               ;; Scan ceiling hit before LIMIT matches: fewer entries than
+               ;; requested does NOT mean end of corpus — continue from cursor.
+               incomplete
+               (assoc :incomplete true
+                      :scan/max max-scanned-rows-per-request))]))))
 
 (defn query-evidence
   "Compatibility helper for in-process callers; returns the validated body."

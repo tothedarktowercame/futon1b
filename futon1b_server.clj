@@ -313,8 +313,14 @@
               (.close ^HttpExchange ex))
             (catch Exception e
               ;; Layered gate errors keep futon1a's envelope + status mapping
-              ;; (API-CONTRACT §0); anything else is the generic 500.
-              (let [[status body] (gates/error->response e)]
+              ;; (API-CONTRACT §0); a JDBC deadline expiry (futon1b-xt/timed-q)
+              ;; is a retryable 504; anything else is the generic 500.
+              (let [[status body] (if (fxt/timeout-error? e)
+                                    [504 {:ok false
+                                          :error :query-deadline-exceeded
+                                          :timeout-s (:timeout-s (ex-data e))
+                                          :retry-after-seconds 5}]
+                                    (gates/error->response e))]
                 (println (format "[futon1b-request] end method=%s uri=%s trace-id=%s elapsed-ms=%d outcome=error status=%d class=%s message=%s"
                                  method uri trace-id
                                  (quot (- (System/nanoTime) started) 1000000)
@@ -403,16 +409,86 @@
 ;; behind a pathological one; genuine overload still sheds, just not instantly.
 (def ^:private expensive-read-wait-ms 3000)
 
+;; Holder registry (E-futon1b-gc-wedge, 2026-08-23). Two permits sat held for
+;; four days by reads blocked in a pgwire socket, and the only way to learn
+;; that was a thread dump. Every admitted read now records who holds a permit
+;; and for how long; cheap /health reports it without taking a permit.
+(defonce ^:private !expensive-read-holders (atom {}))
+(defonce ^:private !expensive-read-seq (atom 0))
+(defonce ^:private !expensive-read-stats
+  (atom {:admitted 0 :rejected 0 :timed-out 0 :errored 0 :completed 0
+         :last-rejected-at nil}))
+
+(defn- sanitize-query-shape
+  "Route plus the NAMES of the query params present — never their values."
+  [^HttpExchange ex]
+  (let [uri (.getRequestURI ex)]
+    (str (.getPath uri)
+         (when-let [q (.getQuery uri)]
+           (str "?" (str/join "&" (sort (map #(first (str/split % #"=" 2))
+                                             (str/split q #"&")))))))))
+
+(defn expensive-read-snapshot
+  "Permit/holder/GC view for /health. Takes no permit; O(holders)."
+  []
+  (let [now (System/currentTimeMillis)
+        holders (vals @!expensive-read-holders)
+        rt (Runtime/getRuntime)
+        gc-beans (java.lang.management.ManagementFactory/getGarbageCollectorMXBeans)]
+    {:permits/total 2
+     :permits/available (.availablePermits expensive-read-permit)
+     :permits/waiters (.getQueueLength expensive-read-permit)
+     :holders (mapv (fn [h] (-> h
+                               (assoc :age-ms (- now (:started-at h)))
+                               (dissoc :started-at)))
+                    holders)
+     :oldest-holder-ms (if (seq holders)
+                         (- now (apply min (map :started-at holders)))
+                         0)
+     :stats @!expensive-read-stats
+     :heap {:used-mb (quot (- (.totalMemory rt) (.freeMemory rt)) 1048576)
+            :max-mb (quot (.maxMemory rt) 1048576)}
+     :gc (into {} (map (fn [^java.lang.management.GarbageCollectorMXBean b]
+                         [(.getName b) {:count (.getCollectionCount b)
+                                        :time-ms (.getCollectionTime b)}])
+                       gc-beans))}))
+
 (defn- with-expensive-read!
   [^HttpExchange ex f]
   (if (.tryAcquire expensive-read-permit expensive-read-wait-ms TimeUnit/MILLISECONDS)
-    (try
-      (f)
-      (finally (.release expensive-read-permit)))
+    (let [id (swap! !expensive-read-seq inc)
+          shape (sanitize-query-shape ex)
+          trace-id (or (request-trace-id ex) "-")
+          started (System/currentTimeMillis)
+          holder {:id id :shape shape :trace-id trace-id
+                  :thread (.getName (Thread/currentThread))
+                  :started-at started}]
+      (swap! !expensive-read-holders assoc id holder)
+      (swap! !expensive-read-stats update :admitted inc)
+      (println (format "[futon1b-expensive-read] start id=%d shape=%s trace-id=%s holders=%d"
+                       id shape trace-id (count @!expensive-read-holders)))
+      (let [outcome (volatile! :ok)]
+        (try
+          (f)
+          (catch Exception e
+            (vreset! outcome (if (fxt/timeout-error? e) :timed-out :errored))
+            (throw e))
+          (finally
+            (.release expensive-read-permit)
+            (swap! !expensive-read-holders dissoc id)
+            (swap! !expensive-read-stats update
+                   (case @outcome :ok :completed :timed-out :timed-out :errored) inc)
+            (println (format "[futon1b-expensive-read] end id=%d shape=%s trace-id=%s elapsed-ms=%d outcome=%s"
+                             id shape trace-id
+                             (- (System/currentTimeMillis) started)
+                             (name @outcome)))))))
     (do
       (.set (.getResponseHeaders ex) "Retry-After" "1")
-      (println (format "[futon1b-admission] rejected uri=%s reason=expensive-read-busy"
-                       (str (.getRequestURI ex))))
+      (swap! !expensive-read-stats #(-> % (update :rejected inc)
+                                        (assoc :last-rejected-at (System/currentTimeMillis))))
+      (println (format "[futon1b-admission] rejected uri=%s reason=expensive-read-busy oldest-holder-ms=%d"
+                       (str (.getRequestURI ex))
+                       (:oldest-holder-ms (expensive-read-snapshot))))
       (respond! ex 503 (pr-str {:ok false
                                 :error :expensive-read-busy
                                 :retry-after-seconds 1})))))
@@ -429,7 +505,8 @@
                        (for [t tables]
                          [t (count (fxt/safe-q node (list 'from t ['xt/id])))]))]
       (respond! ex 200 (pr-str {:ok true :deep true :tables counts})))
-    (respond! ex 200 (pr-str {:ok true :deep false :node-open? (some? @!node)}))))
+    (respond! ex 200 (pr-str (merge {:ok true :deep false :node-open? (some? @!node)}
+                                    (expensive-read-snapshot))))))
 
 (defn- hyperedge-route [^HttpExchange ex]
   (let [method (.getRequestMethod ex)
@@ -596,13 +673,29 @@
         (respond! ex 400 (pr-str {:error "vector :bindings required"}))))
     (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
 
+(def ^:private max-hyperedge-window 1000)
+
+(defn- parse-hyperedge-limit
+  "Hyperedge windows are capped at 1,000 (E-futon1b-gc-wedge): a limit=10000
+  request is pushed down before hydration but still means up to 10k point
+  hydrations and a materialised response held in the window cache. Callers
+  advance `after` instead."
+  [p]
+  (let [limit (parse-limit p)]
+    (when (> limit max-hyperedge-window)
+      (throw (gates/layered-error
+              4 :invalid-limit
+              {:provided (p "limit") :minimum 1 :maximum max-hyperedge-window
+               :hint "advance `after` to page"})))
+    limit))
+
 (defn- hyperedges-route [^HttpExchange ex]
   (let [p (query-params ex)]
     (if (or (p "type") (p "end"))
       (with-expensive-read!
         ex #(respond! ex 200 (graph/hyperedges-query
                               @!node {:type (p "type") :end (p "end")
-                                      :limit (parse-limit p)
+                                      :limit (parse-hyperedge-limit p)
                                       :after (p "after")
                                       :repo (p "repo")
                                       :source-file (p "source-file")
