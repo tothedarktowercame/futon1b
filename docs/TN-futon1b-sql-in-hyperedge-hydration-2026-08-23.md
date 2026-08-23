@@ -15,7 +15,10 @@ slower than the current four-way point path in every measured pass.
 
 ## Method
 
-All queries went directly to pgwire at `127.0.0.1:34257`; no HTTP endpoint or
+All queries went directly to pgwire at `127.0.0.1:34257` (NOTE: that
+port is ephemeral and changed to `44505` at the 20:13 restart -- see the
+operational addendum in `TN-futon1b-current-hyperedge-type-index-design-2026-08-23.md`;
+discover it from the service pid, never hardcode it); no HTTP endpoint or
 expensive-read permit was used. A temporary raw PostgreSQL-protocol client set
 a 60-second socket deadline for every connection. It first selected bounded,
 ordered `_id` samples for each type, then compared:
