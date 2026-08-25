@@ -746,6 +746,7 @@
                                       :after (p "after")
                                       :repo (p "repo")
                                       :source-file (p "source-file")
+                                      :mission (p "mission")
                                       :fields (parse-hyperedge-fields (p "fields"))
                                       :valid-as-of
                                       (parse-instant

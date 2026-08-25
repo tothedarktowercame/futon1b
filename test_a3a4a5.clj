@@ -488,6 +488,16 @@
               (and (= 1 (:count (:body r)))
                    (= "r1" (get-in r [:body :hyperedges 0 :hx/props :repo])))
               r))
+    (req "POST" HX {:hx/type :test/scoped :hx/endpoints ["q1" "m1"]
+                    :hx/props {:mission "m1"}} ph)
+    (req "POST" HX {:hx/type :test/scoped :hx/endpoints ["q2" "m2"]
+                    :hx/props {:mission "m2"}} ph)
+    (let [r (req "GET" (str HXS "?type=test/scoped&mission=m1"))]
+      (check! "mission props filter -> 1, filtered count"
+              (and (= 1 (:count (:body r)))
+                   (= 1 (count (get-in r [:body :hyperedges])))
+                   (= "m1" (get-in r [:body :hyperedges 0 :hx/props :mission])))
+              r))
     (let [r (req "GET" (str HXS "?type=code/v05/commit&repo=r1&latest=true&limit=1"))]
       (check! "latest orders by denormalized timestamp and returns one"
               (and (= 1 (:count (:body r)))

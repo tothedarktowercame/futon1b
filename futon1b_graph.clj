@@ -714,7 +714,8 @@
    "hx/endpoints" :hx/endpoints
    "prop/timestamp" :prop/timestamp
    "prop/repo" :prop/repo
-   "prop/source-file" :prop/source-file})
+   "prop/source-file" :prop/source-file
+   "prop/mission" :prop/mission})
 
 (defn- hyperedge-window-field-source
   [field]
@@ -750,13 +751,16 @@
   (symbol (namespace column) (name column)))
 
 (defn- hyperedge-window-columns
-  [{:keys [fields latest? repo source-file]}]
+  [{:keys [fields latest? repo source-file mission]}]
   (if-not (seq fields)
-    hyperedge-window-cols
+    ;; a where-clause column must be bound in the from, or XTDB rejects the
+    ;; query and safe-q reads that as an empty result
+    (cond-> hyperedge-window-cols mission (conj 'prop/mission))
     (->> (concat [:xt/id :hx/type]
                  (when latest? [:prop/timestamp])
                  (when repo [:prop/repo])
                  (when source-file [:prop/source-file])
+                 (when mission [:prop/mission])
                  (keep hyperedge-window-field-source fields))
          distinct
          (mapv column-symbol))))
@@ -829,11 +833,11 @@
 
 (defn- hyperedges-query-uncached
   "GET /api/alpha/hyperedges?type=… and/or end=… (+limit/latest/after,
-  +repo/source-file for type-only queries). When end is present, type is an
-  optional pushed-down filter rather than a competing branch. :count is the
-  true type total when unfiltered even if limit truncates; returned-count
+  +repo/source-file/mission for type-only queries). When end is present, type
+  is an optional pushed-down filter rather than a competing branch. :count is
+  the true type total when unfiltered even if limit truncates; returned-count
   otherwise (contract §4)."
-  [node {:keys [type end limit repo source-file after latest? include-total? fields]
+  [node {:keys [type end limit repo source-file mission after latest? include-total? fields]
          :or {include-total? true}
          :as opts}
    query-fn]
@@ -889,6 +893,10 @@
                   repo (conj ['p-repo '(= prop/repo p-repo) repo])
                   source-file (conj ['p-source-file '(= prop/source-file p-source-file)
                                      source-file])
+                  ;; mission-scope/* rows denormalize :hx/props :mission the
+                  ;; same way; the scope ingest reads one mission's rows per
+                  ;; binder and was paying for the whole type each call.
+                  mission (conj ['p-mission '(= prop/mission p-mission) mission])
                   after (conj ['p-after '(> xt/id p-after) after])
                   limited? (conj ['p-limit nil limit]))
           params (mapv first specs)
@@ -916,7 +924,7 @@
                  (hydrate-hyperedge-window node selected temporal query-fn)
                  selected)
           total (when include-total?
-                  (if (or latest? repo source-file)
+                  (if (or latest? repo source-file mission)
                     (count docs)
                     (count (query-fn node (fxt/pq '[p-type]
                                                   (list '->
@@ -931,7 +939,8 @@
           filtered (cond->> docs
                      repo (filter #(= repo (str (prop-get % "repo" :prop/repo))))
                      source-file (filter #(= source-file
-                                             (str (prop-get % "source-file" :prop/source-file)))))
+                                             (str (prop-get % "source-file" :prop/source-file))))
+                     mission (filter #(= mission (str (prop-get % "mission" :prop/mission)))))
           ;; Limited non-latest queries are ordered and bounded inside XTDB;
           ;; never hydrate the whole typed collection and truncate in Clojure.
           sorted (if (or latest? (and (int? limit) (pos? limit)))
@@ -958,7 +967,7 @@
                                  (= limit (count server-window)))
                         (:xt/id (peek server-window)))]
       (cond-> {:hyperedges out
-               :count (if (or (not include-total?) latest? repo source-file)
+               :count (if (or (not include-total?) latest? repo source-file mission)
                         (count out)
                         total)
                :count-exact? (boolean include-total?)}
