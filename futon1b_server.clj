@@ -522,14 +522,21 @@
 (def ^:private tables
   [:hyperedges :entities :evidence :relations :type-catalog :docs :misc])
 
+(defn- table-row-count
+  "Count a table inside XTDB. Realizing every xt/id on-heap to count it took
+   the 4g server heap down on Zone (2026-08-23, OOM from the restart script's
+   pre-restart census); the aggregate never leaves the query engine."
+  [node t]
+  (or (:n (first (fxt/safe-q node (list '-> (list 'from t ['xt/id])
+                                        '(aggregate {:n (row-count)})))))
+      0))
+
 (defn- health [^HttpExchange ex]
   ;; Liveness must never materialize or count the corpus. Operators can request
-  ;; the expensive census explicitly while profiling with ?deep=true.
+  ;; the census explicitly while profiling with ?deep=true.
   (if (= "true" ((query-params ex) "deep"))
     (let [node @!node
-          counts (into {}
-                       (for [t tables]
-                         [t (count (fxt/safe-q node (list 'from t ['xt/id])))]))]
+          counts (into {} (for [t tables] [t (table-row-count node t)]))]
       (respond! ex 200 (pr-str {:ok true :deep true :tables counts})))
     (respond! ex 200 (pr-str (merge {:ok true :deep false :node-open? (some? @!node)}
                                     (expensive-read-snapshot))))))
