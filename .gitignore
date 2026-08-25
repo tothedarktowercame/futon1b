@@ -26,3 +26,17 @@ ams-store.retired-*/
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# Any XTDB store directory, by KIND rather than by name.
+#
+# The rules below enumerate the store names this repo has happened to see:
+# migration-store*, switchover-store, ams-store.retired-*. That is a list of
+# instances, not a description, and it silently fails on the first box that
+# picks a new name. Measured 2026-08-19: linode-chicago and linode-joe use
+# `chicago-store/`, which no rule covered, so each carried 1,006 untracked
+# .binpb/.arrow files -- 2,012 of the fleet's 2,610 dirty files, from one
+# unlisted name. The dirt looked like neglect and was a missing pattern.
+#
+# Verified before adding: every *-store* directory on every box is an XTDB
+# store, and no *-store path is tracked in any checkout, so this hides nothing.
+*-store*/
