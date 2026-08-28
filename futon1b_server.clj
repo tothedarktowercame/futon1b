@@ -180,6 +180,90 @@
         (graph/with-memory-projection-mutation node mutate!)
         (mutate!)))))
 
+(defn write-memory-assert!
+  "Validate an evidence entry and its :memory/assert hyperedge before writing,
+  then commit both documents in one XTDB transaction. Returns [status body]."
+  [node payload]
+  (when-not (and (map? (:evidence payload)) (map? (:hyperedge payload)))
+    (throw (gates/layered-error
+            4 :missing-required {:required [:evidence :hyperedge]})))
+  (let [{:keys [status body doc]}
+        (ev/prepare-evidence-write node (:evidence payload))
+        hyperedge-doc
+        (try
+          (xf/transform-doc (build-hyperedge-doc (:hyperedge payload)))
+          (catch clojure.lang.ExceptionInfo error
+            (if (:error (ex-data error))
+              (throw error)
+              (throw (gates/layered-error
+                      4 :invalid-hyperedge
+                      {:message (.getMessage error)}))))
+          (catch Exception error
+            (throw (gates/layered-error
+                    4 :invalid-hyperedge {:message (.getMessage error)}))))
+        evidence-id (:xt/id doc)
+        hyperedge-id (:xt/id hyperedge-doc)]
+    ;; Hyperedge validation is deliberately completed even when evidence
+    ;; preparation found a duplicate/refusal: neither side is written until
+    ;; both payloads have been built and checked.
+    (when-not (= :memory/assert (:hx/type hyperedge-doc))
+      (throw (gates/layered-error
+              4 :invalid-memory-assert-hyperedge
+              {:required-type :memory/assert
+               :got (:hx/type hyperedge-doc)})))
+    (when (and evidence-id
+               (not (some #{evidence-id} (:hx/endpoints hyperedge-doc))))
+      (throw (gates/layered-error
+              4 :memory-assert-evidence-endpoint-missing
+              {:evidence/id evidence-id
+               :hx/id hyperedge-id
+               :hx/endpoints (:hx/endpoints hyperedge-doc)})))
+    (if status
+      [status body]
+      (graph/with-memory-projection-mutation
+        node
+        (fn []
+            ;; The pair's only initial write: one execute-tx spanning the two
+            ;; tables. As with entity/relation batches, a silent XTDB omission
+            ;; is detected below and enters the existing per-document rescue.
+            (try
+              (xt/execute-tx node [[:put-docs :evidence doc]
+                                   [:put-docs :hyperedges hyperedge-doc]])
+              (catch Exception _ nil))
+            (let [evidence-rescue
+                  (when-not (ev/evidence-exists? node evidence-id)
+                    (ev/rescue-evidence-doc! node doc))
+                  hyperedge-rescue
+                  (when-not (present? node hyperedge-id)
+                    (ingest/put-doc-with-rescue!
+                     node :hyperedges hyperedge-doc nil))
+                  missing (cond-> []
+                            (not (ev/evidence-exists? node evidence-id))
+                            (conj {:table :evidence :xt/id evidence-id})
+                            (not (present? node hyperedge-id))
+                            (conj {:table :hyperedges :xt/id hyperedge-id}))]
+              (when (seq missing)
+                (throw (gates/layered-error
+                        0 :postcommit-missing-memory-assert
+                        {:missing missing})))
+              (text/on-append! doc)
+              (graph/invalidate-hyperedge-query-cache! (:hx/type hyperedge-doc))
+              (graph/refresh-memory-projection-component! node hyperedge-id)
+              [201
+               (cond-> {:ok true
+                        :evidence/id evidence-id
+                        :hx/id hyperedge-id
+                        :entry (ev/public-doc doc)
+                        :hyperedge (dissoc hyperedge-doc :xt/id)}
+                 (or (keyword? evidence-rescue)
+                     (keyword? hyperedge-rescue))
+                 (assoc :rescue
+                        (cond-> {}
+                          (keyword? evidence-rescue)
+                          (assoc evidence-id evidence-rescue)
+                          (keyword? hyperedge-rescue)
+                          (assoc hyperedge-id hyperedge-rescue))))]))))))
+
 ;; ---------------------------------------------------------------------------
 ;; HTTP plumbing.
 ;; ---------------------------------------------------------------------------
@@ -605,6 +689,14 @@
           (respond! ex 404 {:error "not found" :evidence/id tail}))
         (respond! ex 404 {:error "not found" :evidence/id tail})))))
 
+(defn- memory-assert-route [^HttpExchange ex]
+  (if (= "POST" (.getRequestMethod ex))
+    (let [payload (parse-payload ex)
+          _ (penholder! ex payload)
+          [status body] (write-memory-assert! @!node payload)]
+      (respond! ex status body))
+    (respond! ex 405 {:ok false :error "POST only"})))
+
 (defn- entity-route [^HttpExchange ex]
   (let [method (.getRequestMethod ex)
         tail (uri-tail ex "/api/alpha/entity")
@@ -987,6 +1079,7 @@
     (.createContext server "/api/alpha/hyperedge" (handler hyperedge-route))
     (.createContext server "/api/alpha/hyperedges" (handler hyperedges-route))
     (.createContext server "/api/alpha/evidence" (handler evidence-route))
+    (.createContext server "/api/alpha/memory/assert" (handler memory-assert-route))
     ;; longer prefix wins (see NB above): text-search must out-rank /evidence
     (.createContext server "/api/alpha/evidence/text-search" (handler text-search-route))
     (.createContext server "/api/alpha/entity" (handler entity-route))

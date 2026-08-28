@@ -635,6 +635,16 @@ XTDB node. These routes expose graph meanings rather than XTDB query forms:
   :type … :endpoint-types […]} …]}` returns the bindings in order with an
   authoritative `:inhabited?` boolean. Hyperedge endpoint constraints preserve
   the former existential Datalog semantics.
+- `POST /api/alpha/memory/assert` takes `{:evidence <§3 evidence write>
+  :hyperedge <§4 hyperedge write>}`. Both documents are built and validated
+  before mutation; the hyperedge must have type `:memory/assert` and its
+  `:hx/endpoints` must contain the evidence id. The evidence and hyperedge
+  documents commit in one `execute-tx`, then both are read back. An absent
+  document uses its existing table-specific rescue ladder and a remaining
+  absence is L0 503 `:postcommit-missing-memory-assert`. Evidence duplicate-id
+  behavior remains 409, including an identical pair re-post. Success is 201
+  with `{:ok true :evidence/id … :hx/id … :entry … :hyperedge …}` and optional
+  `:rescue {document-id stage}`; it exposes no raw transaction identifier.
 
 Graph writes continue through the existing gated entity, relation, and
 hyperedge routes. There is deliberately no raw transaction or evict endpoint.

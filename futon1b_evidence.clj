@@ -83,13 +83,13 @@
                                        (where (= xt/id p-id)))
                                   id))))
 
-(defn- exists? [node id]
+(defn evidence-exists? [node id]
   (seq (fxt/safe-q node (fxt/pq '[p-id]
                                 '(-> (from :evidence [xt/id])
                                      (where (= xt/id p-id)))
                                 id))))
 
-(defn- public-doc [doc]
+(defn public-doc [doc]
   (dissoc doc :xt/id))
 
 (def ^:private default-page-size 100)
@@ -126,43 +126,62 @@
 
 (defonce !shape-log (xf/make-shape-log))
 
+(defn prepare-evidence-write
+  "Build and validate an evidence write without mutating the node. Returns a
+  transformed :doc or the exact :status/:body refusal used by write-evidence!."
+  [node payload]
+  (let [{:keys [doc invalid]} (build-evidence-doc payload)
+        prepared-doc (when doc (xf/transform-doc doc))]
+    (cond
+      invalid {:status 400 :body invalid}
+
+      (and (:evidence/in-reply-to doc)
+           (not (evidence-exists? node (:evidence/in-reply-to doc))))
+      {:status 409
+       :doc prepared-doc
+       :body {:error :reply-not-found
+              :evidence/id (:xt/id doc)
+              :in-reply-to (:evidence/in-reply-to doc)}}
+
+      (and (:evidence/fork-of doc)
+           (not (evidence-exists? node (:evidence/fork-of doc))))
+      {:status 409
+       :doc prepared-doc
+       :body {:error :fork-not-found
+              :evidence/id (:xt/id doc)
+              :fork-of (:evidence/fork-of doc)}}
+
+      (evidence-exists? node (:xt/id doc))
+      {:status 409
+       :doc prepared-doc
+       :body {:error "duplicate evidence id" :evidence/id (:xt/id doc)}}
+
+      :else {:doc prepared-doc})))
+
+(defn rescue-evidence-doc!
+  "Apply the evidence writer's existing rescue ladder to a prepared doc."
+  [node doc]
+  (ingest/put-doc-with-rescue! node :evidence doc !shape-log))
+
 (defn write-evidence!
   "Returns [status body]. 201 on success (contract envelope), 400 on
   missing required fields, 409 on duplicate id, 500 if the doc is absent
   after the rescue ladder (verified put, as the hyperedge path)."
   [node payload]
-  (let [{:keys [doc invalid]} (build-evidence-doc payload)]
-    (cond
-      invalid [400 invalid]
-
-      (and (:evidence/in-reply-to doc)
-           (not (exists? node (:evidence/in-reply-to doc))))
-      [409 {:error :reply-not-found
-            :evidence/id (:xt/id doc)
-            :in-reply-to (:evidence/in-reply-to doc)}]
-
-      (and (:evidence/fork-of doc)
-           (not (exists? node (:evidence/fork-of doc))))
-      [409 {:error :fork-not-found
-            :evidence/id (:xt/id doc)
-            :fork-of (:evidence/fork-of doc)}]
-
-      (exists? node (:xt/id doc))
-      [409 {:error "duplicate evidence id" :evidence/id (:xt/id doc)}]
-
-      :else
-      (let [xdoc (xf/transform-doc doc)
-            res (ingest/put-doc-with-rescue! node :evidence xdoc !shape-log)]
-        (if (exists? node (:xt/id xdoc))
+  (let [{:keys [status body doc]} (prepare-evidence-write node payload)]
+    (if status
+      [status body]
+      (let [res (rescue-evidence-doc! node doc)]
+        (if (evidence-exists? node (:xt/id doc))
           (do
             ;; D1 sidecar refresh rides the append path (M-text-sidecar P3);
             ;; fire-and-forget — never affects the verified put.
-            (text/on-append! xdoc)
+            (text/on-append! doc)
             [201 (cond-> {:ok true
-                          :evidence/id (:evidence/id xdoc)
-                          :entry (public-doc xdoc)}
+                          :evidence/id (:evidence/id doc)
+                          :entry (public-doc doc)}
                    (keyword? res) (assoc :rescue res))])
-          [500 {:ok false :evidence/id (:evidence/id xdoc)
+          [500 {:ok false :evidence/id (:evidence/id doc)
                 :error "verified put: doc absent after rescue ladder"}])))))
 
 ;; ---------------------------------------------------------------------------
