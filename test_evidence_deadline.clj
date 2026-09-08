@@ -50,6 +50,31 @@
         (throw (ex-info "seed failed" r))))))
 
 (defn- run-tests [base node]
+  ;; Exhaust the actual query semaphore, shorten only the test's wait, and
+  ;; prove that the guarded path throws the same typed timeout used by JDBC
+  ;; expiry instead of invoking its query body or hanging.
+  (let [permits-var (ns-resolve 'futon1b-xt 'query-permits)
+        wait-var (ns-resolve 'futon1b-xt 'query-permit-wait-ms)
+        guarded-var (ns-resolve 'futon1b-xt 'run-guarded)
+        ^java.util.concurrent.Semaphore permits @permits-var
+        entered? (atom false)
+        started (System/nanoTime)]
+    (.acquire permits 4)
+    (try
+      (let [result (with-redefs-fn
+                     {wait-var 50}
+                     #(try (@guarded-var (fn [] (reset! entered? true)))
+                           (catch Exception error error)))
+            elapsed-ms (/ (- (System/nanoTime) started) 1000000.0)]
+        (check! "guarded query permit wait returns typed timeout, not a hang"
+                (and (instance? Exception result)
+                     (fxt/timeout-error? result)
+                     (= :permit-acquire (:timeout/phase (ex-data result)))
+                     (false? @entered?)
+                     (<= 50 elapsed-ms 500))))
+      (finally
+        (.release permits 4))))
+
   (seed! base 120)
 
   ;; --- parameterised page shape ---------------------------------------
