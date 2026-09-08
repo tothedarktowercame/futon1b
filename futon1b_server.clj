@@ -230,17 +230,25 @@
               (xt/execute-tx node [[:put-docs :evidence doc]
                                    [:put-docs :hyperedges hyperedge-doc]])
               (catch Exception _ nil))
-            (let [evidence-rescue
-                  (when-not (ev/evidence-exists? node evidence-id)
+            (let [evidence-present? (boolean (ev/evidence-exists? node evidence-id))
+                  hyperedge-present? (boolean (present? node hyperedge-id))
+                  evidence-rescue
+                  (when-not evidence-present?
                     (ev/rescue-evidence-doc! node doc))
                   hyperedge-rescue
-                  (when-not (present? node hyperedge-id)
+                  (when-not hyperedge-present?
                     (ingest/put-doc-with-rescue!
                      node :hyperedges hyperedge-doc nil))
+                  evidence-present?
+                  (or evidence-present?
+                      (boolean (ev/evidence-exists? node evidence-id)))
+                  hyperedge-present?
+                  (or hyperedge-present?
+                      (boolean (present? node hyperedge-id)))
                   missing (cond-> []
-                            (not (ev/evidence-exists? node evidence-id))
+                            (not evidence-present?)
                             (conj {:table :evidence :xt/id evidence-id})
-                            (not (present? node hyperedge-id))
+                            (not hyperedge-present?)
                             (conj {:table :hyperedges :xt/id hyperedge-id}))]
               (when (seq missing)
                 (throw (gates/layered-error
@@ -248,7 +256,8 @@
                         {:missing missing})))
               (text/on-append! doc)
               (graph/invalidate-hyperedge-query-cache! (:hx/type hyperedge-doc))
-              (graph/refresh-memory-projection-component! node hyperedge-id)
+              (graph/refresh-memory-projection-component-from-docs!
+               node hyperedge-doc doc)
               [201
                (cond-> {:ok true
                         :evidence/id evidence-id

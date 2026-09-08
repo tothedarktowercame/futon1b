@@ -41,7 +41,8 @@
 
 (defn- hyperedge [id evidence-id]
   {:hx/id id :hx/type :memory/assert
-   :hx/endpoints [evidence-id "subject-1"]})
+   :hx/endpoints [evidence-id "subject-1"]
+   :hx/props {:roles {:entry evidence-id}}})
 
 (defn- pair [evidence-id hyperedge-id]
   {:evidence (evidence evidence-id)
@@ -65,6 +66,16 @@
       (check! "happy path hyperedge is readable"
               (= 200 (:status (req "GET" (hyperedge-url "memory-assert-h1") nil nil)))
               response)
+      (let [projection
+            (req "POST" (str base "/api/alpha/memory/projection")
+                 {:endpoints ["subject-1"] :limit 10} nil)]
+        (check! "happy path synchronously refreshes memory projection"
+                (and (= 200 (:status projection))
+                     (= ["memory-assert-h1"]
+                        (mapv :hyperedge-id
+                              (get-in projection
+                                      [:body :groups 0 :components]))))
+                projection))
       (let [again (req "POST" route payload penholder)]
         (check! "identical pair re-post retains evidence duplicate 409"
                 (= 409 (:status again)) again)))
