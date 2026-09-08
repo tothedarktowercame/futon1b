@@ -855,7 +855,9 @@
                                            (p "as-of")))
                                       :system-as-of
                                       (parse-instant (p "system-as-of"))
-                                      :include-total? (not= "false" (p "include-total"))
+                                      ;; Exact totals are opt-in: counting scans the full
+                                      ;; matching type, and false enables bounded-window caching.
+                                      :include-total? (= "true" (p "include-total"))
                                       :latest? (= "true" (p "latest"))}
                                fxt/timed-q))))
       (respond! ex 400 (pr-str {:error "type or end parameter required"})))))

@@ -431,9 +431,13 @@ projection. A malformed temporal parameter is rejected rather than ignored.
   `str`, docs pulled lazily; `repo`/`source-file` filter against `:hx/props`
   under **both** keyword and string keys (`:repo`/`"repo"`)
   (`routes.clj:1171-1174`). Response **200** `{:hyperedges [<doc minus
-  :xt/id> ...] :count <n>}` — `:count` is the **true total** for the type
-  when unfiltered (even if `limit` truncated `:hyperedges`), but the
-  returned-docs count when repo/source-file filters are applied.
+  :xt/id> ...] :count <n> :count-exact? <boolean>}`. By default, `:count` is
+  the returned-documents count and the bounded response is cache-eligible.
+  `include-total=true` explicitly opts into the **true total** for an
+  unfiltered type (even if `limit` truncated `:hyperedges`) and reports
+  `:count-exact? true`; repo/source-file-filtered requests still report the
+  returned-documents count. If exact totals acquire a consumer, maintain
+  per-type counters during ingest instead of restoring a query-time full scan.
 - **end branch** → `routes/hyperedges-by-end` (`routes.clj:1215-1244`): if
   `end` is UUID-shaped, it is resolved via `:entity/id` → `:entity/name`
   first (`routes.clj:1195-1213`); then exact match against the flat

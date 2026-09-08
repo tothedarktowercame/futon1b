@@ -835,10 +835,10 @@
   "GET /api/alpha/hyperedges?type=… and/or end=… (+limit/latest/after,
   +repo/source-file/mission for type-only queries). When end is present, type
   is an optional pushed-down filter rather than a competing branch. :count is
-  the true type total when unfiltered even if limit truncates; returned-count
-  otherwise (contract §4)."
+  the returned window count by default. Explicit include-total opts type-only
+  queries into the true type total when unfiltered (contract §4)."
   [node {:keys [type end limit repo source-file mission after latest? include-total? fields]
-         :or {include-total? true}
+         :or {include-total? false}
          :as opts}
    query-fn]
   (let [temporal (select-keys opts [:valid-as-of :system-as-of])]
@@ -1035,7 +1035,7 @@
    (hyperedges-query node opts fxt/safe-q))
   ([node opts query-fn]
    (let [opts (normalize-hyperedge-query-opts opts)
-         {:keys [type limit include-total?]} opts
+         {:keys [type limit include-total?] :or {include-total? false}} opts
          ;; Only windows at or below the served ceiling are retained; anything
          ;; larger is served uncached (E-futon1b-gc-wedge).
          cacheable? (and type (int? limit) (pos? limit) (<= limit 1000)
