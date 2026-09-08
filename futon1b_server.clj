@@ -497,10 +497,10 @@
     parsed))
 
 (defonce ^:private expensive-read-permit
-  ;; Corpus scans are admitted globally, not once per route or request. Two
-  ;; scans at a time leave two HTTP workers available for writes, point reads,
-  ;; and liveness. Contending scans fail fast with a retryable 503.
-  (Semaphore. 2 true))
+  ;; Corpus scans are admitted globally, not once per route or request. The
+  ;; ceiling protects heap and pgwire progress after concurrent scans wedged
+  ;; the service; contending scans retain the bounded retryable-503 path.
+  (Semaphore. 4 true))
 
 ;; How long a scan will wait for a permit before shedding.
 ;;
@@ -548,7 +548,7 @@
         holders (vals @!expensive-read-holders)
         rt (Runtime/getRuntime)
         gc-beans (java.lang.management.ManagementFactory/getGarbageCollectorMXBeans)]
-    {:permits/total 2
+    {:permits/total 4
      :permits/available (.availablePermits expensive-read-permit)
      :permits/waiters (.getQueueLength expensive-read-permit)
      :holders (mapv (fn [h] (-> h

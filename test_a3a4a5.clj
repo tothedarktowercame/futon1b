@@ -50,6 +50,9 @@
         MEMORY-PROJECTION (str base "/api/alpha/memory/projection")]
 
     (println "— A3 entities: write path + gates")
+    (check! "health reports four expensive-read permits"
+            (= 4 (:permits/total (srv/expensive-read-snapshot)))
+            (srv/expensive-read-snapshot))
     (let [r (req "POST" ENT {:name "Widget"} ph)]
       (check! "missing :type -> 400 :missing-required"
               (and (= 400 (:status r))
