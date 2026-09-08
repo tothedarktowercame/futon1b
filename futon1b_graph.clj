@@ -1340,6 +1340,47 @@
               (initialize-memory-projection! node)))))))
   nil)
 
+(defn refresh-memory-projection-component-from-docs!
+  "Point-refresh a newly committed memory/assert component from the exact
+  documents submitted in the same transaction.
+
+  The caller must hold `with-memory-projection-mutation` across the transaction
+  and this refresh. Unlike the generic refresh above, this path does not read
+  the two documents back from XTDB after the caller has already verified them."
+  [node hyperedge-doc evidence-doc]
+  (locking !memory-projection-indexes
+    (when (contains? @!memory-projection-indexes node)
+      (let [edge-id (:xt/id hyperedge-doc)
+            evidence-id (:xt/id evidence-doc)
+            memory-id (get-in hyperedge-doc [:hx/props :roles :entry])
+            component
+            (when (and (= :memory/assert (:hx/type hyperedge-doc))
+                       (= evidence-id memory-id))
+              (hydrated-row->component
+               {:hyperedge-id edge-id
+                :hx/type (:hx/type hyperedge-doc)
+                :hx/endpoints (:hx/endpoints hyperedge-doc)
+                :hx/props (:hx/props hyperedge-doc)
+                :memory-id memory-id
+                :evidence/id (:evidence/id evidence-doc)
+                :evidence/type (:evidence/type evidence-doc)
+                :evidence/claim-type (:evidence/claim-type evidence-doc)
+                :evidence/author (:evidence/author evidence-doc)
+                :evidence/session-id (:evidence/session-id evidence-doc)
+                :evidence/body (:evidence/body evidence-doc)}))
+            source-watermark (node-watermark node)
+            source-generation (advance-memory-projection-generation! node)]
+        (swap! !memory-projection-indexes
+               update node
+               (fn [{:keys [revision components-by-id]}]
+                 (build-memory-projection-index
+                  (inc revision)
+                  (cond-> (dissoc components-by-id edge-id)
+                    component (assoc edge-id component))
+                  source-watermark
+                  source-generation))))))
+  nil)
+
 (defn- current-memory-projection-index
   [node]
   (locking !memory-projection-indexes
