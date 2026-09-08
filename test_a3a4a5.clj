@@ -334,12 +334,22 @@
     (let [r (req "GET" (str HX "/hx:nope:x"))]
       (check! "unknown hx id -> 404" (= 404 (:status r)) r))
     (let [r (req "GET" (str HXS "?type=test/edge"))]
-      (check! "?type -> 2 with true total"
-              (and (= 2 (:count (:body r))) (= 2 (count (get-in r [:body :hyperedges]))))
+      (check! "unbounded ?type returns all rows without exact-total opt-in"
+              (and (= 2 (:count (:body r)))
+                   (false? (:count-exact? (:body r)))
+                   (= 2 (count (get-in r [:body :hyperedges]))))
               r))
     (let [r (req "GET" (str HXS "?type=test/edge&limit=1"))]
-      (check! "limit truncates, :count stays true total"
-              (and (= 2 (:count (:body r))) (= 1 (count (get-in r [:body :hyperedges]))))
+      (check! "omitted include-total returns and counts the bounded window"
+              (and (= 1 (:count (:body r)))
+                   (false? (:count-exact? (:body r)))
+                   (= 1 (count (get-in r [:body :hyperedges]))))
+              r))
+    (let [r (req "GET" (str HXS "?type=test/edge&limit=1&include-total=true"))]
+      (check! "explicit include-total preserves the exact type total"
+              (and (= 2 (:count (:body r)))
+                   (true? (:count-exact? (:body r)))
+                   (= 1 (count (get-in r [:body :hyperedges]))))
               r))
     (let [r (req "GET" (str HXS "?type=test/edge&limit=1&include-total=false"))]
       (check! "caller can skip the exact-total scan"
@@ -347,6 +357,25 @@
                    (false? (:count-exact? (:body r)))
                    (= 1 (count (get-in r [:body :hyperedges]))))
               r))
+    (let [calls (atom 0)
+          query-fn (fn [& _] (swap! calls inc) [])]
+      (graph/invalidate-hyperedge-query-cache!)
+      (let [omitted-1 (graph/hyperedges-query ::default-probe
+                                               {:type :test/default-probe :limit 1}
+                                               query-fn)
+            omitted-2 (graph/hyperedges-query ::default-probe
+                                               {:type :test/default-probe :limit 1}
+                                               query-fn)
+            explicit (graph/hyperedges-query ::exact-probe
+                                              {:type :test/exact-probe :limit 1
+                                               :include-total? true}
+                                              query-fn)]
+        (check! "graph default is inexact and cache-eligible; true remains exact"
+                (and (= 3 @calls) ; one cached default query, two exact queries
+                     (false? (:count-exact? omitted-1))
+                     (= omitted-1 omitted-2)
+                     (true? (:count-exact? explicit)))
+                {:calls @calls :omitted omitted-1 :explicit explicit})))
     (let [calls (atom 0)
           timed-q fxt/timed-q]
       (graph/invalidate-hyperedge-query-cache!)
@@ -433,7 +462,7 @@
               (= [{}] (get-in r [:body :hyperedges]))
               r))
     (println "— A4 hyperedge cache invalidation")
-    (let [target-url (str HXS "?type=test/cache-target&limit=100&include-total=false")
+    (let [target-url (str HXS "?type=test/cache-target&limit=100")
             target-edge {:hx/type :test/cache-target
                          :hx/endpoints ["cache-target-a" "cache-target-b"]}
             other-edge {:hx/type :test/cache-unrelated
@@ -476,8 +505,8 @@
       (check! "after cursor walks ordered type without duplicates or gaps"
               (and (= 2 (count (distinct ids)))
                    (= 2 (count ids))
-                   (= 2 (get-in page-2 [:body :count]))
-                   (true? (get-in page-2 [:body :count-exact?]))
+                   (= 1 (get-in page-2 [:body :count]))
+                   (false? (get-in page-2 [:body :count-exact?]))
                    (string? cursor-1)
                    (string? cursor-2)
                    (empty? (get-in page-3 [:body :hyperedges]))
