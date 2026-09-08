@@ -12,7 +12,7 @@
             [next.jdbc :as jdbc]
             [xtdb.next.jdbc :as xt-jdbc])
   (:import [java.sql Connection]
-           [java.util.concurrent Executors Semaphore ThreadFactory]
+           [java.util.concurrent Executors Semaphore ThreadFactory TimeUnit]
            [xtdb.api DataSource]))
 
 (def ^:private query-width 4)
@@ -23,6 +23,15 @@
   ;; concurrent XTDB queries), precisely the convoy that caused the 2026-07-22
   ;; brown-out. Fair acquisition keeps point reads and writes from starving.
   (Semaphore. query-width true))
+
+(def ^:private query-permit-wait-ms
+  "Maximum time a query may wait for one of the four XTDB query permits.
+
+  Five seconds leaves 25 seconds of the memory writer's 30-second caller
+  deadline for the admitted point query and response. The live post-dc6998b
+  16-client probe measured admitted assertions at p90 829ms, so this is six
+  times that loaded p90 while still expiring on the server side."
+  5000)
 
 (def ^:private cached-plan-retries
   "A pgwire cached plan is invalidated when the result type of its table
@@ -38,29 +47,34 @@
   "Run THUNK under the process-wide query budget with the two known-benign
   failure mappings (unbound-column → [], invalidated cached plan → retry)."
   [thunk]
-  (.acquire query-permits)
-  (try
-    (loop [attempt 1]
-      (let [r (try
-                (thunk)
-                (catch Exception e
-                  (let [msg (str (.getMessage e))]
-                    (cond
-                      (re-find #"(?i)not all variables in expression are in scope|table not found"
-                               msg)
-                      []
+  (if-not (.tryAcquire query-permits query-permit-wait-ms TimeUnit/MILLISECONDS)
+    (throw (ex-info (format "query permit unavailable after %dms"
+                            query-permit-wait-ms)
+                    {:futon1b/error ::timeout
+                     :timeout-s (/ query-permit-wait-ms 1000)
+                     :timeout/phase :permit-acquire}))
+    (try
+      (loop [attempt 1]
+        (let [r (try
+                  (thunk)
+                  (catch Exception e
+                    (let [msg (str (.getMessage e))]
+                      (cond
+                        (re-find #"(?i)not all variables in expression are in scope|table not found"
+                                 msg)
+                        []
 
-                      (and (re-find #"(?i)cached plan must not change result type" msg)
-                           (< attempt cached-plan-retries))
-                      ::retry-cached-plan
+                        (and (re-find #"(?i)cached plan must not change result type" msg)
+                             (< attempt cached-plan-retries))
+                        ::retry-cached-plan
 
-                      :else (throw e)))))]
-        (if (identical? r ::retry-cached-plan)
-          (do (Thread/sleep (* 200 attempt))
-              (recur (inc attempt)))
-          r)))
-    (finally
-      (.release query-permits))))
+                        :else (throw e)))))]
+          (if (identical? r ::retry-cached-plan)
+            (do (Thread/sleep (* 200 attempt))
+                (recur (inc attempt)))
+            r)))
+      (finally
+        (.release query-permits)))))
 
 (defn safe-q
   [node form]
