@@ -1,0 +1,18 @@
+{
+  "captured_at": "2026-09-11T02:19:03.732079+00:00",
+  "kind": "read-only bookmark, not backup or freeze of concurrent writers",
+  "observations": [
+    {
+      "name": "readiness",
+      "http_status": 200,
+      "sha256": "d7d8081768c8d84294b2563387972c64f407b603ddf3ba8ef8782931b5b361ff",
+      "elapsed_s": 0.022022321820259094
+    },
+    {
+      "name": "health",
+      "http_status": 200,
+      "sha256": "4ca62b1d16d951a5ae4145897562e0df5a0b92dc07f2786ea0c8c5e9c3ea031f",
+      "elapsed_s": 0.0007584160193800926
+    }
+  ]
+}
