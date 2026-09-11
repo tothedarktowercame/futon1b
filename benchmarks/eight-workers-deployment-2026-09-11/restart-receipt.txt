@@ -1,0 +1,27 @@
+02:33:34Z cgroup=0::/user.slice/user-1000.slice/user@1000.service/app.slice/futon1b-restart-eight-workers-20260911.service
+02:33:34Z unit=futon1b-zone.service  repo=/home/joe/code/futon1b  head=a1ebfa1
+02:33:34Z PRE-CHECK 1: XTDB log backlog must be under the safe ceiling
+    log_size_bytes=10974924992
+    latest_submitted_byte_offset=10974920399
+    latest_processed_byte_offset=10974920399
+    submitted_minus_processed_bytes=0
+    log_size_minus_processed_bytes=4593
+    maximum_safe_backlog_bytes=33554432
+    restart_safe=true
+02:33:34Z   restart_safe=true
+02:33:34Z PRE-CHECK 2: table census before
+02:33:37Z   CENSUS_MODE=full-census
+    {:ok true, :deep true, :tables {:hyperedges 801975, :entities 51495, :evidence 250159, :relations 48222, :type-catalog 258, :docs 0, :misc 0}}
+02:33:37Z restarting futon1b-zone.service (t0=2026-09-11T02:33:37Z, old-pid=764140)
+02:33:38Z   systemctl returned 0
+02:34:36Z STORE UP after 60s
+02:34:36Z   main pid 764140 -> 2166403
+02:34:36Z POST-CHECK 1: table census after, every row diffed
+    {:ok true, :deep true, :tables {:hyperedges 801975, :entities 51495, :evidence 250159, :relations 48222, :type-catalog 258, :docs 0, :misc 0}}
+02:34:39Z   no table shrank
+02:34:39Z POST-CHECK 2: write path (read-only)
+    read 25 timestamps, 0 stamped after 2026-09-11T02:33:37Z
+02:34:42Z   WRITE PATH UNCONFIRMED - no evidence stamped after the restart yet.
+02:34:42Z   This is NOT proof of failure: it means no agent has written since restart.
+02:34:42Z   Re-check with: curl -s 'http://127.0.0.1:7073/api/alpha/evidence?limit=5' | head -c 400
+02:34:42Z RESULT=ok-write-unconfirmed
