@@ -17,6 +17,7 @@
             [migration.transform :as xf]
             [migration.ingest :as ingest]
             [futon1b-xt :as fxt]
+            [futon1b-request-executor :as request-executor]
             [xtdb.api :as xt]))
 
 ;; ---------------------------------------------------------------------------
@@ -1256,8 +1257,14 @@
   This is a materialized projection, not a TTL cache: successful memory/assert
   puts and retractions advance it synchronously. Historical reads bypass it."
   [node]
-  (locking !memory-projection-indexes
+  (let [requested (System/nanoTime)
+        operation-id (str (java.util.UUID/randomUUID))]
+   (println "[memory-projection]" (pr-str {:operation-id operation-id :stage :waiting-for-lock
+                                          :http-task (request-executor/task-observation)}))
+   (locking !memory-projection-indexes
     (let [started (System/nanoTime)]
+      (println "[memory-projection]" (pr-str {:operation-id operation-id :stage :lock-acquired
+                                             :lock-wait-ms (elapsed-ms requested)}))
       (loop [attempt 1]
         (let [quiescence (wait-for-indexing-quiescence! node)
               source-watermark (node-watermark node)
@@ -1272,6 +1279,10 @@
                      (list 'order-by {:val 'xt/id :dir :asc})
                      (list 'limit
                            (inc max-memory-projection-index-components))))]
+          (println "[memory-projection]"
+                   (pr-str {:operation-id operation-id :stage :selected
+                            :attempt attempt :quiescence-wait-ms (:waited-ms quiescence)
+                            :selected-count (count selected+) :elapsed-ms (elapsed-ms started)}))
           (when (> (count selected+) max-memory-projection-index-components)
             (throw (gates/layered-error
                     0 :memory-projection-index-bound-exceeded
@@ -1282,6 +1293,10 @@
                 components (mapv hydrated-row->component rows)
                 observed-watermark (node-watermark node)
                 moved? (not= source-watermark observed-watermark)]
+            (println "[memory-projection]"
+                     (pr-str {:operation-id operation-id :stage :hydrated
+                              :attempt attempt :source-moved? moved?
+                              :elapsed-ms (elapsed-ms started)}))
             (when (and moved?
                        (>= attempt max-memory-projection-build-attempts))
               (throw (gates/layered-error
@@ -1304,7 +1319,7 @@
                  :endpoint-count (count (:by-endpoint index))
                  :build-attempts attempt
                  :quiescence-wait-ms (:waited-ms quiescence)
-                 :build-ms (elapsed-ms started)}))))))))
+                 :build-ms (elapsed-ms started)})))))))))
 
 (defn refresh-memory-projection-component!
   "Point-refresh one current memory/assert component after its verified put."
