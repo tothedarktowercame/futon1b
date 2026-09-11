@@ -42,14 +42,14 @@
             [zai-memory-1b :as zm]
             [futon1b-xt :as fxt]
             [futon1b-text :as text]
+            [futon1b-request-executor :as request-executor]
             [xtdb.api :as xt])
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
            [java.net InetSocketAddress URLDecoder]
            [java.nio.charset StandardCharsets]
            [java.time Instant]
            [java.time.temporal TemporalAccessor]
-           [java.util.concurrent ArrayBlockingQueue Semaphore ThreadPoolExecutor
-            ThreadPoolExecutor$AbortPolicy TimeUnit])
+           [java.util.concurrent Semaphore TimeUnit])
   (:gen-class))
 
 (defonce !node (atom nil))
@@ -405,9 +405,12 @@
       (let [started (System/nanoTime)
             method (.getRequestMethod ex)
             uri (str (.getRequestURI ex))
-            trace-id (or (request-trace-id ex) "-")]
-        (println (format "[futon1b-request] start method=%s uri=%s trace-id=%s"
-                         method uri trace-id))
+            trace-id (or (request-trace-id ex)
+                         (some-> (request-executor/task-observation)
+                                 :request-task/id (->> (str "http-task:")))
+                         "-")]
+        (println (format "[futon1b-request] start method=%s uri=%s trace-id=%s admission=%s"
+                         method uri trace-id (pr-str (request-executor/task-observation))))
         (flush)
         (binding [*json-response?* (wants-json? ex)]
           (try
@@ -541,6 +544,8 @@
            (str "?" (str/join "&" (sort (map #(first (str/split % #"=" 2))
                                              (str/split q #"&")))))))))
 
+(declare !server-executors)
+
 (defn expensive-read-snapshot
   "Permit/holder/GC view for /health. Takes no permit; O(holders)."
   []
@@ -548,7 +553,9 @@
         holders (vals @!expensive-read-holders)
         rt (Runtime/getRuntime)
         gc-beans (java.lang.management.ManagementFactory/getGarbageCollectorMXBeans)]
-    {:permits/total 4
+    {:request-workers (mapv (comp request-executor/snapshot :executor)
+                            (vals @!server-executors))
+     :permits/total 4
      :permits/available (.availablePermits expensive-read-permit)
      :permits/waiters (.getQueueLength expensive-read-permit)
      :holders (mapv (fn [h] (-> h
@@ -1024,9 +1031,7 @@
   feeds Executors/newFixedThreadPool's unbounded queue: timed-out clients can
   accumulate thousands of Exchange objects until the dispatcher itself OOMs."
   [threads queue-capacity]
-  (ThreadPoolExecutor. threads threads 0 TimeUnit/MILLISECONDS
-                       (ArrayBlockingQueue. queue-capacity)
-                       (ThreadPoolExecutor$AbortPolicy.)))
+  (request-executor/bounded-executor threads queue-capacity))
 
 (defn stop-server!
   "Stop a server returned by start-server! and release its worker threads."
