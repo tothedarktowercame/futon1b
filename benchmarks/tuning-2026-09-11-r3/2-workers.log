@@ -1,0 +1,40 @@
+WARNING: Unknown module: org.apache.arrow.memory.core specified to --add-opens
+SLF4J(W): No SLF4J providers were found.
+SLF4J(W): Defaulting to no-operation (NOP) logger implementation
+SLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.
+WARNING: A restricted method in java.lang.foreign.MemorySegment has been called
+WARNING: java.lang.foreign.MemorySegment::reinterpret has been called by the unnamed module
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for this module
+
+[memory-projection][memory-projection] [memory-projection] [memory-projection]  {:operation-id "efb2daa1-1d6d-46c0-a2ae-211b39b0528b", :stage :waiting-for-lock, :http-task {:request-task/id 5, :queue-wait-ms 0}}{:operation-id "6309b54a-2332-4c2e-8e12-268a8cd5ff02", :stage :waiting-for-lock, :http-task {:request-task/id 4, :queue-wait-ms 0}}{:operation-id "c1f44f70-dab1-4eef-8521-6b51297dac31", :stage :waiting-for-lock, :http-task {:request-task/id 1, :queue-wait-ms 0}}
+{:operation-id "d2e8f977-b17f-47c9-b1d1-ec3df02b6436", :stage :waiting-for-lock, :http-task {:request-task/id 2, :queue-wait-ms 0}}
+
+
+[memory-projection] {:operation-id "d2e8f977-b17f-47c9-b1d1-ec3df02b6436", :stage :lock-acquired, :lock-wait-ms 0.5881}
+[memory-projection] {:operation-id "d2e8f977-b17f-47c9-b1d1-ec3df02b6436", :stage :selected, :attempt 1, :quiescence-wait-ms 35.26965, :selected-count 2048, :elapsed-ms 185.650693}
+[memory-projection] {:operation-id "d2e8f977-b17f-47c9-b1d1-ec3df02b6436", :stage :hydrated, :attempt 1, :source-moved? false, :elapsed-ms 5071.162864}
+[memory-projection] {:operation-id "efb2daa1-1d6d-46c0-a2ae-211b39b0528b", :stage :lock-acquired, :lock-wait-ms 5075.421976}
+[memory-projection] {:operation-id "efb2daa1-1d6d-46c0-a2ae-211b39b0528b", :stage :selected, :attempt 1, :quiescence-wait-ms 8.049659, :selected-count 2048, :elapsed-ms 20.416221}
+[memory-projection] {:operation-id "efb2daa1-1d6d-46c0-a2ae-211b39b0528b", :stage :hydrated, :attempt 1, :source-moved? false, :elapsed-ms 3393.436831}
+[memory-projection] {:operation-id "c1f44f70-dab1-4eef-8521-6b51297dac31", :stage :lock-acquired, :lock-wait-ms 8471.362288}
+[memory-projection] {:operation-id "c1f44f70-dab1-4eef-8521-6b51297dac31", :stage :selected, :attempt 1, :quiescence-wait-ms 4.750512, :selected-count 2048, :elapsed-ms 13.466477}
+[memory-projection] {:operation-id "c1f44f70-dab1-4eef-8521-6b51297dac31", :stage :hydrated, :attempt 1, :source-moved? false, :elapsed-ms 3017.730795}
+[memory-projection] {:operation-id "6309b54a-2332-4c2e-8e12-268a8cd5ff02", :stage :lock-acquired, :lock-wait-ms 11491.539767}
+[memory-projection] {:operation-id "6309b54a-2332-4c2e-8e12-268a8cd5ff02", :stage :selected, :attempt 1, :quiescence-wait-ms 5.429682, :selected-count 2048, :elapsed-ms 14.508015}
+[memory-projection] {:operation-id "6309b54a-2332-4c2e-8e12-268a8cd5ff02", :stage :hydrated, :attempt 1, :source-moved? false, :elapsed-ms 3006.963515}
+[memory-projection][memory-projection][memory-projection] {:operation-id "040b5c6b-2e4d-41fa-afd3-a6088dd93b68", :stage :waiting-for-lock, :http-task {:request-task/id 99, :queue-wait-ms 0}}
+[memory-projection] {:operation-id "040b5c6b-2e4d-41fa-afd3-a6088dd93b68", :stage :lock-acquired, :lock-wait-ms 0.094096}
+  {:operation-id "e092bd7b-22c9-4631-a4ca-c4598890314c", :stage :waiting-for-lock, :http-task {:request-task/id 98, :queue-wait-ms 0}}{:operation-id "23cb5d00-1768-4b37-a3fc-6ab94a8b5934", :stage :waiting-for-lock, :http-task {:request-task/id 97, :queue-wait-ms 0}}[memory-projection] {:operation-id "976bb205-4191-4e61-9090-2b8cd7e061ff", :stage :waiting-for-lock, :http-task {:request-task/id 100, :queue-wait-ms 0}}
+
+
+[memory-projection] {:operation-id "040b5c6b-2e4d-41fa-afd3-a6088dd93b68", :stage :selected, :attempt 1, :quiescence-wait-ms 9.849345, :selected-count 2048, :elapsed-ms 25.684751}
+[memory-projection] {:operation-id "040b5c6b-2e4d-41fa-afd3-a6088dd93b68", :stage :hydrated, :attempt 1, :source-moved? false, :elapsed-ms 3200.485627}
+[memory-projection] {:operation-id "e092bd7b-22c9-4631-a4ca-c4598890314c", :stage :lock-acquired, :lock-wait-ms 3203.08133}
+[memory-projection] {:operation-id "e092bd7b-22c9-4631-a4ca-c4598890314c", :stage :selected, :attempt 1, :quiescence-wait-ms 4.607234, :selected-count 2048, :elapsed-ms 13.458002}
+[memory-projection] {:operation-id "e092bd7b-22c9-4631-a4ca-c4598890314c", :stage :hydrated, :attempt 1, :source-moved? false, :elapsed-ms 3014.807344}
+[memory-projection] {:operation-id "23cb5d00-1768-4b37-a3fc-6ab94a8b5934", :stage :lock-acquired, :lock-wait-ms 6220.415169}
+[memory-projection] {:operation-id "23cb5d00-1768-4b37-a3fc-6ab94a8b5934", :stage :selected, :attempt 1, :quiescence-wait-ms 5.015207, :selected-count 2048, :elapsed-ms 13.754656}
+[memory-projection] {:operation-id "23cb5d00-1768-4b37-a3fc-6ab94a8b5934", :stage :hydrated, :attempt 1, :source-moved? false, :elapsed-ms 2897.998399}
+[memory-projection] {:operation-id "976bb205-4191-4e61-9090-2b8cd7e061ff", :stage :lock-acquired, :lock-wait-ms 9120.739797}
+[memory-projection] {:operation-id "976bb205-4191-4e61-9090-2b8cd7e061ff", :stage :selected, :attempt 1, :quiescence-wait-ms 5.036717, :selected-count 2048, :elapsed-ms 13.714442}
+[memory-projection] {:operation-id "976bb205-4191-4e61-9090-2b8cd7e061ff", :stage :hydrated, :attempt 1, :source-moved? false, :elapsed-ms 3106.047376}
