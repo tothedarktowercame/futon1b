@@ -1084,7 +1084,9 @@
     (catch Throwable t
       (println "[fts] init failed (serving continues):" (.getMessage t))))
   (let [server (HttpServer/create (socket-address bind-host port) 50)
-        executor (bounded-executor 4 16)
+        ;; Eight request workers keep short reads moving while projection
+        ;; builds wait on their lock (benchmarks/tuning-2026-09-11-r3).
+        executor (bounded-executor 8 16)
         health-server (when health-port
                         (HttpServer/create (socket-address bind-host health-port) 8))
         health-executor (when health-server (bounded-executor 1 4))]
