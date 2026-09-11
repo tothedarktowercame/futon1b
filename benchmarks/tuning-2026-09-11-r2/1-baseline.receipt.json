@@ -1,0 +1,22 @@
+{
+  "command": [
+    "/usr/bin/time",
+    "-f",
+    "{\"max_rss_kb\":%M,\"user_s\":%U,\"system_s\":%S,\"wall_s\":%e}",
+    "-o",
+    "/home/joe/code/futon1b/benchmarks/tuning-2026-09-11-r2/1-baseline.resources.json",
+    "clojure",
+    "-Sdeps",
+    "{:aliases {:tuning {:jvm-opts [\"--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED\" \"-Dio.netty.tryReflectionSetAccessible=true\" \"-Djava.net.preferIPv4Stack=true\" \"-Xmx4g\" \"-XX:MaxDirectMemorySize=3g\" \"-XX:MaxMetaspaceSize=2g\"]}}}",
+    "-M:tuning",
+    "/home/joe/code/futon1b/benchmarks/tuning-2026-09-11-r2/probe.clj",
+    "4",
+    "/home/joe/code/futon1b/benchmarks/tuning-2026-09-11-r2/1-baseline.json",
+    "foreground-first"
+  ],
+  "started_unix": 1789093264.3546188,
+  "elapsed_s": 9.935353755950928,
+  "exit": 0,
+  "log_sha256": "9bedf6d403773edaa0936283c0dec0bca6225fd604480a984a5e63e6efb595c8",
+  "source_drift_after": false
+}

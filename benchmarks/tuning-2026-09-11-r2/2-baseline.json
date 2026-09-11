@@ -1,0 +1,1169 @@
+{
+  "scenarios" : [ {
+    "heap-used-bytes" : 258093320,
+    "heap-max-bytes" : 4294967296,
+    "mixed" : true,
+    "after" : "{:metrics {\"indexer.allocator.allocated_memory\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"query_source.allocator.allocated_memory\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"tx.error\" [{:count 0.0, :tags {:node-id \"feb4dcca\"}}], \"jvm.gc.concurrent.phase.time\" [{:count 4, :max-time #xt/duration \"PT0.011S\", :mean-time #xt/duration \"PT0.005S\", :tags {:action \"end of concurrent GC pause\", :cause \"No GC\", :gc \"G1 Concurrent GC\", :node-id \"feb4dcca\"}}], \"jvm.gc.max.data.size\" [{:tags {:node-id \"feb4dcca\"}, :value 4.294967296E9}], \"jvm.threads.peak\" [{:tags {:node-id \"feb4dcca\"}, :value 73.0}], \"jvm.memory.used\" [{:tags {:area \"nonheap\", :id \"Compressed Class Space\", :node-id \"feb4dcca\"}, :value 2.0440368E7} {:tags {:area \"nonheap\", :id \"Metaspace\", :node-id \"feb4dcca\"}, :value 1.02885472E8} {:tags {:area \"heap\", :id \"G1 Survivor Space\", :node-id \"feb4dcca\"}, :value 1070128.0} {:tags {:area \"nonheap\", :id \"CodeHeap 'profiled nmethods'\", :node-id \"feb4dcca\"}, :value 3.3508608E7} {:tags {:area \"heap\", :id \"G1 Old Gen\", :node-id \"feb4dcca\"}, :value 5.9448768E7} {:tags {:area \"heap\", :id \"G1 Eden Space\", :node-id \"feb4dcca\"}, :value 2.01326592E8} {:tags {:area \"nonheap\", :id \"CodeHeap 'non-nmethods'\", :node-id \"feb4dcca\"}, :value 4277504.0} {:tags {:area \"nonheap\", :id \"CodeHeap 'non-profiled nmethods'\", :node-id \"feb4dcca\"}, :value 1.7715968E7}], \"jvm.threads.live\" [{:tags {:node-id \"feb4dcca\"}, :value 73.0}], \"watcher.allocator.allocated_memory\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"jvm.buffer.memory.used\" [{:tags {:id \"mapped\", :node-id \"feb4dcca\"}, :value 0.0} {:tags {:id \"direct\", :node-id \"feb4dcca\"}, :value 6151788.0} {:tags {:id \"mapped - 'non-volatile memory'\", :node-id \"feb4dcca\"}, :value 0.0}], \"system.load.average.1m\" [{:tags {:node-id \"feb4dcca\"}, :value 6.7236328125}], \"compactor.allocator.allocated_memory\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"jvm.memory.netty.bytes\" [{:tags {:node-id \"feb4dcca\"}, :value 2.22298112E8}], \"jvm.memory.direct.bytes\" [{:tags {:node-id \"feb4dcca\"}, :value 6151788.0}], \"jvm.threads.daemon\" [{:tags {:node-id \"feb4dcca\"}, :value 22.0}], \"live-index.allocator.allocated_memory\" [{:tags {:node-id \"feb4dcca\"}, :value 9176448.0}], \"jvm.gc.overhead\" [{:tags {:node-id \"feb4dcca\"}, :value 0.014980199961895913}], \"jvm.memory.usage.after.gc\" [{:tags {:area \"heap\", :node-id \"feb4dcca\", :pool \"long-lived\"}, :value 0.013841494917869568}], \"buffer-pool.allocator.allocated_memory\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"node.tx.latestSubmittedMsgId\" [{:tags {:node-id \"feb4dcca\"}, :value 26.0}], \"jvm.classes.loaded\" [{:tags {:node-id \"feb4dcca\"}, :value 19613.0}], \"memory-cache.evictableBytes\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"query.error\" [{:count 0.0, :tags {:node-id \"feb4dcca\"}}], \"jvm.memory.committed\" [{:tags {:area \"nonheap\", :id \"Metaspace\", :node-id \"feb4dcca\"}, :value 1.17440512E8} {:tags {:area \"nonheap\", :id \"CodeHeap 'non-profiled nmethods'\", :node-id \"feb4dcca\"}, :value 1.7760256E7} {:tags {:area \"heap\", :id \"G1 Old Gen\", :node-id \"feb4dcca\"}, :value 2.89406976E8} {:tags {:area \"heap\", :id \"G1 Eden Space\", :node-id \"feb4dcca\"}, :value 4.9283072E8} {:tags {:area \"heap\", :id \"G1 Survivor Space\", :node-id \"feb4dcca\"}, :value 2097152.0} {:tags {:area \"nonheap\", :id \"CodeHeap 'profiled nmethods'\", :node-id \"feb4dcca\"}, :value 3.4275328E7} {:tags {:area \"nonheap\", :id \"Compressed Class Space\", :node-id \"feb4dcca\"}, :value 2.523136E7} {:tags {:area \"nonheap\", :id \"CodeHeap 'non-nmethods'\", :node-id \"feb4dcca\"}, :value 4456448.0}], \"jvm.gc.live.data.size\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"jvm.gc.memory.allocated\" [{:count 7.813988344E9, :tags {:node-id \"feb4dcca\"}}], \"pgwire.active_connections\" [{:tags {:node-id \"feb4dcca\"}, :value 1.0}], \"jvm.buffer.total.capacity\" [{:tags {:id \"mapped\", :node-id \"feb4dcca\"}, :value 0.0} {:tags {:id \"mapped - 'non-volatile memory'\", :node-id \"feb4dcca\"}, :value 0.0} {:tags {:id \"direct\", :node-id \"feb4dcca\"}, :value 6151787.0}], \"jvm.gc.pause\" [{:count 1, :max-time #xt/duration \"PT0.005S\", :mean-time #xt/duration \"PT0.005S\", :tags {:action \"end of minor GC\", :cause \"Metadata GC Threshold\", :gc \"G1 Young Generation\", :node-id \"feb4dcca\"}} {:count 21, :max-time #xt/duration \"PT0.006S\", :mean-time #xt/duration \"PT0.00247619S\", :tags {:action \"end of minor GC\", :cause \"G1 Evacuation Pause\", :gc \"G1 Young Generation\", :node-id \"feb4dcca\"}} {:count 1, :max-time #xt/duration \"PT0.003S\", :mean-time #xt/duration \"PT0.003S\", :tags {:action \"end of minor GC\", :cause \"CodeCache GC Threshold\", :gc \"G1 Young Generation\", :node-id \"feb4dcca\"}}], \"jvm.gc.memory.promoted\" [{:count 2.8395E7, :tags {:node-id \"feb4dcca\"}}], \"node.tx.lag.MsgId\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"pgwire.cancelled_connections\" [{:count 0.0, :tags {:node-id \"feb4dcca\"}}], \"jvm.memory.max\" [{:tags {:area \"heap\", :id \"G1 Survivor Space\", :node-id \"feb4dcca\"}, :value -1.0} {:tags {:area \"nonheap\", :id \"CodeHeap 'profiled nmethods'\", :node-id \"feb4dcca\"}, :value 1.21729024E8} {:tags {:area \"nonheap\", :id \"CodeHeap 'non-nmethods'\", :node-id \"feb4dcca\"}, :value 8196096.0} {:tags {:area \"nonheap\", :id \"Metaspace\", :node-id \"feb4dcca\"}, :value 2.147483648E9} {:tags {:area \"nonheap\", :id \"CodeHeap 'non-profiled nmethods'\", :node-id \"feb4dcca\"}, :value 1.2173312E8} {:tags {:area \"heap\", :id \"G1 Eden Space\", :node-id \"feb4dcca\"}, :value -1.0} {:tags {:area \"nonheap\", :id \"Compressed Class Space\", :node-id \"feb4dcca\"}, :value 1.073741824E9} {:tags {:area \"heap\", :id \"G1 Old Gen\", :node-id \"feb4dcca\"}, :value 4.294967296E9}], \"system.cpu.count\" [{:tags {:node-id \"feb4dcca\"}, :value 32.0}], \"memory-cache.freeBytes\" [{:tags {:node-id \"feb4dcca\"}, :value 1.610612736E9}], \"compactor.jobs.available\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"pgwire.total_connections\" [{:count 1666.0, :tags {:node-id \"feb4dcca\"}}], \"jvm.threads.states\" [{:tags {:node-id \"feb4dcca\", :state \"waiting\"}, :value 50.0} {:tags {:node-id \"feb4dcca\", :state \"timed-waiting\"}, :value 16.0} {:tags {:node-id \"feb4dcca\", :state \"blocked\"}, :value 0.0} {:tags {:node-id \"feb4dcca\", :state \"new\"}, :value 0.0} {:tags {:node-id \"feb4dcca\", :state \"terminated\"}, :value 0.0} {:tags {:node-id \"feb4dcca\", :state \"runnable\"}, :value 7.0}], \"memory-cache.pinnedBytes\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"process.cpu.usage\" [{:tags {:node-id \"feb4dcca\"}, :value 0.11842105263157894}], \"query.warning\" [{:count 0.0, :tags {:node-id \"feb4dcca\"}}], \"node.tx.latestProcessedMsgId\" [{:tags {:node-id \"feb4dcca\"}, :value 26.0}], \"system.cpu.usage\" [{:tags {:node-id \"feb4dcca\"}, :value 0.13157894736842105}], \"query.timer\" [{:tags {:node-id \"feb4dcca\"}, :p999-time #xt/duration \"PT0.006815488S\", :p75-time #xt/duration \"PT0.000327424S\", :p95-time #xt/duration \"PT0.000655104S\", :p99-time #xt/duration \"PT0.001310464S\", :count 8262, :mean-time #xt/duration \"PT0.000305963S\", :max-time #xt/duration \"PT0.046915752S\"}], \"compactor.job.timer\" [{:tags {:node-id \"feb4dcca\"}, :p999-time #xt/duration \"PT0S\", :p75-time #xt/duration \"PT0S\", :p95-time #xt/duration \"PT0S\", :p99-time #xt/duration \"PT0S\", :count 0, :mean-time #xt/duration \"PT0S\", :max-time #xt/duration \"PT0S\"}], \"jvm.buffer.count\" [{:tags {:id \"direct\", :node-id \"feb4dcca\"}, :value 52.0} {:tags {:id \"mapped\", :node-id \"feb4dcca\"}, :value 0.0} {:tags {:id \"mapped - 'non-volatile memory'\", :node-id \"feb4dcca\"}, :value 0.0}], \"node.tx.latestCompletedTxId\" [{:tags {:node-id \"feb4dcca\"}, :value 26.0}], \"tx.op.timer\" [{:tags {:node-id \"feb4dcca\"}, :p999-time #xt/duration \"PT0.013103104S\", :p75-time #xt/duration \"PT0.001961984S\", :p95-time #xt/duration \"PT0.006025216S\", :p99-time #xt/duration \"PT0.013103104S\", :count 27, :mean-time #xt/duration \"PT0.001491863S\", :max-time #xt/duration \"PT0.012805758S\"}]}, :latest-completed-txs {\"xtdb\" [#xt/tx-key {:tx-id 26, :system-time #xt/zdt \"2026-09-11T02:22:02.611193Z[UTC]\"}]}, :latest-submitted-msg-ids {\"xtdb\" [26]}, :latest-processed-msg-ids {\"xtdb\" [26]}}",
+    "gc" : [ {
+      "name" : "G1 Young Generation",
+      "count" : 43,
+      "time-ms" : 122
+    }, {
+      "name" : "G1 Concurrent GC",
+      "count" : 10,
+      "time-ms" : 30
+    }, {
+      "name" : "G1 Old Generation",
+      "count" : 0,
+      "time-ms" : 0
+    } ],
+    "jvm-args" : [ "-XX:-OmitStackTraceInFastThrow", "--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED", "-Dio.netty.tryReflectionSetAccessible=true", "-Djava.net.preferIPv4Stack=true", "-Xmx4g", "-XX:MaxDirectMemorySize=3g", "-XX:MaxMetaspaceSize=2g", "-Dclojure.basis=.cpcache/3047844373.basis" ],
+    "elapsed-ms" : 2855.599562,
+    "before" : "{:metrics {\"indexer.allocator.allocated_memory\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"query_source.allocator.allocated_memory\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"tx.error\" [{:count 0.0, :tags {:node-id \"feb4dcca\"}}], \"jvm.gc.concurrent.phase.time\" [{:count 2, :max-time #xt/duration \"PT0.008S\", :mean-time #xt/duration \"PT0.004S\", :tags {:action \"end of concurrent GC pause\", :cause \"No GC\", :gc \"G1 Concurrent GC\", :node-id \"feb4dcca\"}}], \"jvm.gc.max.data.size\" [{:tags {:node-id \"feb4dcca\"}, :value 4.294967296E9}], \"jvm.threads.peak\" [{:tags {:node-id \"feb4dcca\"}, :value 35.0}], \"jvm.memory.used\" [{:tags {:area \"nonheap\", :id \"Compressed Class Space\", :node-id \"feb4dcca\"}, :value 2.0352984E7} {:tags {:area \"nonheap\", :id \"Metaspace\", :node-id \"feb4dcca\"}, :value 9.8476624E7} {:tags {:area \"heap\", :id \"G1 Survivor Space\", :node-id \"feb4dcca\"}, :value 7771912.0} {:tags {:area \"nonheap\", :id \"CodeHeap 'profiled nmethods'\", :node-id \"feb4dcca\"}, :value 1.9538048E7} {:tags {:area \"heap\", :id \"G1 Old Gen\", :node-id \"feb4dcca\"}, :value 4.612896E7} {:tags {:area \"heap\", :id \"G1 Eden Space\", :node-id \"feb4dcca\"}, :value 2.11812352E8} {:tags {:area \"nonheap\", :id \"CodeHeap 'non-nmethods'\", :node-id \"feb4dcca\"}, :value 4268288.0} {:tags {:area \"nonheap\", :id \"CodeHeap 'non-profiled nmethods'\", :node-id \"feb4dcca\"}, :value 9803648.0}], \"jvm.threads.live\" [{:tags {:node-id \"feb4dcca\"}, :value 35.0}], \"watcher.allocator.allocated_memory\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"jvm.buffer.memory.used\" [{:tags {:id \"mapped\", :node-id \"feb4dcca\"}, :value 0.0} {:tags {:id \"direct\", :node-id \"feb4dcca\"}, :value 6054452.0} {:tags {:id \"mapped - 'non-volatile memory'\", :node-id \"feb4dcca\"}, :value 0.0}], \"system.load.average.1m\" [{:tags {:node-id \"feb4dcca\"}, :value 6.525390625}], \"compactor.allocator.allocated_memory\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"jvm.memory.netty.bytes\" [{:tags {:node-id \"feb4dcca\"}, :value 9.2274688E7}], \"jvm.memory.direct.bytes\" [{:tags {:node-id \"feb4dcca\"}, :value 6054452.0}], \"jvm.threads.daemon\" [{:tags {:node-id \"feb4dcca\"}, :value 21.0}], \"live-index.allocator.allocated_memory\" [{:tags {:node-id \"feb4dcca\"}, :value 9174272.0}], \"jvm.gc.overhead\" [{:tags {:node-id \"feb4dcca\"}, :value 0.016767349363474706}], \"jvm.memory.usage.after.gc\" [{:tags {:area \"heap\", :node-id \"feb4dcca\", :pool \"long-lived\"}, :value 0.010740235447883606}], \"buffer-pool.allocator.allocated_memory\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"node.tx.latestSubmittedMsgId\" [{:tags {:node-id \"feb4dcca\"}, :value 10.0}], \"jvm.classes.loaded\" [{:tags {:node-id \"feb4dcca\"}, :value 19498.0}], \"memory-cache.evictableBytes\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"query.error\" [{:count 0.0, :tags {:node-id \"feb4dcca\"}}], \"jvm.memory.committed\" [{:tags {:area \"nonheap\", :id \"Metaspace\", :node-id \"feb4dcca\"}, :value 1.12852992E8} {:tags {:area \"nonheap\", :id \"CodeHeap 'non-profiled nmethods'\", :node-id \"feb4dcca\"}, :value 9830400.0} {:tags {:area \"heap\", :id \"G1 Old Gen\", :node-id \"feb4dcca\"}, :value 2.99892736E8} {:tags {:area \"heap\", :id \"G1 Eden Space\", :node-id \"feb4dcca\"}, :value 4.55081984E8} {:tags {:area \"heap\", :id \"G1 Survivor Space\", :node-id \"feb4dcca\"}, :value 8388608.0} {:tags {:area \"nonheap\", :id \"CodeHeap 'profiled nmethods'\", :node-id \"feb4dcca\"}, :value 1.9595264E7} {:tags {:area \"nonheap\", :id \"Compressed Class Space\", :node-id \"feb4dcca\"}, :value 2.5165824E7} {:tags {:area \"nonheap\", :id \"CodeHeap 'non-nmethods'\", :node-id \"feb4dcca\"}, :value 4390912.0}], \"jvm.gc.live.data.size\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"jvm.gc.memory.allocated\" [{:count 5.17996544E8, :tags {:node-id \"feb4dcca\"}}], \"pgwire.active_connections\" [{:tags {:node-id \"feb4dcca\"}, :value 1.0}], \"jvm.buffer.total.capacity\" [{:tags {:id \"mapped\", :node-id \"feb4dcca\"}, :value 0.0} {:tags {:id \"mapped - 'non-volatile memory'\", :node-id \"feb4dcca\"}, :value 0.0} {:tags {:id \"direct\", :node-id \"feb4dcca\"}, :value 6054451.0}], \"jvm.gc.pause\" [{:count 1, :max-time #xt/duration \"PT0.005S\", :mean-time #xt/duration \"PT0.005S\", :tags {:action \"end of minor GC\", :cause \"Metadata GC Threshold\", :gc \"G1 Young Generation\", :node-id \"feb4dcca\"}} {:count 3, :max-time #xt/duration \"PT0.006S\", :mean-time #xt/duration \"PT0.004666666S\", :tags {:action \"end of minor GC\", :cause \"G1 Evacuation Pause\", :gc \"G1 Young Generation\", :node-id \"feb4dcca\"}}], \"jvm.gc.memory.promoted\" [{:count 1.5075192E7, :tags {:node-id \"feb4dcca\"}}], \"node.tx.lag.MsgId\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"pgwire.cancelled_connections\" [{:count 0.0, :tags {:node-id \"feb4dcca\"}}], \"jvm.memory.max\" [{:tags {:area \"heap\", :id \"G1 Survivor Space\", :node-id \"feb4dcca\"}, :value -1.0} {:tags {:area \"nonheap\", :id \"CodeHeap 'profiled nmethods'\", :node-id \"feb4dcca\"}, :value 1.21729024E8} {:tags {:area \"nonheap\", :id \"CodeHeap 'non-nmethods'\", :node-id \"feb4dcca\"}, :value 8196096.0} {:tags {:area \"nonheap\", :id \"Metaspace\", :node-id \"feb4dcca\"}, :value 2.147483648E9} {:tags {:area \"nonheap\", :id \"CodeHeap 'non-profiled nmethods'\", :node-id \"feb4dcca\"}, :value 1.2173312E8} {:tags {:area \"heap\", :id \"G1 Eden Space\", :node-id \"feb4dcca\"}, :value -1.0} {:tags {:area \"nonheap\", :id \"Compressed Class Space\", :node-id \"feb4dcca\"}, :value 1.073741824E9} {:tags {:area \"heap\", :id \"G1 Old Gen\", :node-id \"feb4dcca\"}, :value 4.294967296E9}], \"system.cpu.count\" [{:tags {:node-id \"feb4dcca\"}, :value 32.0}], \"memory-cache.freeBytes\" [{:tags {:node-id \"feb4dcca\"}, :value 1.610612736E9}], \"compactor.jobs.available\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"pgwire.total_connections\" [{:count 13.0, :tags {:node-id \"feb4dcca\"}}], \"jvm.threads.states\" [{:tags {:node-id \"feb4dcca\", :state \"waiting\"}, :value 16.0} {:tags {:node-id \"feb4dcca\", :state \"timed-waiting\"}, :value 12.0} {:tags {:node-id \"feb4dcca\", :state \"blocked\"}, :value 0.0} {:tags {:node-id \"feb4dcca\", :state \"new\"}, :value 0.0} {:tags {:node-id \"feb4dcca\", :state \"terminated\"}, :value 0.0} {:tags {:node-id \"feb4dcca\", :state \"runnable\"}, :value 7.0}], \"memory-cache.pinnedBytes\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"process.cpu.usage\" [{:tags {:node-id \"feb4dcca\"}, :value 1.0}], \"query.warning\" [{:count 0.0, :tags {:node-id \"feb4dcca\"}}], \"node.tx.latestProcessedMsgId\" [{:tags {:node-id \"feb4dcca\"}, :value 10.0}], \"system.cpu.usage\" [{:tags {:node-id \"feb4dcca\"}, :value 0.0}], \"query.timer\" [{:tags {:node-id \"feb4dcca\"}, :p999-time #xt/duration \"PT0.014671872S\", :p75-time #xt/duration \"PT0.001171456S\", :p95-time #xt/duration \"PT0.009428992S\", :p99-time #xt/duration \"PT0.014671872S\", :count 41, :mean-time #xt/duration \"PT0.001766305S\", :max-time #xt/duration \"PT0.014458375S\"}], \"compactor.job.timer\" [{:tags {:node-id \"feb4dcca\"}, :p999-time #xt/duration \"PT0S\", :p75-time #xt/duration \"PT0S\", :p95-time #xt/duration \"PT0S\", :p99-time #xt/duration \"PT0S\", :count 0, :mean-time #xt/duration \"PT0S\", :max-time #xt/duration \"PT0S\"}], \"jvm.buffer.count\" [{:tags {:id \"direct\", :node-id \"feb4dcca\"}, :value 15.0} {:tags {:id \"mapped\", :node-id \"feb4dcca\"}, :value 0.0} {:tags {:id \"mapped - 'non-volatile memory'\", :node-id \"feb4dcca\"}, :value 0.0}], \"node.tx.latestCompletedTxId\" [{:tags {:node-id \"feb4dcca\"}, :value 10.0}], \"tx.op.timer\" [{:tags {:node-id \"feb4dcca\"}, :p999-time #xt/duration \"PT0.013074432S\", :p75-time #xt/duration \"PT0.00376832S\", :p95-time #xt/duration \"PT0.013074432S\", :p99-time #xt/duration \"PT0.013074432S\", :count 11, :mean-time #xt/duration \"PT0.003369214S\", :max-time #xt/duration \"PT0.012805758S\"}]}, :latest-completed-txs {\"xtdb\" [#xt/tx-key {:tx-id 10, :system-time #xt/zdt \"2026-09-11T02:21:59.647071Z[UTC]\"}]}, :latest-submitted-msg-ids {\"xtdb\" [10]}, :latest-processed-msg-ids {\"xtdb\" [10]}}",
+    "workers" : 4,
+    "results" : [ {
+      "kind" : "projection",
+      "id" : 0,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 1356.473747,
+      "total-ms" : 1357.987295
+    }, {
+      "kind" : "point",
+      "id" : 1,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 16.520949,
+      "total-ms" : 17.173809
+    }, {
+      "kind" : "scan",
+      "id" : 0,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 65.770022,
+      "total-ms" : 66.329507
+    }, {
+      "kind" : "point",
+      "id" : 2,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 16.704593,
+      "total-ms" : 17.064926
+    }, {
+      "kind" : "point",
+      "id" : 3,
+      "ok" : true,
+      "queue-ms" : 16,
+      "service-ms" : 29.373224,
+      "total-ms" : 46.426698
+    }, {
+      "kind" : "background-write",
+      "id" : 1,
+      "ok" : true,
+      "queue-ms" : 16,
+      "service-ms" : 29.318191,
+      "total-ms" : 46.34181
+    }, {
+      "kind" : "point",
+      "id" : 4,
+      "ok" : true,
+      "queue-ms" : 46,
+      "service-ms" : 18.652913,
+      "total-ms" : 65.073961
+    }, {
+      "kind" : "point",
+      "id" : 5,
+      "ok" : true,
+      "queue-ms" : 46,
+      "service-ms" : 17.598783,
+      "total-ms" : 63.989014
+    }, {
+      "kind" : "scan",
+      "id" : 2,
+      "ok" : true,
+      "queue-ms" : 63,
+      "service-ms" : 60.656396,
+      "total-ms" : 124.704611
+    }, {
+      "kind" : "point",
+      "id" : 6,
+      "ok" : true,
+      "queue-ms" : 65,
+      "service-ms" : 16.125059,
+      "total-ms" : 81.174434
+    }, {
+      "kind" : "point",
+      "id" : 7,
+      "ok" : true,
+      "queue-ms" : 65,
+      "service-ms" : 18.623859,
+      "total-ms" : 84.61846
+    }, {
+      "kind" : "background-write",
+      "id" : 3,
+      "ok" : true,
+      "queue-ms" : 81,
+      "service-ms" : 44.737312,
+      "total-ms" : 125.957782
+    }, {
+      "kind" : "point",
+      "id" : 8,
+      "ok" : true,
+      "queue-ms" : 84,
+      "service-ms" : 50.372931,
+      "total-ms" : 135.054279
+    }, {
+      "kind" : "point",
+      "id" : 9,
+      "ok" : true,
+      "queue-ms" : 124,
+      "service-ms" : 43.50561,
+      "total-ms" : 168.223665
+    }, {
+      "kind" : "scan",
+      "id" : 4,
+      "ok" : true,
+      "queue-ms" : 125,
+      "service-ms" : 54.500524,
+      "total-ms" : 180.523928
+    }, {
+      "kind" : "point",
+      "id" : 10,
+      "ok" : true,
+      "queue-ms" : 135,
+      "service-ms" : 41.693695,
+      "total-ms" : 176.793408
+    }, {
+      "kind" : "point",
+      "id" : 11,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 14.47154,
+      "total-ms" : 14.671554
+    }, {
+      "kind" : "background-write",
+      "id" : 5,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 9.802265,
+      "total-ms" : 9.903515
+    }, {
+      "kind" : "point",
+      "id" : 12,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 14.408062,
+      "total-ms" : 14.534528
+    }, {
+      "kind" : "point",
+      "id" : 13,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 13.563082,
+      "total-ms" : 13.641309
+    }, {
+      "kind" : "scan",
+      "id" : 6,
+      "ok" : true,
+      "queue-ms" : 9,
+      "service-ms" : 12.043073,
+      "total-ms" : 21.981172
+    }, {
+      "kind" : "point",
+      "id" : 14,
+      "ok" : true,
+      "queue-ms" : 13,
+      "service-ms" : 6.821406,
+      "total-ms" : 20.485668
+    }, {
+      "kind" : "point",
+      "id" : 15,
+      "ok" : true,
+      "queue-ms" : 14,
+      "service-ms" : 5.78018,
+      "total-ms" : 20.353671
+    }, {
+      "kind" : "background-write",
+      "id" : 7,
+      "ok" : true,
+      "queue-ms" : 14,
+      "service-ms" : 7.18727,
+      "total-ms" : 21.77152
+    }, {
+      "kind" : "projection",
+      "id" : 16,
+      "ok" : true,
+      "queue-ms" : 20,
+      "service-ms" : 476.487371,
+      "total-ms" : 496.867853
+    }, {
+      "kind" : "point",
+      "id" : 17,
+      "ok" : true,
+      "queue-ms" : 20,
+      "service-ms" : 5.717964,
+      "total-ms" : 26.230372
+    }, {
+      "kind" : "scan",
+      "id" : 8,
+      "ok" : true,
+      "queue-ms" : 21,
+      "service-ms" : 9.564622,
+      "total-ms" : 31.331403
+    }, {
+      "kind" : "point",
+      "id" : 18,
+      "ok" : true,
+      "queue-ms" : 21,
+      "service-ms" : 5.485569,
+      "total-ms" : 27.458637
+    }, {
+      "kind" : "point",
+      "id" : 19,
+      "ok" : true,
+      "queue-ms" : 26,
+      "service-ms" : 7.854907,
+      "total-ms" : 34.090118
+    }, {
+      "kind" : "background-write",
+      "id" : 9,
+      "ok" : true,
+      "queue-ms" : 27,
+      "service-ms" : 11.445987,
+      "total-ms" : 38.934579
+    }, {
+      "kind" : "point",
+      "id" : 20,
+      "ok" : true,
+      "queue-ms" : 31,
+      "service-ms" : 8.979468,
+      "total-ms" : 40.319327
+    }, {
+      "kind" : "point",
+      "id" : 21,
+      "ok" : true,
+      "queue-ms" : 34,
+      "service-ms" : 9.784763,
+      "total-ms" : 43.907532
+    }, {
+      "kind" : "scan",
+      "id" : 10,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 8.75537,
+      "total-ms" : 8.862569
+    }, {
+      "kind" : "point",
+      "id" : 22,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 5.649827,
+      "total-ms" : 5.721701
+    }, {
+      "kind" : "point",
+      "id" : 23,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 6.01535,
+      "total-ms" : 6.088086
+    }, {
+      "kind" : "background-write",
+      "id" : 11,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 9.907321,
+      "total-ms" : 9.96478
+    }, {
+      "kind" : "point",
+      "id" : 24,
+      "ok" : true,
+      "queue-ms" : 5,
+      "service-ms" : 6.981165,
+      "total-ms" : 12.724526
+    }, {
+      "kind" : "point",
+      "id" : 25,
+      "ok" : true,
+      "queue-ms" : 6,
+      "service-ms" : 5.521297,
+      "total-ms" : 11.613099
+    }, {
+      "kind" : "scan",
+      "id" : 12,
+      "ok" : true,
+      "queue-ms" : 8,
+      "service-ms" : 9.415743,
+      "total-ms" : 18.206849
+    }, {
+      "kind" : "point",
+      "id" : 26,
+      "ok" : true,
+      "queue-ms" : 9,
+      "service-ms" : 6.441536,
+      "total-ms" : 16.426513
+    }, {
+      "kind" : "point",
+      "id" : 27,
+      "ok" : true,
+      "queue-ms" : 11,
+      "service-ms" : 5.877462,
+      "total-ms" : 17.503325
+    }, {
+      "kind" : "background-write",
+      "id" : 13,
+      "ok" : true,
+      "queue-ms" : 12,
+      "service-ms" : 7.206736,
+      "total-ms" : 19.91997
+    }, {
+      "kind" : "point",
+      "id" : 28,
+      "ok" : true,
+      "queue-ms" : 16,
+      "service-ms" : 4.627747,
+      "total-ms" : 21.076662
+    }, {
+      "kind" : "point",
+      "id" : 29,
+      "ok" : true,
+      "queue-ms" : 17,
+      "service-ms" : 5.3999,
+      "total-ms" : 22.920677
+    }, {
+      "kind" : "scan",
+      "id" : 14,
+      "ok" : true,
+      "queue-ms" : 18,
+      "service-ms" : 7.711659,
+      "total-ms" : 25.911435
+    }, {
+      "kind" : "point",
+      "id" : 30,
+      "ok" : true,
+      "queue-ms" : 19,
+      "service-ms" : 4.139866,
+      "total-ms" : 24.082107
+    }, {
+      "kind" : "point",
+      "id" : 31,
+      "ok" : true,
+      "queue-ms" : 21,
+      "service-ms" : 3.829676,
+      "total-ms" : 24.908291
+    }, {
+      "kind" : "background-write",
+      "id" : 15,
+      "ok" : true,
+      "queue-ms" : 22,
+      "service-ms" : 5.944017,
+      "total-ms" : 28.860135
+    }, {
+      "kind" : "projection",
+      "id" : 32,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 664.995994,
+      "total-ms" : 665.089979
+    }, {
+      "kind" : "point",
+      "id" : 33,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 4.164732,
+      "total-ms" : 4.226678
+    }, {
+      "kind" : "scan",
+      "id" : 16,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 7.111848,
+      "total-ms" : 7.161291
+    }, {
+      "kind" : "point",
+      "id" : 34,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 4.534383,
+      "total-ms" : 4.576702
+    }, {
+      "kind" : "point",
+      "id" : 35,
+      "ok" : true,
+      "queue-ms" : 4,
+      "service-ms" : 5.515085,
+      "total-ms" : 9.747203
+    }, {
+      "kind" : "background-write",
+      "id" : 17,
+      "ok" : true,
+      "queue-ms" : 4,
+      "service-ms" : 5.428433,
+      "total-ms" : 10.006687
+    }, {
+      "kind" : "point",
+      "id" : 36,
+      "ok" : true,
+      "queue-ms" : 7,
+      "service-ms" : 3.947997,
+      "total-ms" : 11.064204
+    }, {
+      "kind" : "point",
+      "id" : 37,
+      "ok" : true,
+      "queue-ms" : 9,
+      "service-ms" : 4.042744,
+      "total-ms" : 13.78094
+    }, {
+      "kind" : "scan",
+      "id" : 18,
+      "ok" : true,
+      "queue-ms" : 9,
+      "service-ms" : 8.128949,
+      "total-ms" : 18.131689
+    }, {
+      "kind" : "point",
+      "id" : 38,
+      "ok" : true,
+      "queue-ms" : 11,
+      "service-ms" : 4.906999,
+      "total-ms" : 15.971202
+    }, {
+      "kind" : "point",
+      "id" : 39,
+      "ok" : true,
+      "queue-ms" : 13,
+      "service-ms" : 4.760715,
+      "total-ms" : 18.554799
+    }, {
+      "kind" : "background-write",
+      "id" : 19,
+      "ok" : true,
+      "queue-ms" : 15,
+      "service-ms" : 6.301825,
+      "total-ms" : 22.294818
+    }, {
+      "kind" : "point",
+      "id" : 40,
+      "ok" : true,
+      "queue-ms" : 18,
+      "service-ms" : 4.853559,
+      "total-ms" : 22.978646
+    }, {
+      "kind" : "point",
+      "id" : 41,
+      "ok" : true,
+      "queue-ms" : 18,
+      "service-ms" : 3.873527,
+      "total-ms" : 22.435971
+    }, {
+      "kind" : "scan",
+      "id" : 20,
+      "ok" : true,
+      "queue-ms" : 22,
+      "service-ms" : 6.832236,
+      "total-ms" : 29.134679
+    }, {
+      "kind" : "point",
+      "id" : 42,
+      "ok" : true,
+      "queue-ms" : 22,
+      "service-ms" : 3.525317,
+      "total-ms" : 25.962802
+    }, {
+      "kind" : "point",
+      "id" : 43,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 3.195411,
+      "total-ms" : 3.313842
+    }, {
+      "kind" : "background-write",
+      "id" : 21,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 6.674942,
+      "total-ms" : 6.764179
+    }, {
+      "kind" : "point",
+      "id" : 44,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 3.135108,
+      "total-ms" : 3.202434
+    }, {
+      "kind" : "point",
+      "id" : 45,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 3.268838,
+      "total-ms" : 3.322408
+    }, {
+      "kind" : "scan",
+      "id" : 22,
+      "ok" : true,
+      "queue-ms" : 3,
+      "service-ms" : 8.978005,
+      "total-ms" : 12.166814
+    }, {
+      "kind" : "point",
+      "id" : 46,
+      "ok" : true,
+      "queue-ms" : 3,
+      "service-ms" : 3.083611,
+      "total-ms" : 6.286897
+    }, {
+      "kind" : "point",
+      "id" : 47,
+      "ok" : true,
+      "queue-ms" : 3,
+      "service-ms" : 4.16391,
+      "total-ms" : 7.452946
+    }, {
+      "kind" : "background-write",
+      "id" : 23,
+      "ok" : true,
+      "queue-ms" : 6,
+      "service-ms" : 5.361868,
+      "total-ms" : 11.655469
+    }, {
+      "kind" : "projection",
+      "id" : 48,
+      "ok" : true,
+      "queue-ms" : 6,
+      "service-ms" : 271.81999,
+      "total-ms" : 278.551648
+    }, {
+      "kind" : "point",
+      "id" : 49,
+      "ok" : true,
+      "queue-ms" : 7,
+      "service-ms" : 4.408377,
+      "total-ms" : 11.853859
+    }, {
+      "kind" : "scan",
+      "id" : 24,
+      "ok" : true,
+      "queue-ms" : 11,
+      "service-ms" : 6.997134,
+      "total-ms" : 18.666579
+    }, {
+      "kind" : "point",
+      "id" : 50,
+      "ok" : true,
+      "queue-ms" : 11,
+      "service-ms" : 3.811923,
+      "total-ms" : 15.67594
+    }, {
+      "kind" : "point",
+      "id" : 51,
+      "ok" : true,
+      "queue-ms" : 12,
+      "service-ms" : 3.556987,
+      "total-ms" : 15.668687
+    }, {
+      "kind" : "background-write",
+      "id" : 25,
+      "ok" : true,
+      "queue-ms" : 15,
+      "service-ms" : 6.489736,
+      "total-ms" : 22.208046
+    }, {
+      "kind" : "point",
+      "id" : 52,
+      "ok" : true,
+      "queue-ms" : 15,
+      "service-ms" : 3.943117,
+      "total-ms" : 19.652931
+    }, {
+      "kind" : "point",
+      "id" : 53,
+      "ok" : true,
+      "queue-ms" : 18,
+      "service-ms" : 4.254099,
+      "total-ms" : 22.910639
+    }, {
+      "kind" : "scan",
+      "id" : 26,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 6.123973,
+      "total-ms" : 6.211055
+    }, {
+      "kind" : "point",
+      "id" : 54,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 2.837743,
+      "total-ms" : 2.893326
+    }, {
+      "kind" : "point",
+      "id" : 55,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 3.010245,
+      "total-ms" : 3.048977
+    }, {
+      "kind" : "background-write",
+      "id" : 27,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 5.347512,
+      "total-ms" : 5.381566
+    }, {
+      "kind" : "point",
+      "id" : 56,
+      "ok" : true,
+      "queue-ms" : 2,
+      "service-ms" : 3.038097,
+      "total-ms" : 5.936913
+    }, {
+      "kind" : "point",
+      "id" : 57,
+      "ok" : true,
+      "queue-ms" : 3,
+      "service-ms" : 3.215067,
+      "total-ms" : 6.266138
+    }, {
+      "kind" : "scan",
+      "id" : 28,
+      "ok" : true,
+      "queue-ms" : 5,
+      "service-ms" : 5.838509,
+      "total-ms" : 11.223441
+    }, {
+      "kind" : "point",
+      "id" : 58,
+      "ok" : true,
+      "queue-ms" : 5,
+      "service-ms" : 3.361872,
+      "total-ms" : 9.295949
+    }, {
+      "kind" : "point",
+      "id" : 59,
+      "ok" : true,
+      "queue-ms" : 6,
+      "service-ms" : 3.079595,
+      "total-ms" : 9.208406
+    }, {
+      "kind" : "background-write",
+      "id" : 29,
+      "ok" : true,
+      "queue-ms" : 6,
+      "service-ms" : 4.622257,
+      "total-ms" : 10.885259
+    }, {
+      "kind" : "point",
+      "id" : 60,
+      "ok" : true,
+      "queue-ms" : 9,
+      "service-ms" : 3.14695,
+      "total-ms" : 12.364073
+    }, {
+      "kind" : "point",
+      "id" : 61,
+      "ok" : true,
+      "queue-ms" : 9,
+      "service-ms" : 3.024241,
+      "total-ms" : 12.316774
+    }, {
+      "kind" : "scan",
+      "id" : 30,
+      "ok" : true,
+      "queue-ms" : 10,
+      "service-ms" : 6.142587,
+      "total-ms" : 17.032415
+    }, {
+      "kind" : "point",
+      "id" : 62,
+      "ok" : true,
+      "queue-ms" : 11,
+      "service-ms" : 2.810922,
+      "total-ms" : 14.014196
+    }, {
+      "kind" : "point",
+      "id" : 63,
+      "ok" : true,
+      "queue-ms" : 12,
+      "service-ms" : 2.851739,
+      "total-ms" : 15.175025
+    }, {
+      "kind" : "background-write",
+      "id" : 31,
+      "ok" : true,
+      "queue-ms" : 12,
+      "service-ms" : 4.641353,
+      "total-ms" : 17.011116
+    } ]
+  }, {
+    "heap-used-bytes" : 269350200,
+    "heap-max-bytes" : 4294967296,
+    "mixed" : false,
+    "after" : "{:metrics {\"indexer.allocator.allocated_memory\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"query_source.allocator.allocated_memory\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"tx.error\" [{:count 0.0, :tags {:node-id \"1cfc8cd7\"}}], \"jvm.gc.max.data.size\" [{:tags {:node-id \"1cfc8cd7\"}, :value 4.294967296E9}], \"jvm.threads.peak\" [{:tags {:node-id \"1cfc8cd7\"}, :value 73.0}], \"jvm.memory.used\" [{:tags {:id \"CodeHeap 'non-nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 4306176.0} {:tags {:id \"G1 Survivor Space\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value 9487120.0} {:tags {:id \"CodeHeap 'profiled nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 3.5063296E7} {:tags {:id \"G1 Eden Space\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value 2.03423744E8} {:tags {:id \"Metaspace\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 1.0352968E8} {:tags {:id \"G1 Old Gen\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value 5.9767416E7} {:tags {:id \"Compressed Class Space\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 2.0488088E7} {:tags {:id \"CodeHeap 'non-profiled nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 1.9689216E7}], \"jvm.threads.live\" [{:tags {:node-id \"1cfc8cd7\"}, :value 73.0}], \"watcher.allocator.allocated_memory\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"jvm.buffer.memory.used\" [{:tags {:id \"direct\", :node-id \"1cfc8cd7\"}, :value 6151788.0} {:tags {:id \"mapped - 'non-volatile memory'\", :node-id \"1cfc8cd7\"}, :value 0.0} {:tags {:id \"mapped\", :node-id \"1cfc8cd7\"}, :value 0.0}], \"system.load.average.1m\" [{:tags {:node-id \"1cfc8cd7\"}, :value 6.7236328125}], \"compactor.allocator.allocated_memory\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"jvm.memory.netty.bytes\" [{:tags {:node-id \"1cfc8cd7\"}, :value 2.81018368E8}], \"jvm.memory.direct.bytes\" [{:tags {:node-id \"1cfc8cd7\"}, :value 6151788.0}], \"jvm.threads.daemon\" [{:tags {:node-id \"1cfc8cd7\"}, :value 22.0}], \"live-index.allocator.allocated_memory\" [{:tags {:node-id \"1cfc8cd7\"}, :value 9174272.0}], \"jvm.gc.overhead\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.014051488972211595}], \"jvm.memory.usage.after.gc\" [{:tags {:node-id \"1cfc8cd7\", :area \"heap\", :pool \"long-lived\"}, :value 0.013915685936808586}], \"buffer-pool.allocator.allocated_memory\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"node.tx.latestSubmittedMsgId\" [{:tags {:node-id \"1cfc8cd7\"}, :value 10.0}], \"jvm.classes.loaded\" [{:tags {:node-id \"1cfc8cd7\"}, :value 19686.0}], \"memory-cache.evictableBytes\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"query.error\" [{:count 0.0, :tags {:node-id \"1cfc8cd7\"}}], \"jvm.memory.committed\" [{:tags {:id \"G1 Old Gen\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value 2.89406976E8} {:tags {:id \"G1 Survivor Space\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value 1.048576E7} {:tags {:id \"CodeHeap 'profiled nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 3.5127296E7} {:tags {:id \"G1 Eden Space\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value 4.84442112E8} {:tags {:id \"CodeHeap 'non-profiled nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 1.9726336E7} {:tags {:id \"Metaspace\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 1.18095872E8} {:tags {:id \"CodeHeap 'non-nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 4456448.0} {:tags {:id \"Compressed Class Space\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 2.5296896E7}], \"jvm.gc.live.data.size\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"jvm.gc.memory.allocated\" [{:count 5.05413632E9, :tags {:node-id \"1cfc8cd7\"}}], \"pgwire.active_connections\" [{:tags {:node-id \"1cfc8cd7\"}, :value 1.0}], \"jvm.buffer.total.capacity\" [{:tags {:id \"direct\", :node-id \"1cfc8cd7\"}, :value 6151787.0} {:tags {:id \"mapped\", :node-id \"1cfc8cd7\"}, :value 0.0} {:tags {:id \"mapped - 'non-volatile memory'\", :node-id \"1cfc8cd7\"}, :value 0.0}], \"jvm.gc.pause\" [{:count 11, :max-time #xt/duration \"PT0.002S\", :mean-time #xt/duration \"PT0.001818181S\", :tags {:node-id \"1cfc8cd7\", :action \"end of minor GC\", :cause \"G1 Evacuation Pause\", :gc \"G1 Young Generation\"}}], \"jvm.gc.memory.promoted\" [{:count 318648.0, :tags {:node-id \"1cfc8cd7\"}}], \"node.tx.lag.MsgId\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"pgwire.cancelled_connections\" [{:count 0.0, :tags {:node-id \"1cfc8cd7\"}}], \"jvm.memory.max\" [{:tags {:id \"CodeHeap 'non-profiled nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 1.2173312E8} {:tags {:id \"G1 Eden Space\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value -1.0} {:tags {:id \"Metaspace\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 2.147483648E9} {:tags {:id \"CodeHeap 'profiled nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 1.21729024E8} {:tags {:id \"G1 Survivor Space\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value -1.0} {:tags {:id \"G1 Old Gen\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value 4.294967296E9} {:tags {:id \"CodeHeap 'non-nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 8196096.0} {:tags {:id \"Compressed Class Space\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 1.073741824E9}], \"system.cpu.count\" [{:tags {:node-id \"1cfc8cd7\"}, :value 32.0}], \"memory-cache.freeBytes\" [{:tags {:node-id \"1cfc8cd7\"}, :value 1.610612736E9}], \"compactor.jobs.available\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"pgwire.total_connections\" [{:count 1114.0, :tags {:node-id \"1cfc8cd7\"}}], \"jvm.threads.states\" [{:tags {:node-id \"1cfc8cd7\", :state \"new\"}, :value 0.0} {:tags {:node-id \"1cfc8cd7\", :state \"terminated\"}, :value 0.0} {:tags {:node-id \"1cfc8cd7\", :state \"runnable\"}, :value 7.0} {:tags {:node-id \"1cfc8cd7\", :state \"waiting\"}, :value 50.0} {:tags {:node-id \"1cfc8cd7\", :state \"timed-waiting\"}, :value 16.0} {:tags {:node-id \"1cfc8cd7\", :state \"blocked\"}, :value 0.0}], \"memory-cache.pinnedBytes\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"process.cpu.usage\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.17391304347826086}], \"query.warning\" [{:count 0.0, :tags {:node-id \"1cfc8cd7\"}}], \"node.tx.latestProcessedMsgId\" [{:tags {:node-id \"1cfc8cd7\"}, :value 10.0}], \"system.cpu.usage\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.47916666666666663}], \"query.timer\" [{:tags {:node-id \"1cfc8cd7\"}, :p999-time #xt/duration \"PT0.00235904S\", :p75-time #xt/duration \"PT0.00018816S\", :p95-time #xt/duration \"PT0.000253696S\", :p99-time #xt/duration \"PT0.000360192S\", :count 5582, :mean-time #xt/duration \"PT0.000164196S\", :max-time #xt/duration \"PT0.002576495S\"}], \"compactor.job.timer\" [{:tags {:node-id \"1cfc8cd7\"}, :p999-time #xt/duration \"PT0S\", :p75-time #xt/duration \"PT0S\", :p95-time #xt/duration \"PT0S\", :p99-time #xt/duration \"PT0S\", :count 0, :mean-time #xt/duration \"PT0S\", :max-time #xt/duration \"PT0S\"}], \"jvm.buffer.count\" [{:tags {:id \"direct\", :node-id \"1cfc8cd7\"}, :value 52.0} {:tags {:id \"mapped - 'non-volatile memory'\", :node-id \"1cfc8cd7\"}, :value 0.0} {:tags {:id \"mapped\", :node-id \"1cfc8cd7\"}, :value 0.0}], \"node.tx.latestCompletedTxId\" [{:tags {:node-id \"1cfc8cd7\"}, :value 10.0}], \"tx.op.timer\" [{:tags {:node-id \"1cfc8cd7\"}, :p999-time #xt/duration \"PT0.004702208S\", :p75-time #xt/duration \"PT0.002015232S\", :p95-time #xt/duration \"PT0.004702208S\", :p99-time #xt/duration \"PT0.004702208S\", :count 11, :mean-time #xt/duration \"PT0.001496731S\", :max-time #xt/duration \"PT0.004669635S\"}]}, :latest-completed-txs {\"xtdb\" [#xt/tx-key {:tx-id 10, :system-time #xt/zdt \"2026-09-11T02:22:02.905646Z[UTC]\"}]}, :latest-submitted-msg-ids {\"xtdb\" [10]}, :latest-processed-msg-ids {\"xtdb\" [10]}}",
+    "gc" : [ {
+      "name" : "G1 Young Generation",
+      "count" : 54,
+      "time-ms" : 143
+    }, {
+      "name" : "G1 Concurrent GC",
+      "count" : 10,
+      "time-ms" : 30
+    }, {
+      "name" : "G1 Old Generation",
+      "count" : 0,
+      "time-ms" : 0
+    } ],
+    "jvm-args" : [ "-XX:-OmitStackTraceInFastThrow", "--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED", "-Dio.netty.tryReflectionSetAccessible=true", "-Djava.net.preferIPv4Stack=true", "-Xmx4g", "-XX:MaxDirectMemorySize=3g", "-XX:MaxMetaspaceSize=2g", "-Dclojure.basis=.cpcache/3047844373.basis" ],
+    "elapsed-ms" : 1141.56048,
+    "before" : "{:metrics {\"indexer.allocator.allocated_memory\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"query_source.allocator.allocated_memory\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"tx.error\" [{:count 0.0, :tags {:node-id \"1cfc8cd7\"}}], \"jvm.gc.max.data.size\" [{:tags {:node-id \"1cfc8cd7\"}, :value 4.294967296E9}], \"jvm.threads.peak\" [{:tags {:node-id \"1cfc8cd7\"}, :value 73.0}], \"jvm.memory.used\" [{:tags {:id \"CodeHeap 'non-nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 4282112.0} {:tags {:id \"G1 Survivor Space\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value 4742552.0} {:tags {:id \"CodeHeap 'profiled nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 3.4526976E7} {:tags {:id \"G1 Eden Space\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value 2.18103808E8} {:tags {:id \"Metaspace\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 1.0340452E8} {:tags {:id \"G1 Old Gen\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value 5.9487984E7} {:tags {:id \"Compressed Class Space\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 2.0484456E7} {:tags {:id \"CodeHeap 'non-profiled nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 1.8306944E7}], \"jvm.threads.live\" [{:tags {:node-id \"1cfc8cd7\"}, :value 40.0}], \"watcher.allocator.allocated_memory\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"jvm.buffer.memory.used\" [{:tags {:id \"direct\", :node-id \"1cfc8cd7\"}, :value 6087220.0} {:tags {:id \"mapped - 'non-volatile memory'\", :node-id \"1cfc8cd7\"}, :value 0.0} {:tags {:id \"mapped\", :node-id \"1cfc8cd7\"}, :value 0.0}], \"system.load.average.1m\" [{:tags {:node-id \"1cfc8cd7\"}, :value 6.7236328125}], \"compactor.allocator.allocated_memory\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"jvm.memory.netty.bytes\" [{:tags {:node-id \"1cfc8cd7\"}, :value 2.76824064E8}], \"jvm.memory.direct.bytes\" [{:tags {:node-id \"1cfc8cd7\"}, :value 6087220.0}], \"jvm.threads.daemon\" [{:tags {:node-id \"1cfc8cd7\"}, :value 22.0}], \"live-index.allocator.allocated_memory\" [{:tags {:node-id \"1cfc8cd7\"}, :value 9174272.0}], \"jvm.gc.overhead\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0035241212957723184}], \"jvm.memory.usage.after.gc\" [{:tags {:node-id \"1cfc8cd7\", :area \"heap\", :pool \"long-lived\"}, :value 0.013850625604391098}], \"buffer-pool.allocator.allocated_memory\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"node.tx.latestSubmittedMsgId\" [{:tags {:node-id \"1cfc8cd7\"}, :value 10.0}], \"jvm.classes.loaded\" [{:tags {:node-id \"1cfc8cd7\"}, :value 19679.0}], \"memory-cache.evictableBytes\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"query.error\" [{:count 0.0, :tags {:node-id \"1cfc8cd7\"}}], \"jvm.memory.committed\" [{:tags {:id \"G1 Old Gen\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value 2.89406976E8} {:tags {:id \"G1 Survivor Space\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value 6291456.0} {:tags {:id \"CodeHeap 'profiled nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 3.4537472E7} {:tags {:id \"G1 Eden Space\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value 4.88636416E8} {:tags {:id \"CodeHeap 'non-profiled nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 1.835008E7} {:tags {:id \"Metaspace\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 1.18030336E8} {:tags {:id \"CodeHeap 'non-nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 4456448.0} {:tags {:id \"Compressed Class Space\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 2.5296896E7}], \"jvm.gc.live.data.size\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"jvm.gc.memory.allocated\" [{:count 4.65567744E8, :tags {:node-id \"1cfc8cd7\"}}], \"pgwire.active_connections\" [{:tags {:node-id \"1cfc8cd7\"}, :value 1.0}], \"jvm.buffer.total.capacity\" [{:tags {:id \"direct\", :node-id \"1cfc8cd7\"}, :value 6087219.0} {:tags {:id \"mapped\", :node-id \"1cfc8cd7\"}, :value 0.0} {:tags {:id \"mapped - 'non-volatile memory'\", :node-id \"1cfc8cd7\"}, :value 0.0}], \"jvm.gc.pause\" [{:count 1, :max-time #xt/duration \"PT0.001S\", :mean-time #xt/duration \"PT0.001S\", :tags {:node-id \"1cfc8cd7\", :action \"end of minor GC\", :cause \"G1 Evacuation Pause\", :gc \"G1 Young Generation\"}}], \"jvm.gc.memory.promoted\" [{:count 39216.0, :tags {:node-id \"1cfc8cd7\"}}], \"node.tx.lag.MsgId\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"pgwire.cancelled_connections\" [{:count 0.0, :tags {:node-id \"1cfc8cd7\"}}], \"jvm.memory.max\" [{:tags {:id \"CodeHeap 'non-profiled nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 1.2173312E8} {:tags {:id \"G1 Eden Space\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value -1.0} {:tags {:id \"Metaspace\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 2.147483648E9} {:tags {:id \"CodeHeap 'profiled nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 1.21729024E8} {:tags {:id \"G1 Survivor Space\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value -1.0} {:tags {:id \"G1 Old Gen\", :node-id \"1cfc8cd7\", :area \"heap\"}, :value 4.294967296E9} {:tags {:id \"CodeHeap 'non-nmethods'\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 8196096.0} {:tags {:id \"Compressed Class Space\", :node-id \"1cfc8cd7\", :area \"nonheap\"}, :value 1.073741824E9}], \"system.cpu.count\" [{:tags {:node-id \"1cfc8cd7\"}, :value 32.0}], \"memory-cache.freeBytes\" [{:tags {:node-id \"1cfc8cd7\"}, :value 1.610612736E9}], \"compactor.jobs.available\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"pgwire.total_connections\" [{:count 13.0, :tags {:node-id \"1cfc8cd7\"}}], \"jvm.threads.states\" [{:tags {:node-id \"1cfc8cd7\", :state \"new\"}, :value 0.0} {:tags {:node-id \"1cfc8cd7\", :state \"terminated\"}, :value 0.0} {:tags {:node-id \"1cfc8cd7\", :state \"runnable\"}, :value 7.0} {:tags {:node-id \"1cfc8cd7\", :state \"waiting\"}, :value 17.0} {:tags {:node-id \"1cfc8cd7\", :state \"timed-waiting\"}, :value 16.0} {:tags {:node-id \"1cfc8cd7\", :state \"blocked\"}, :value 0.0}], \"memory-cache.pinnedBytes\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.0}], \"process.cpu.usage\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.11434302908726178}], \"query.warning\" [{:count 0.0, :tags {:node-id \"1cfc8cd7\"}}], \"node.tx.latestProcessedMsgId\" [{:tags {:node-id \"1cfc8cd7\"}, :value 10.0}], \"system.cpu.usage\" [{:tags {:node-id \"1cfc8cd7\"}, :value 0.22590361445783133}], \"query.timer\" [{:tags {:node-id \"1cfc8cd7\"}, :p999-time #xt/duration \"PT0.000489472S\", :p75-time #xt/duration \"PT0.00027648S\", :p95-time #xt/duration \"PT0.000374784S\", :p99-time #xt/duration \"PT0.000489472S\", :count 41, :mean-time #xt/duration \"PT0.000219468S\", :max-time #xt/duration \"PT0.000485868S\"}], \"compactor.job.timer\" [{:tags {:node-id \"1cfc8cd7\"}, :p999-time #xt/duration \"PT0S\", :p75-time #xt/duration \"PT0S\", :p95-time #xt/duration \"PT0S\", :p99-time #xt/duration \"PT0S\", :count 0, :mean-time #xt/duration \"PT0S\", :max-time #xt/duration \"PT0S\"}], \"jvm.buffer.count\" [{:tags {:id \"direct\", :node-id \"1cfc8cd7\"}, :value 19.0} {:tags {:id \"mapped - 'non-volatile memory'\", :node-id \"1cfc8cd7\"}, :value 0.0} {:tags {:id \"mapped\", :node-id \"1cfc8cd7\"}, :value 0.0}], \"node.tx.latestCompletedTxId\" [{:tags {:node-id \"1cfc8cd7\"}, :value 10.0}], \"tx.op.timer\" [{:tags {:node-id \"1cfc8cd7\"}, :p999-time #xt/duration \"PT0.004702208S\", :p75-time #xt/duration \"PT0.002015232S\", :p95-time #xt/duration \"PT0.004702208S\", :p99-time #xt/duration \"PT0.004702208S\", :count 11, :mean-time #xt/duration \"PT0.001496731S\", :max-time #xt/duration \"PT0.004669635S\"}]}, :latest-completed-txs {\"xtdb\" [#xt/tx-key {:tx-id 10, :system-time #xt/zdt \"2026-09-11T02:22:02.905646Z[UTC]\"}]}, :latest-submitted-msg-ids {\"xtdb\" [10]}, :latest-processed-msg-ids {\"xtdb\" [10]}}",
+    "workers" : 4,
+    "results" : [ {
+      "kind" : "projection",
+      "id" : 0,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 284.373096,
+      "total-ms" : 284.683497
+    }, {
+      "kind" : "point",
+      "id" : 1,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 4.388991,
+      "total-ms" : 4.555762
+    }, {
+      "kind" : "point",
+      "id" : 2,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 4.294314,
+      "total-ms" : 4.4475
+    }, {
+      "kind" : "point",
+      "id" : 3,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 4.182435,
+      "total-ms" : 4.351711
+    }, {
+      "kind" : "point",
+      "id" : 4,
+      "ok" : true,
+      "queue-ms" : 4,
+      "service-ms" : 3.754515,
+      "total-ms" : 8.074538
+    }, {
+      "kind" : "point",
+      "id" : 5,
+      "ok" : true,
+      "queue-ms" : 4,
+      "service-ms" : 3.764243,
+      "total-ms" : 8.039672
+    }, {
+      "kind" : "point",
+      "id" : 6,
+      "ok" : true,
+      "queue-ms" : 4,
+      "service-ms" : 3.755387,
+      "total-ms" : 8.018974
+    }, {
+      "kind" : "point",
+      "id" : 7,
+      "ok" : true,
+      "queue-ms" : 7,
+      "service-ms" : 3.538772,
+      "total-ms" : 11.57076
+    }, {
+      "kind" : "point",
+      "id" : 8,
+      "ok" : true,
+      "queue-ms" : 7,
+      "service-ms" : 3.565722,
+      "total-ms" : 11.562455
+    }, {
+      "kind" : "point",
+      "id" : 9,
+      "ok" : true,
+      "queue-ms" : 7,
+      "service-ms" : 3.565672,
+      "total-ms" : 11.54374
+    }, {
+      "kind" : "point",
+      "id" : 10,
+      "ok" : true,
+      "queue-ms" : 11,
+      "service-ms" : 6.096261,
+      "total-ms" : 17.618631
+    }, {
+      "kind" : "point",
+      "id" : 11,
+      "ok" : true,
+      "queue-ms" : 11,
+      "service-ms" : 3.585149,
+      "total-ms" : 15.132215
+    }, {
+      "kind" : "point",
+      "id" : 12,
+      "ok" : true,
+      "queue-ms" : 11,
+      "service-ms" : 3.620225,
+      "total-ms" : 15.15101
+    }, {
+      "kind" : "point",
+      "id" : 13,
+      "ok" : true,
+      "queue-ms" : 15,
+      "service-ms" : 3.859922,
+      "total-ms" : 18.987238
+    }, {
+      "kind" : "point",
+      "id" : 14,
+      "ok" : true,
+      "queue-ms" : 15,
+      "service-ms" : 3.828233,
+      "total-ms" : 18.965688
+    }, {
+      "kind" : "point",
+      "id" : 15,
+      "ok" : true,
+      "queue-ms" : 17,
+      "service-ms" : 3.829075,
+      "total-ms" : 21.43381
+    }, {
+      "kind" : "projection",
+      "id" : 16,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 261.316205,
+      "total-ms" : 261.419698
+    }, {
+      "kind" : "point",
+      "id" : 17,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 6.247012,
+      "total-ms" : 6.29913
+    }, {
+      "kind" : "point",
+      "id" : 18,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 6.217919,
+      "total-ms" : 6.27201
+    }, {
+      "kind" : "point",
+      "id" : 19,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 5.258285,
+      "total-ms" : 5.315533
+    }, {
+      "kind" : "point",
+      "id" : 20,
+      "ok" : true,
+      "queue-ms" : 5,
+      "service-ms" : 4.170953,
+      "total-ms" : 9.492787
+    }, {
+      "kind" : "point",
+      "id" : 21,
+      "ok" : true,
+      "queue-ms" : 6,
+      "service-ms" : 4.369795,
+      "total-ms" : 10.601809
+    }, {
+      "kind" : "point",
+      "id" : 22,
+      "ok" : true,
+      "queue-ms" : 6,
+      "service-ms" : 4.34023,
+      "total-ms" : 10.57506
+    }, {
+      "kind" : "point",
+      "id" : 23,
+      "ok" : true,
+      "queue-ms" : 9,
+      "service-ms" : 4.148492,
+      "total-ms" : 13.616172
+    }, {
+      "kind" : "point",
+      "id" : 24,
+      "ok" : true,
+      "queue-ms" : 10,
+      "service-ms" : 3.15779,
+      "total-ms" : 13.75412
+    }, {
+      "kind" : "point",
+      "id" : 25,
+      "ok" : true,
+      "queue-ms" : 10,
+      "service-ms" : 3.156338,
+      "total-ms" : 13.956468
+    }, {
+      "kind" : "point",
+      "id" : 26,
+      "ok" : true,
+      "queue-ms" : 13,
+      "service-ms" : 4.341492,
+      "total-ms" : 17.956933
+    }, {
+      "kind" : "point",
+      "id" : 27,
+      "ok" : true,
+      "queue-ms" : 13,
+      "service-ms" : 4.235233,
+      "total-ms" : 17.986609
+    }, {
+      "kind" : "point",
+      "id" : 28,
+      "ok" : true,
+      "queue-ms" : 13,
+      "service-ms" : 3.139196,
+      "total-ms" : 17.097447
+    }, {
+      "kind" : "point",
+      "id" : 29,
+      "ok" : true,
+      "queue-ms" : 17,
+      "service-ms" : 3.480994,
+      "total-ms" : 20.599421
+    }, {
+      "kind" : "point",
+      "id" : 30,
+      "ok" : true,
+      "queue-ms" : 17,
+      "service-ms" : 3.797185,
+      "total-ms" : 21.742366
+    }, {
+      "kind" : "point",
+      "id" : 31,
+      "ok" : true,
+      "queue-ms" : 17,
+      "service-ms" : 3.305496,
+      "total-ms" : 21.263672
+    }, {
+      "kind" : "projection",
+      "id" : 32,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 259.731554,
+      "total-ms" : 259.873739
+    }, {
+      "kind" : "point",
+      "id" : 33,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 3.192405,
+      "total-ms" : 3.266884
+    }, {
+      "kind" : "point",
+      "id" : 34,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 3.450387,
+      "total-ms" : 3.526319
+    }, {
+      "kind" : "point",
+      "id" : 35,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 3.969637,
+      "total-ms" : 4.014311
+    }, {
+      "kind" : "point",
+      "id" : 36,
+      "ok" : true,
+      "queue-ms" : 3,
+      "service-ms" : 3.47884,
+      "total-ms" : 7.201917
+    }, {
+      "kind" : "point",
+      "id" : 37,
+      "ok" : true,
+      "queue-ms" : 3,
+      "service-ms" : 3.590739,
+      "total-ms" : 7.194413
+    }, {
+      "kind" : "point",
+      "id" : 38,
+      "ok" : true,
+      "queue-ms" : 3,
+      "service-ms" : 3.083602,
+      "total-ms" : 7.071122
+    }, {
+      "kind" : "point",
+      "id" : 39,
+      "ok" : true,
+      "queue-ms" : 7,
+      "service-ms" : 3.306268,
+      "total-ms" : 10.384644
+    }, {
+      "kind" : "point",
+      "id" : 40,
+      "ok" : true,
+      "queue-ms" : 7,
+      "service-ms" : 3.053917,
+      "total-ms" : 10.211069
+    }, {
+      "kind" : "point",
+      "id" : 41,
+      "ok" : true,
+      "queue-ms" : 7,
+      "service-ms" : 3.022207,
+      "total-ms" : 10.183478
+    }, {
+      "kind" : "point",
+      "id" : 42,
+      "ok" : true,
+      "queue-ms" : 10,
+      "service-ms" : 2.894538,
+      "total-ms" : 13.087093
+    }, {
+      "kind" : "point",
+      "id" : 43,
+      "ok" : true,
+      "queue-ms" : 10,
+      "service-ms" : 2.993313,
+      "total-ms" : 13.221945
+    }, {
+      "kind" : "point",
+      "id" : 44,
+      "ok" : true,
+      "queue-ms" : 10,
+      "service-ms" : 3.222902,
+      "total-ms" : 13.590955
+    }, {
+      "kind" : "point",
+      "id" : 45,
+      "ok" : true,
+      "queue-ms" : 13,
+      "service-ms" : 3.022437,
+      "total-ms" : 16.101687
+    }, {
+      "kind" : "point",
+      "id" : 46,
+      "ok" : true,
+      "queue-ms" : 13,
+      "service-ms" : 3.437814,
+      "total-ms" : 16.66521
+    }, {
+      "kind" : "point",
+      "id" : 47,
+      "ok" : true,
+      "queue-ms" : 13,
+      "service-ms" : 2.940754,
+      "total-ms" : 16.526009
+    }, {
+      "kind" : "projection",
+      "id" : 48,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 320.770136,
+      "total-ms" : 320.885282
+    }, {
+      "kind" : "point",
+      "id" : 49,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 3.447161,
+      "total-ms" : 3.501032
+    }, {
+      "kind" : "point",
+      "id" : 50,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 3.186484,
+      "total-ms" : 3.229896
+    }, {
+      "kind" : "point",
+      "id" : 51,
+      "ok" : true,
+      "queue-ms" : 0,
+      "service-ms" : 2.807115,
+      "total-ms" : 2.853863
+    }, {
+      "kind" : "point",
+      "id" : 52,
+      "ok" : true,
+      "queue-ms" : 2,
+      "service-ms" : 5.511638,
+      "total-ms" : 8.383505
+    }, {
+      "kind" : "point",
+      "id" : 53,
+      "ok" : true,
+      "queue-ms" : 3,
+      "service-ms" : 5.08448,
+      "total-ms" : 8.297394
+    }, {
+      "kind" : "point",
+      "id" : 54,
+      "ok" : true,
+      "queue-ms" : 3,
+      "service-ms" : 4.714539,
+      "total-ms" : 8.178572
+    }, {
+      "kind" : "point",
+      "id" : 55,
+      "ok" : true,
+      "queue-ms" : 8,
+      "service-ms" : 3.022788,
+      "total-ms" : 11.218472
+    }, {
+      "kind" : "point",
+      "id" : 56,
+      "ok" : true,
+      "queue-ms" : 8,
+      "service-ms" : 3.334952,
+      "total-ms" : 11.623899
+    }, {
+      "kind" : "point",
+      "id" : 57,
+      "ok" : true,
+      "queue-ms" : 8,
+      "service-ms" : 2.910027,
+      "total-ms" : 11.251263
+    }, {
+      "kind" : "point",
+      "id" : 58,
+      "ok" : true,
+      "queue-ms" : 11,
+      "service-ms" : 3.212823,
+      "total-ms" : 14.427188
+    }, {
+      "kind" : "point",
+      "id" : 59,
+      "ok" : true,
+      "queue-ms" : 11,
+      "service-ms" : 3.166627,
+      "total-ms" : 14.415966
+    }, {
+      "kind" : "point",
+      "id" : 60,
+      "ok" : true,
+      "queue-ms" : 11,
+      "service-ms" : 3.018259,
+      "total-ms" : 14.630487
+    }, {
+      "kind" : "point",
+      "id" : 61,
+      "ok" : true,
+      "queue-ms" : 14,
+      "service-ms" : 4.129075,
+      "total-ms" : 18.554229
+    }, {
+      "kind" : "point",
+      "id" : 62,
+      "ok" : true,
+      "queue-ms" : 14,
+      "service-ms" : 3.24841,
+      "total-ms" : 17.663434
+    }, {
+      "kind" : "point",
+      "id" : 63,
+      "ok" : true,
+      "queue-ms" : 14,
+      "service-ms" : 4.216719,
+      "total-ms" : 18.838681
+    } ]
+  } ]
+}
