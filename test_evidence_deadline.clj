@@ -1,5 +1,5 @@
 ;; test-evidence-deadline — regression for E-futon1b-gc-wedge (2026-08-23):
-;; parameterised evidence page query (stable shape, cursor/limit as params),
+;; parameterised evidence page query (stable shape, cursor as params),
 ;; JDBC deadline via futon1b-xt/timed-q, whole-request scan bound,
 ;; hyperedge window cap, and the /health holder/GC surface.
 ;;
@@ -79,11 +79,11 @@
 
   ;; --- parameterised page shape ---------------------------------------
   (let [pq (ns-resolve 'futon1b-evidence 'page-query)
-        q1 (pq {:type :claim :author "alice"} nil 50 '[xt/id evidence/at])
-        q2 (pq {:type :note :author "bob"} ["2026-08-23T10:00:59.000Z" "d059"] 7 '[xt/id evidence/at])
-        q3 (pq {:type :note :author "bob"} ["2026-08-23T10:00:10.000Z" "d010"] 7 '[xt/id evidence/at])]
+        q1 (pq {:type :claim :author "alice"} nil '[xt/id evidence/at])
+        q2 (pq {:type :note :author "bob"} ["2026-08-23T10:00:59.000Z" "d059"] '[xt/id evidence/at])
+        q3 (pq {:type :note :author "bob"} ["2026-08-23T10:00:10.000Z" "d010"] '[xt/id evidence/at])]
     (check! "page form is a (fn [...] ...) with filter values as args"
-            (and (= 'fn (first (first q1))) (= [:claim "alice" 50] (rest q1))))
+            (and (= 'fn (first (first q1))) (= [:claim "alice"] (rest q1))))
     (check! "same filter set + cursor presence => identical form text"
             (= (pr-str (first q2)) (pr-str (first q3))))
     (check! "no cursor and cursor are the only two variants (differ)"

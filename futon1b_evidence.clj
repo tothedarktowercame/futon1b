@@ -238,43 +238,47 @@
   (vec (remove #{'evidence/subject} filter-cols)))
 
 (defn- page-query
-  "Build `[(fn [params..] <xtql>) args..]` for one newest-first keyset page.
-
-  Every filter value, both cursor components and the page limit are
-  parameters (XTQL `limit` accepts a param; checked against xtdb.xtql.plan
-  2.1.0). Two cursor variants only: first page and after-cursor. The
-  previous form embedded the cursor as literals, so every page compiled a
-  fresh plan and XTDB retained the Arrow field tree of each — 9.3M `Field`
-  objects in a 3.75 GB live heap on 2026-08-23."
-  [q cursor page-size cols]
+  "Compact cursor-bounded projection, without a database sort or limit.
+  Values remain parameters so each filter/cursor shape shares a compiled plan.
+  Global top-K selection happens while reducing these rows, before pagination."
+  [q cursor cols]
   (let [[f-params f-args f-clauses] (pushdown-params q)
-        params (-> f-params
-                   (into (if cursor '[p-cursor-at p-cursor-id] []))
-                   (conj 'p-limit))
-        args (-> f-args
-                 (into (if cursor (vec cursor) []))
-                 (conj page-size))
+        params (into f-params (if cursor '[p-cursor-at p-cursor-id] []))
+        args (into f-args (if cursor (vec cursor) []))
         clauses (cond-> f-clauses
                   cursor (conj (list 'or
                                      (list '< 'evidence/at 'p-cursor-at)
                                      (list 'and
                                            (list '= 'evidence/at 'p-cursor-at)
                                            (list '< 'xt/id 'p-cursor-id)))))
-        tail (cond-> []
-               (seq clauses) (conj (cons 'where clauses))
-               true (conj (list 'order-by
-                                {:val 'evidence/at :dir :desc}
-                                {:val 'xt/id :dir :desc})
-                          (list 'limit 'p-limit)))
-        form (list 'fn params
-                   (cons '-> (cons (list 'from :evidence cols) tail)))]
-    (into [form] args)))
+        source (list 'from :evidence cols)
+        body (if (seq clauses)
+               (list '-> source (cons 'where clauses))
+               source)]
+    (into [(list 'fn params body)] args)))
+
+(defn- row-cursor [row]
+  [(str (:evidence/at row)) (str (:xt/id row))])
 
 (defn- fetch-newest-projected-page
-  "Fetch one compact newest-first keyset page under the JDBC deadline. Full
-  evidence bodies never participate in the corpus-wide order-by."
+  "Select global newest K identities with O(K) retained compact rows.
+
+  XTDB 2.1.0's external descending sort reverses comparator argument indices
+  across different relations, corrupting order once it spills (>102400 rows).
+  Stream the entire cursor-bounded projection under the existing JDBC deadline
+  instead: retain the largest K keys and only then return them descending.
+  There is no database LIMIT and no sorting of an already truncated page.
+  Bodies are still hydrated only after the bounded window is selected."
   [node q cursor page-size cols]
-  (fxt/timed-q node (page-query q cursor page-size cols)))
+  (let [newest (fxt/timed-reduce-q
+                node (page-query q cursor cols)
+                (fn [rows row]
+                  (let [rows (conj rows row)]
+                    (if (> (count rows) page-size)
+                      (disj rows (first rows))
+                      rows)))
+                (sorted-set-by #(compare (row-cursor %1) (row-cursor %2))))]
+    (vec (rseq newest))))
 
 (declare apply-post-filters)
 
@@ -282,9 +286,6 @@
   [{:keys [tags subject-type subject-id pattern-id include-ephemeral]}]
   (or (seq tags) subject-type subject-id pattern-id
       (false? include-ephemeral)))
-
-(defn- row-cursor [row]
-  [(str (:evidence/at row)) (str (:xt/id row))])
 
 (def ^:private max-scanned-rows-per-request
   "Whole-request ceiling on projected rows scanned for post-filtered reads.

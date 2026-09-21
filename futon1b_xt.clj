@@ -135,13 +135,13 @@
       true
       :else (recur (.getCause e)))))
 
-(defn timed-q
-  "Run QUERY+ARGS (an XTQL form, a `[(fn [..] ..) args*]` vector, or
-  `[sql args*]`) against NODE with a hard deadline of TIMEOUT-S seconds.
-  Returns a vector of maps like `xt/q`. On expiry the connection is torn down
-  and an ex-info with `{:futon1b/error ::timeout}` is thrown."
-  ([node query+args] (timed-q node query+args default-query-timeout-s))
-  ([^DataSource node query+args timeout-s]
+(defn timed-reduce-q
+  "Reduce JDBC rows inside the query deadline and connection lifetime.
+  RF receives persistent row maps. INIT must be reusable if a cached-plan
+  invalidation retries the query; no rows escape the closed connection."
+  ([node query+args rf init]
+   (timed-reduce-q node query+args rf init default-query-timeout-s))
+  ([^DataSource node query+args rf init timeout-s]
    (let [[query args] (if (vector? query+args)
                         [(first query+args) (vec (rest query+args))]
                         [query+args []])
@@ -157,7 +157,7 @@
                      (jdbc/execute! conn ["BEGIN READ ONLY WITH (AWAIT_TOKEN = ?)" token])
                      (jdbc/execute! conn ["BEGIN READ ONLY"]))
                    (try
-                     (into [] (map #(into {} %))
+                     (transduce (map #(into {} %)) (completing rf) init
                            (jdbc/plan conn (into [sql] args)
                                       {:builder-fn xt-jdbc/builder-fn
                                        ::xt-jdbc/key-fn :kebab-case-keyword
@@ -177,6 +177,13 @@
                    (finally
                      (try (.close conn) (catch Exception _))))))]
      (run-guarded run))))
+
+(defn timed-q
+  "Run a parameterised XTQL or SQL query under the JDBC deadline.
+  Returns fully realized persistent row maps; see timed-reduce-q for streaming."
+  ([node query+args] (timed-q node query+args default-query-timeout-s))
+  ([node query+args timeout-s]
+   (timed-reduce-q node query+args conj [] timeout-s)))
 
 (defn q1 [node form]
   (first (safe-q node form)))
