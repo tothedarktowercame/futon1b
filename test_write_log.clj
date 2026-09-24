@@ -181,6 +181,49 @@
                     @graph/!shape-log)
               hx-id))
 
+    ;; --- 5b. a symbol is converted with str, not pr-str: type lost, and
+    ;; until now unlogged. It must leave a record that says the round-trip is
+    ;; gone, since every other transform: entry is edn/read-string-able.
+    (let [r (req "POST" ENT {:name "Symbol bearer" :type "gadget" :source "t"
+                             :external-id "symbol-1"
+                             :props {:fam 'graph-symmetry}} ph)
+          hit (first (filter #(and (= :shape (:kind %)) (= :entity (:doc-type %))
+                                   (= [:entity/props :fam] (:key %)))
+                             @graph/!shape-log))]
+      (check! "symbol in entity props -> 200, :rescue :ok (envelope unchanged)"
+              (and (= 200 (:status r)) (= :ok (get-in r [:body :rescue])))
+              r)
+      (let [id (get-in r [:body :entity :id])
+            back (req "GET" (str ENT "/" id) nil nil)]
+        (check! "read-back shows the symbol stored as a plain string"
+                (= "graph-symmetry" (get-in back [:body :entity :props :fam]))
+                back))
+      (check! "symbol conversion is recorded and the reason says the type is lost"
+              (and hit (str/includes? (:reason hit) "symbol")
+                   (str/includes? (:reason hit) "not round-trippable"))
+              hit))
+
+    ;; --- 5c. the evidence route: :evidence/body is stringified by design and
+    ;; stays quiet; a string-keyed :evidence/subject on the SAME write leaves a
+    ;; record in the evidence shape log.
+    (let [EV (str base "/api/alpha/evidence")
+          r (req "POST" EV {:evidence/type :claim :evidence/claim-type :observation
+                            :evidence/author "t" :evidence/id "ev-subject-1"
+                            :evidence/subject {"kind" "map" "n" 1}
+                            :evidence/body {"event" "x" "nested" {"a" 1}}} ph)
+          shapes (filterv #(= :shape (:kind %)) @ev/!shape-log)]
+      (check! "evidence write with string-keyed subject and body -> 201"
+              (= 201 (:status r)) r)
+      (check! "string-keyed :evidence/subject leaves a record"
+              (some #(= [:evidence/subject] (:key %)) shapes)
+              (mapv :key shapes))
+      (check! "same write's :evidence/body leaves none (by-design exclusion)"
+              (not-any? #(= :evidence/body (first (:key %))) shapes)
+              (mapv :key shapes))
+      (check! "evidence record reached the durable file"
+              (some #(= [:evidence/subject] (:key %)) (file-entries path))
+              (count (file-entries path))))
+
     ;; --- 6. the evidence log is served by the same route ------------------
     (check! "route merges both shape logs (evidence log is a registered source)"
             (= (+ (count @graph/!shape-log) (count @ev/!shape-log))

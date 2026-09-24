@@ -206,8 +206,12 @@ relation and hyperedge routes call `transform-doc` with
 `{:log-stringify? true}`, so a non-keyword-keyed inner map that
 `deep-stringify-non-keyword-maps` turns into a string leaves a `:kind :shape`
 entry with the key path and reason `transform: …`, even though the put then
-succeeds with `:rescue :ok`. The evidence route does not log this: JSON-keyed
-`:evidence/body` is stringified by design on every write. The rescue contract is unchanged: routes still rescue and still return
+succeeds with `:rescue :ok`. Symbols (converted with `str`, so the type is
+lost and the reason says so) and the pr-str fallback are recorded the same
+way. The evidence route logs with `:log-except #{[:evidence/body]}`: the
+JSON-keyed body is stringified by design on every write and stays quiet, but
+any other reshaped field on the document (a string-keyed `:evidence/subject`,
+say) is on record. The rescue contract is unchanged: routes still rescue and still return
 `:rescue`. Motivation: on 2026-09-23 `unknown object type: class
 clojure.lang.Ratio` fired six times over ten hours and nothing outside the
 process named it. Test: `clojure -M:node -m test-write-log`.

@@ -131,7 +131,11 @@
   transformed :doc or the exact :status/:body refusal used by write-evidence!."
   [node payload]
   (let [{:keys [doc invalid]} (build-evidence-doc payload)
-        prepared-doc (when doc (xf/transform-doc doc))]
+        ;; Reshapes are recorded except the by-design stringification of the
+        ;; JSON-keyed body; a string-keyed :evidence/subject leaves a record.
+        prepared-doc (when doc (xf/transform-doc doc !shape-log
+                                                 {:log-stringify? true
+                                                  :log-except #{[:evidence/body]}}))]
     (cond
       invalid {:status 400 :body invalid}
 
