@@ -26,7 +26,8 @@
 # marks the missing evidence loudly. Backlog, PID-change, and write-path checks
 # still run. Without the exact value 1, the censused path is unchanged.
 #
-# Then read /tmp/futon1b-restart-receipt.txt once :7073 answers again.
+# Then read /tmp/futon1b-restart-receipt.txt; it is complete once it ends with
+# a FINISHED line (startup can take minutes after :7073 goes down).
 set -uo pipefail
 
 R=/tmp/futon1b-restart-receipt.txt
@@ -36,6 +37,23 @@ UNIT=futon1b-zone.service
 : > "$R"
 say(){ echo "$(date -u +%H:%M:%SZ) $*" >> "$R"; }
 census(){ curl -sf --max-time 20 "$URL/health?deep=true" 2>/dev/null; }
+
+# A receipt read mid-run looks like a truncated, failed one: startup can take
+# minutes (memory-projection hydration alone ran 132s on 2026-09-24).  So the
+# first line says the run is in progress, and the last line always says it
+# finished -- the EXIT trap writes it on every path, including a crash or a
+# SIGTERM, and records RESULT=interrupted if no RESULT= line was written.
+say "IN PROGRESS (pid $$, started $(date -u +%FT%TZ)). The run is complete only"
+say "  when a FINISHED line ends this file. Until then, check it is still going:"
+say "  systemctl --user is-active futon1b-restart.service"
+finish(){
+  local rc=$?
+  grep -q ' RESULT=' "$R" || say "RESULT=interrupted (exit $rc before any result was written)"
+  say "FINISHED (exit $rc) - this receipt is complete."
+}
+trap finish EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 say "cgroup=$(cat /proc/self/cgroup)"
 say "unit=$UNIT  repo=$REPO  head=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)"
