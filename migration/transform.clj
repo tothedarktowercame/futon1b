@@ -199,18 +199,53 @@
 ;; ---------------------------------------------------------------------------
 
 (defn make-shape-log
-  "Create a fresh shape log (atom containing a vector of {:doc-type :key :value :reason})."
+  "Create a fresh shape log (atom containing a vector of entries). Every entry
+  carries :kind (:shape or :put-failed) and :at (ISO instant); :shape entries
+  carry {:doc-type :key :value-preview :reason}, :put-failed entries carry
+  {:doc-type :table :xt/id :stage :message}."
   []
   (atom []))
+
+(def shape-log-cap
+  "Upper bound on entries held in memory. The log is a defonce atom in the
+  serving JVM; a rescue storm must not grow it without bound. The durable
+  record is the file the server appends to (futon1b-write-log), which is not
+  capped."
+  10000)
+
+(defn- append-entry! [log entry]
+  (swap! log (fn [v]
+               (if (>= (count v) shape-log-cap)
+                 (conj (vec (rest v)) entry)
+                 (conj v entry)))))
 
 (defn log-shape!
   "Record an unexpected shape in the log."
   [log doc-type key value reason]
-  (swap! log conj {:doc-type doc-type
-                    :key key
-                    :value-preview (let [s (pr-str value)]
-                                     (subs s 0 (min (count s) 200)))
-                    :reason reason}))
+  (append-entry! log {:kind :shape
+                      :at (str (java.time.Instant/now))
+                      :doc-type doc-type
+                      :key key
+                      :value-preview (let [s (pr-str value)]
+                                       (subs s 0 (min (count s) 200)))
+                      :reason reason}))
+
+(defn log-put-failure!
+  "Record one failed put attempt: which doc, which table, which rescue stage
+  was being attempted (:put, :rescue-1, :rescue-2) and what the store said.
+  Nil-safe on LOG so migration callers without a log are unchanged. This is
+  the record that did not exist on 2026-09-23, when
+  `unknown object type: class clojure.lang.Ratio` fired six times over ten
+  hours and nothing named it."
+  [log table doc stage message]
+  (when log
+    (append-entry! log {:kind :put-failed
+                        :at (str (java.time.Instant/now))
+                        :doc-type (classify-doc doc)
+                        :table table
+                        :xt/id (:xt/id doc)
+                        :stage stage
+                        :message (str message)})))
 
 ;; ---------------------------------------------------------------------------
 ;; RESCUE transforms — applied by ingest ONLY to docs that failed put-docs.

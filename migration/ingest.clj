@@ -102,13 +102,19 @@
   ([node table doc shape-log valid-from]
    (let [table-spec (cond-> {:into table}
                       valid-from (assoc :valid-from valid-from))]
-     (letfn [(try-put [d] (try (xt/execute-tx node [[:put-docs table-spec d]]) true
-                               (catch Exception _ false)))]
+     ;; Each failed attempt is recorded (id, table, stage, store message)
+     ;; before the ladder escalates; the message used to be discarded here.
+     (letfn [(try-put [stage d]
+               (try (xt/execute-tx node [[:put-docs table-spec d]]) true
+                    (catch Exception e
+                      (xf/log-put-failure! shape-log table doc stage
+                                           (.getMessage e))
+                      false)))]
        (cond
-         (try-put doc) :ok
-         (try-put (xf/stringify-risky-nils doc shape-log)) :rescued-1
-         (try-put (xf/stringify-deep-colls
-                    (xf/stringify-risky-nils doc nil) shape-log)) :rescued-2
+         (try-put :put doc) :ok
+         (try-put :rescue-1 (xf/stringify-risky-nils doc shape-log)) :rescued-1
+         (try-put :rescue-2 (xf/stringify-deep-colls
+                              (xf/stringify-risky-nils doc nil) shape-log)) :rescued-2
          :else {:error "unrescuable — failed all rescue stages"
                 :id (:xt/id doc)})))))
 

@@ -42,6 +42,7 @@
             [zai-memory-1b :as zm]
             [futon1b-xt :as fxt]
             [futon1b-text :as text]
+            [futon1b-write-log :as write-log]
             [futon1b-request-executor :as request-executor]
             [xtdb.api :as xt])
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
@@ -165,7 +166,7 @@
                     {:ok true :hx/id id :no-op? true}
                     (let [res
                           (ingest/put-doc-with-rescue!
-                           node :hyperedges doc nil valid-from)]
+                           node :hyperedges doc graph/!shape-log valid-from)]
                       (if (present? node id)
                         (do
                           (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
@@ -238,7 +239,7 @@
                   hyperedge-rescue
                   (when-not hyperedge-present?
                     (ingest/put-doc-with-rescue!
-                     node :hyperedges hyperedge-doc nil))
+                     node :hyperedges hyperedge-doc graph/!shape-log))
                   evidence-present?
                   (or evidence-present?
                       (boolean (ev/evidence-exists? node evidence-id)))
@@ -879,6 +880,21 @@
       (respond! ex 400
                 (pr-str {:error "census requires ?type=<hx-type> or ?entity-type=<type>"})))))
 
+(defn- write-log-route
+  "GET /api/alpha/write-log?limit=N&kind=put-failed|shape — read-only view of
+  the rescue/failure record (in-memory tail; :file names the durable copy)."
+  [^HttpExchange ex]
+  (if (= "GET" (.getRequestMethod ex))
+    (let [p (query-params ex)
+          limit (some-> (p "limit") (Long/parseLong))
+          kind (some-> (p "kind") keyword)]
+      (respond! ex 200
+                (pr-str (assoc (write-log/entries
+                                [graph/!shape-log ev/!shape-log]
+                                {:limit limit :kind kind})
+                               :ok true))))
+    (respond! ex 405 {:ok false :error "GET only"})))
+
 (defn- restart-readiness-route [^HttpExchange ex]
   (if (= "GET" (.getRequestMethod ex))
     (respond! ex 200 (graph/restart-readiness-status @!node))
@@ -1054,9 +1070,15 @@
     (InetSocketAddress. (int port))
     (InetSocketAddress. ^String bind-host (int port))))
 
-(defn start-server! [{:keys [store-dir port health-port node bind-host]}]
+(defn start-server! [{:keys [store-dir port health-port node bind-host
+                             write-log-path]}]
   (gates/seed-mission-contract!)
   (reset! !node (or node (zm/open-store store-dir)))
+  ;; Durable write log: every rescue and failed put appended beside the store.
+  (when-let [path (or write-log-path
+                      (when store-dir (write-log/file-path store-dir)))]
+    (println "[write-log] durable record at"
+             (write-log/attach-file! path [graph/!shape-log ev/!shape-log])))
   ;; Build the coherent current-memory projection before accepting traffic.
   ;; A failed/bounded build is a startup failure, never a partially warm route.
   (println "[memory-projection] current index"
@@ -1112,6 +1134,7 @@
     (.createContext server "/api/alpha/relations/batch" (handler relations-batch-route))
     (.createContext server "/api/alpha/graph/inhabited" (handler graph-inhabited-route))
     (.createContext server "/api/alpha/census" (handler census-route))
+    (.createContext server "/api/alpha/write-log" (handler write-log-route))
     (.createContext server "/api/alpha/restart-readiness"
                     (handler restart-readiness-route))
     (.createContext server "/api/alpha/types" (handler types-route))

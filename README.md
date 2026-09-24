@@ -192,6 +192,20 @@ is **verified by read-back** (2.0.0 batch puts could drop rows silently).
 Backfilling into a store already shaped by live writes will rescue MORE
 docs than a fresh-store migration — keep the shape logs.
 
+**The write log (2026-09-24).** A rescued or failed put leaves a record
+readable from outside the JVM. Each failed attempt in the ladder records
+`{:kind :put-failed :at … :table … :xt/id … :stage :put|:rescue-1|:rescue-2
+:message <the store's own message>}`, and each stringification records a
+`:kind :shape` entry as before. The serving JVM appends every entry, one EDN
+map per line, to `<store-dir>/write-log.edn` (`futon1b_write_log.clj`;
+`start-server!` takes `:write-log-path` to override), and
+`GET /api/alpha/write-log?limit=N&kind=put-failed` serves the in-memory tail
+(capped at 10 000 entries; the file is not capped). A clean put records
+nothing. The rescue contract is unchanged: routes still rescue and still return
+`:rescue`. Motivation: on 2026-09-23 `unknown object type: class
+clojure.lang.Ratio` fired six times over ten hours and nothing outside the
+process named it. Test: `clojure -M:node -m test-write-log`.
+
 ### Doc-shape transforms (F1/F2/H4, `migration/transform.clj`)
 
 Applied to every write, live and migrated: string-keyed maps (e.g. JSON

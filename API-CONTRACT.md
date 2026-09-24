@@ -666,6 +666,18 @@ hyperedge routes. There is deliberately no raw transaction or evict endpoint.
 
 ---
 
+## 7a. Write log (2026-09-24, read-only)
+
+### GET /api/alpha/write-log?limit=N&kind=put-failed|shape
+
+The rescue/failure record behind §1's rescue ladder, served from memory.
+`{:ok true :count n :file <path or nil> :entries [...]}`, oldest first, at
+most `limit` (default 50) entries. `:put-failed` entries carry `:at :table
+:xt/id :stage :message`; `:shape` entries carry `:at :doc-type :key
+:value-preview :reason`. `:file` names the durable copy the server appends
+to beside the store (`write-log.edn`, one EDN map per line, not capped).
+Non-GET → 405. Adds no write behaviour; success envelopes are unchanged.
+
 ## 8. Types
 
 ### GET /api/alpha/types (also bare GET /types)
