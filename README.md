@@ -201,7 +201,13 @@ map per line, to `<store-dir>/write-log.edn` (`futon1b_write_log.clj`;
 `start-server!` takes `:write-log-path` to override), and
 `GET /api/alpha/write-log?limit=N&kind=put-failed` serves the in-memory tail
 (capped at 10 000 entries; the file is not capped). A clean put records
-nothing. The rescue contract is unchanged: routes still rescue and still return
+nothing. Reshapes that happen BEFORE the put are recorded too: the entity,
+relation and hyperedge routes call `transform-doc` with
+`{:log-stringify? true}`, so a non-keyword-keyed inner map that
+`deep-stringify-non-keyword-maps` turns into a string leaves a `:kind :shape`
+entry with the key path and reason `transform: …`, even though the put then
+succeeds with `:rescue :ok`. The evidence route does not log this: JSON-keyed
+`:evidence/body` is stringified by design on every write. The rescue contract is unchanged: routes still rescue and still return
 `:rescue`. Motivation: on 2026-09-23 `unknown object type: class
 clojure.lang.Ratio` fired six times over ten hours and nothing outside the
 process named it. Test: `clojure -M:node -m test-write-log`.

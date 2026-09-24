@@ -140,7 +140,48 @@
                     (put-failed (file-entries path)))
               hx-id))
 
-    ;; --- 5. the evidence log is served by the same route ------------------
+    ;; --- 5. a reshape BEFORE the put: nothing fails, :rescue :ok, but the
+    ;; transform stringified an inner map and that is on record with its path.
+    ;; (The 2026-09-24 second finding: futon2's :observation-locators are keyed
+    ;; by vectors; the store refuses such a map outright, so the transform's
+    ;; per-map stringification is what keeps it out of the rescue ladder.)
+    (let [shape (fn [entries] (filterv #(= :shape (:kind %)) entries))
+          before-disk (count (shape (file-entries path)))
+          r (req "POST" ENT {:name "Locator bearer" :type "gadget" :source "t"
+                             :external-id "locator-1"
+                             :props {:locators {["T" :tok] "v"} :theta 0.5}} ph)
+          hit (first (filter #(and (= :entity (:doc-type %))
+                                   (= [:entity/props :locators] (:key %)))
+                             (shape @graph/!shape-log)))]
+      (check! "vector-keyed inner map -> 200 with :rescue :ok (envelope unchanged)"
+              (and (= 200 (:status r)) (= :ok (get-in r [:body :rescue])))
+              r)
+      (check! "transform reshape is recorded with the key path and reason"
+              (and hit (str/starts-with? (:reason hit) "transform:")
+                   (string? (:at hit)))
+              hit)
+      (check! "transform reshape reached the durable file"
+              (some #(= [:entity/props :locators] (:key %)) (shape (file-entries path)))
+              (- (count (shape (file-entries path))) before-disk))
+      (let [r (req "GET" (str LOG "?kind=shape&limit=20") nil nil)]
+        (check! "route serves :shape entries too"
+                (and (= 200 (:status r))
+                     (some #(= [:entity/props :locators] (:key %))
+                           (get-in r [:body :entries])))
+                (count (get-in r [:body :entries])))))
+    (let [r (req "POST" HX {:hx/type :test/edge :hx/endpoints ["c" "d"]
+                            :hx/props {:m {"a" 1}}} ph)
+          hx-id (get-in r [:body :hx/id])]
+      (check! "hyperedge with a string-keyed inner map -> 200, :rescue :ok"
+              (and (= 200 (:status r)) (= :ok (get-in r [:body :rescue])))
+              r)
+      (check! "hyperedge transform reshape is recorded (site used to pass nil)"
+              (some #(and (= :shape (:kind %)) (= :hyperedge (:doc-type %))
+                          (= [:hx/props :m] (:key %)))
+                    @graph/!shape-log)
+              hx-id))
+
+    ;; --- 6. the evidence log is served by the same route ------------------
     (check! "route merges both shape logs (evidence log is a registered source)"
             (= (+ (count @graph/!shape-log) (count @ev/!shape-log))
                (:count (write-log/entries [graph/!shape-log ev/!shape-log] {})))

@@ -674,7 +674,9 @@ The rescue/failure record behind §1's rescue ladder, served from memory.
 `{:ok true :count n :file <path or nil> :entries [...]}`, oldest first, at
 most `limit` (default 50) entries. `:put-failed` entries carry `:at :table
 :xt/id :stage :message`; `:shape` entries carry `:at :doc-type :key
-:value-preview :reason`. `:file` names the durable copy the server appends
+:value-preview :reason` (reasons prefixed `rescue-1:`/`rescue-2:` come from
+the ladder; `transform:` from the pre-put reshape on entity, relation and
+hyperedge writes). `:file` names the durable copy the server appends
 to beside the store (`write-log.edn`, one EDN map per line, not capped).
 Non-GET → 405. Adds no write behaviour; success envelopes are unchanged.
 

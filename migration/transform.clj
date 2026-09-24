@@ -57,6 +57,8 @@
     (pr-str v)
     v))
 
+(declare log-shape!)
+
 (defn deep-stringify-non-keyword-maps
   "Walk a value, converting any map with non-keyword keys to its pr-str string.
   Maps with all-keyword keys are walked into recursively.
@@ -65,8 +67,14 @@
   that contains JSON-style string keys. The pr-str representation is
   round-trippable (the consumer can clojure.edn/read-string it back), which
   preserves all data — unlike the slice's approach of dropping :evidence/body
-  entirely."
-  [v]
+  entirely.
+
+  The 4-arity records each reshape into SHAPE-LOG (a :shape entry whose :key
+  is the path to the value) so a live write that was reshaped BEFORE the put
+  — and therefore succeeded, :rescue :ok, with nothing for the rescue ladder
+  to record — still leaves a record. The 1-arity is unchanged and silent."
+  ([v] (deep-stringify-non-keyword-maps v nil nil []))
+  ([v shape-log doc-type path]
   (cond
     ;; Leaf values: return as-is.
     (nil? v) v
@@ -88,24 +96,33 @@
 
     ;; String-keyed map: stringify the whole thing.
     (string-keyed-map? v)
-    (pr-str v)
+    (do (when shape-log
+          (log-shape! shape-log doc-type path v
+                      "transform: non-keyword-keyed map — stringified"))
+        (pr-str v))
 
     ;; All-keyword-keyed map: walk into values recursively.
     (map? v)
-    (into {} (map (fn [[k val]] [k (deep-stringify-non-keyword-maps val)])) v)
+    (into {} (map (fn [[k val]]
+                    [k (deep-stringify-non-keyword-maps
+                        val shape-log doc-type (conj path k))]))
+          v)
 
     ;; Sequential: walk elements.
     (sequential? v)
-    (mapv deep-stringify-non-keyword-maps v)
+    (mapv #(deep-stringify-non-keyword-maps % shape-log doc-type path) v)
 
     ;; Set: walk elements (note: elements must be comparable after transform).
     (set? v)
-    (into #{} (map deep-stringify-non-keyword-maps) v)
+    (into #{} (map #(deep-stringify-non-keyword-maps % shape-log doc-type path)) v)
 
     ;; Fallback: stringify anything else (Java objects, dates, etc.)
     ;; These can't be stored as XTDB 2 doc values directly.
     :else
-    (pr-str v)))
+    (do (when shape-log
+          (log-shape! shape-log doc-type path v
+                      (str "transform: " (.getName (class v)) " — stringified")))
+        (pr-str v)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Transform: denormalize :hx/props (H4 solution from M-futon1b-port).
@@ -323,17 +340,26 @@
 
 (defn transform-doc
   "Transform a single futon1a XTDB 1.x doc to a futon1b XTDB 2.x-compatible doc.
-  Returns the transformed doc. Side-effects: may record shapes in the optional log."
+  Returns the transformed doc. Side-effects: may record shapes in the optional log.
+
+  With `{:log-stringify? true}` every map the transform stringifies is also
+  recorded in SHAPE-LOG with its key path. Off by default so the migration
+  self-test (which expects an empty log over the seed slice) and the
+  by-design stringification of JSON-keyed :evidence/body stay quiet; the live
+  entity, relation and hyperedge routes turn it on."
   ([doc]
    (transform-doc doc nil))
   ([doc shape-log]
+   (transform-doc doc shape-log nil))
+  ([doc shape-log {:keys [log-stringify?]}]
    (let [doc-type (classify-doc doc)]
      (when (and shape-log (= :unknown doc-type))
        (log-shape! shape-log doc-type :unknown doc
                    "doc has no known ID key; cannot classify"))
      (-> doc
          ensure-xt-id
-         deep-stringify-non-keyword-maps
+         (deep-stringify-non-keyword-maps
+          (when log-stringify? shape-log) doc-type [])
          denormalize-hx-props))))
 
 (defn transform-docs

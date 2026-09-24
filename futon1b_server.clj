@@ -126,7 +126,8 @@
                                       name str/lower-case))
         valid-from (some-> (or (:hx/valid-time payload) (:valid-time payload))
                            parse-instant)
-        doc (xf/transform-doc (build-hyperedge-doc payload))
+        doc (xf/transform-doc (build-hyperedge-doc payload)
+                              graph/!shape-log {:log-stringify? true})
         id (:xt/id doc)]
     (letfn [(mutate! []
               (if retract?
@@ -192,7 +193,8 @@
         (ev/prepare-evidence-write node (:evidence payload))
         hyperedge-doc
         (try
-          (xf/transform-doc (build-hyperedge-doc (:hyperedge payload)))
+          (xf/transform-doc (build-hyperedge-doc (:hyperedge payload))
+                            graph/!shape-log {:log-stringify? true})
           (catch clojure.lang.ExceptionInfo error
             (if (:error (ex-data error))
               (throw error)

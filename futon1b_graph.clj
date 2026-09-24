@@ -32,7 +32,7 @@
   Returns the rescue stage keyword (:ok/:rescued-1/:rescued-2) or throws
   the L0-shaped error (503) if the doc is absent after all stages."
   [node table doc]
-  (let [xdoc (xf/transform-doc doc)
+  (let [xdoc (xf/transform-doc doc !shape-log {:log-stringify? true})
         res (ingest/put-doc-with-rescue! node table xdoc !shape-log)]
     (if (fxt/present? node table (:xt/id xdoc))
       (if (keyword? res) res :ok)
@@ -369,7 +369,8 @@
     (let [built (reduce (fn [acc entity]
                           (conj acc (build-entity node entity (mapv :doc acc))))
                         [] entities)
-          docs (mapv (comp xf/transform-doc :doc) built)]
+          docs (mapv #(xf/transform-doc (:doc %) !shape-log {:log-stringify? true})
+                     built)]
       (try (xt/execute-tx node (mapv (fn [d] [:put-docs :entities d]) docs))
            (catch Exception _ nil))
       (let [rescue
@@ -588,7 +589,8 @@
                        vec)]
       (when (seq missing)
         (throw (gates/layered-error 2 :missing-endpoint {:missing missing})))
-      (let [docs (mapv (comp xf/transform-doc :doc) built)]
+      (let [docs (mapv #(xf/transform-doc (:doc %) !shape-log {:log-stringify? true})
+                       built)]
         (try (xt/execute-tx node (mapv (fn [d] [:put-docs :relations d]) docs))
              (catch Exception _ nil))
         (let [rescue
