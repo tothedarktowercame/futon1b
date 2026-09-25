@@ -266,7 +266,7 @@
   ;; --- health observability --------------------------------------------
   (let [b (:body (req "GET" (str base "/health") nil))]
     (check! "/health reports permits, holders, stats, heap, gc"
-            (and (= 2 (:permits/available b)) (= [] (:holders b))
+            (and (= (:permits/total b) (:permits/available b)) (= [] (:holders b))
                  (pos? (:admitted (:stats b))) (pos? (get-in b [:heap :max-mb]))
                  (map? (:gc b))))
     (check! "/health stats completed = admitted (all reads returned permits)"

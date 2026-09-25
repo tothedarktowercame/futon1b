@@ -502,11 +502,16 @@
               {:provided raw :minimum 0 :maximum text/max-offset})))
     parsed))
 
+(def ^:private expensive-read-permits
+  ;; One number for the semaphore and /health: tests read :permits/total, so
+  ;; raising this (2 -> 4 in 2ef1886) no longer leaves them filling two.
+  4)
+
 (defonce ^:private expensive-read-permit
   ;; Corpus scans are admitted globally, not once per route or request. The
   ;; ceiling protects heap and pgwire progress after concurrent scans wedged
   ;; the service; contending scans retain the bounded retryable-503 path.
-  (Semaphore. 4 true))
+  (Semaphore. expensive-read-permits true))
 
 ;; How long a scan will wait for a permit before shedding.
 ;;
@@ -558,7 +563,7 @@
         gc-beans (java.lang.management.ManagementFactory/getGarbageCollectorMXBeans)]
     {:request-workers (mapv (comp request-executor/snapshot :executor)
                             (vals @!server-executors))
-     :permits/total 4
+     :permits/total expensive-read-permits
      :permits/available (.availablePermits expensive-read-permit)
      :permits/waiters (.getQueueLength expensive-read-permit)
      :holders (mapv (fn [h] (-> h

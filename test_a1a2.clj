@@ -205,45 +205,51 @@
               {:elapsed-ms elapsed-ms :fixture-docs (count docs)}))
 
     (println "— admission control: scans cannot occupy the write path")
-    (let [entered (java.util.concurrent.CountDownLatch. 2)
+    ;; Fill every permit the server reports (4 since 2ef1886; this used to
+    ;; hard-code 2, so the "contending" scan was admitted and waited forever
+    ;; on the release). Every wait is bounded, so a wrong count fails, not hangs.
+    (let [permits (:permits/total (:body (req "GET" (str base "/health"))))
+          entered (java.util.concurrent.CountDownLatch. permits)
           release (promise)]
       (with-redefs [ev/count-evidence
                     (fn [_ _]
                       (.countDown entered)
-                      @release
+                      (deref release 30000 nil)
                       {:count 0})]
-        (let [first-scan (future (req "GET" (str E "/count")))
-              second-scan (future (req "GET" (str E "/count")))]
-          (when-not (.await entered 2 java.util.concurrent.TimeUnit/SECONDS)
-            (throw (ex-info "two scan workers did not enter admission gate" {})))
-          (let [rejected-scan (req "GET" (str E "/count"))
-                projection
-                (req "POST" (str base "/api/alpha/memory/projection")
-                     {:endpoints ["p4ng/R9-independent-witness"]
-                      :limit 1}
-                     nil)
-                write (req "POST" E
-                           {:evidence/id "admission-write"
-                            :evidence/type :claim
-                            :evidence/claim-type :observation
-                            :evidence/author "test"}
-                           ph)]
-            (check! "contending corpus scan fails fast with retryable 503"
-                    (and (= 503 (:status rejected-scan))
-                         (= :expensive-read-busy
-                            (get-in rejected-scan [:body :error])))
-                    rejected-scan)
-            (check! "current memory projection bypasses corpus-scan admission"
-                    (and (= 200 (:status projection))
-                         (true? (:ok (:body projection))))
-                    projection)
-            (check! "write succeeds while two corpus scans are occupied"
-                    (= 201 (:status write))
-                    write))
-          (deliver release true)
-          (check! "both admitted scans complete after release"
-                  (every? #(= 200 (:status %)) [@first-scan @second-scan])
-                  [@first-scan @second-scan]))))
+        (let [scans (doall (repeatedly permits #(future (req "GET" (str E "/count")))))]
+          (try
+            (when-not (.await entered 5 java.util.concurrent.TimeUnit/SECONDS)
+              (throw (ex-info "scan workers did not all enter the admission gate"
+                              {:permits permits :entered (- permits (.getCount entered))})))
+            (let [rejected-scan (req "GET" (str E "/count"))
+                  projection
+                  (req "POST" (str base "/api/alpha/memory/projection")
+                       {:endpoints ["p4ng/R9-independent-witness"]
+                        :limit 1}
+                       nil)
+                  write (req "POST" E
+                             {:evidence/id "admission-write"
+                              :evidence/type :claim
+                              :evidence/claim-type :observation
+                              :evidence/author "test"}
+                             ph)]
+              (check! "contending corpus scan fails fast with retryable 503"
+                      (and (= 503 (:status rejected-scan))
+                           (= :expensive-read-busy
+                              (get-in rejected-scan [:body :error])))
+                      rejected-scan)
+              (check! "current memory projection bypasses corpus-scan admission"
+                      (and (= 200 (:status projection))
+                           (true? (:ok (:body projection))))
+                      projection)
+              (check! "write succeeds while every corpus-scan permit is held"
+                      (= 201 (:status write))
+                      write))
+            (finally (deliver release true)))
+          (let [done (mapv #(deref % 10000 ::timeout) scans)]
+            (check! "all admitted scans complete after release"
+                    (every? #(= 200 (:status %)) done)
+                    done)))))
 
     (println "— A2 gates: hyperedge penholder + no-op guard intact")
     (let [r (req "POST" (str base "/api/alpha/hyperedge")

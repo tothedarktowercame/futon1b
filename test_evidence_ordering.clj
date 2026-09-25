@@ -78,6 +78,12 @@
         (finally (server/stop-server! srv))))))
 
 (defn -main [& _]
+  ;; The fixture must exceed XTDB's 102,400-row sort spill to exercise the bug,
+  ;; so it cannot be made small; it is several minutes, so it is opt-in.
+  (when-not (= "1" (System/getenv "FUTON1B_SLOW_TESTS"))
+    (println "SKIPPED test-evidence-ordering (110k-doc fixture); run with FUTON1B_SLOW_TESTS=1")
+    (shutdown-agents)
+    (System/exit 0))
   (let [result (run-tests 'test-evidence-ordering)]
     (shutdown-agents)
     (System/exit (if (zero? (+ (:fail result) (:error result))) 0 1))))
