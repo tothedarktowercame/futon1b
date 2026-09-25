@@ -452,6 +452,45 @@
                  " LIMIT ? OFFSET ?")]
     (jdbc/execute! ds (into [sql] (conj params overfetch offset)) unqualified)))
 
+(defn tag-candidates
+  "Candidate [id at] rows for the evidence list/count path: ids whose indexed
+   tags include every one of TAGS, with at in [SINCE, BELOW-AT), strictly below
+   CURSOR [at id] when given, newest first, at most LIMIT (nil = all).
+
+   Candidates only (contract C1): the caller re-checks each against the store.
+   Returns nil when no sidecar is attached, so the caller keeps its store scan.
+   BELOW-AT is required: the caller scans the store itself from there up,
+   because this index can miss documents newer than its checkpoint."
+  [{:keys [tags since below-at cursor limit]}]
+  (when-let [ds @!ds]
+    (let [[first-tag & more-tags] tags
+          [c-at c-id] cursor
+          clauses (cond-> ["t.tag IN (?,?)" "a.at < ?"]
+                    since (conj "a.at >= ?")
+                    cursor (conj "(a.at < ? OR (a.at = ? AND a.id < ?))")
+                    (seq more-tags)
+                    (into (repeat (count more-tags)
+                                  "EXISTS (SELECT 1 FROM ev_tags t2
+                                           WHERE t2.id = a.id AND t2.tag IN (?,?))")))
+          params (cond-> (into (index-enum-values first-tag) [(str below-at)])
+                   since (conj (str since))
+                   cursor (into [(str c-at) (str c-at) (str c-id)])
+                   (seq more-tags) (into (mapcat index-enum-values more-tags)))
+          sql (str "SELECT a.id, a.at FROM ev_tags t JOIN ev_attr a ON a.id = t.id"
+                   " WHERE " (str/join " AND " clauses)
+                   " ORDER BY a.at DESC, a.id DESC"
+                   (when limit " LIMIT ?"))]
+      (jdbc/execute! ds (into [sql] (cond-> params limit (conj limit)))
+                     unqualified))))
+
+(defn checkpoint-at
+  "The sidecar's catch-up checkpoint :at (everything at or before it has been
+   offered to the index), or nil when no sidecar is attached or none is set."
+  []
+  (when-let [ds @!ds]
+    (let [v (meta-get ds "last-at")]
+      (when-not (str/blank? v) v))))
+
 (def ^:private recheck-cols
   '[xt/id evidence/id evidence/at evidence/author evidence/session-id
     evidence/body evidence/type evidence/claim-type evidence/tags

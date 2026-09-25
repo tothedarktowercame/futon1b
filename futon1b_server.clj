@@ -1088,6 +1088,14 @@
   ;; D1 sidecar: open/create the FTS5 db beside the store, then catch up in
   ;; the background (first boot = full build; steady state = the tail since
   ;; last-at). Failures here must not block serving.
+  ;;
+  ;; No store-dir (a caller-supplied node) means no sidecar location that
+  ;; belongs to this store: it used to resolve to /fts5-evidence.db, shared by
+  ;; every such server, whose checkpoint then described some other store.
+  ;; Evidence tag reads trust that checkpoint (futon1b-evidence tag-window),
+  ;; so a borrowed one silently truncates them.
+  (if-not store-dir
+    (println "[fts] no store-dir: sidecar not attached")
   (try
     (let [{:keys [path last-at]} (text/init! {:store-dir store-dir})]
       (println (format "[fts] sidecar at %s (last-at %s)" path (or last-at "none — full build")))
@@ -1106,7 +1114,7 @@
         (.setDaemon true)
         (.start)))
     (catch Throwable t
-      (println "[fts] init failed (serving continues):" (.getMessage t))))
+      (println "[fts] init failed (serving continues):" (.getMessage t)))))
   (let [server (HttpServer/create (socket-address bind-host port) 50)
         ;; Eight request workers keep short reads moving while projection
         ;; builds wait on their lock (benchmarks/tuning-2026-09-11-r3).

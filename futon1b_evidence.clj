@@ -299,7 +299,140 @@
   `:incomplete true`; the caller continues from the cursor."
   20000)
 
-(defn- bounded-window
+;; ---------------------------------------------------------------------------
+;; Tag reads through the text sidecar's tag index.
+;;
+;; Tags are not a pushdown column, so a tag read walked every projected row in
+;; its window and kept the few that matched: 15-20 s per tags=test-registry
+;; read over futon3c's default 48 h window, 99 s unwindowed, for 3,124 matches
+;; among ~300k rows (2026-09-25, live). The sidecar already keeps ev_tags.
+;; Below the tail start it proposes candidate ids; every candidate is re-read
+;; from the store and re-checked against the same filters (contract C1). From
+;; the tail start up, the store is still scanned directly.
+;; ---------------------------------------------------------------------------
+
+(def ^:private tag-tail-margin-ms
+  "How far below the sidecar checkpoint the store is still scanned directly.
+  on-append! fails under sqlite's single writer (SQLITE_BUSY: 983 in one day,
+  live) and catch-up! only repairs from its checkpoint up. :evidence/at is
+  stamped by the writer before the commit lands, so a doc whose own on-append!
+  failed can commit just below a checkpoint that already passed its :at. The
+  margin has to exceed that stamp-to-commit latency."
+  (* 15 60 1000))
+
+(defn- tag-tail-start
+  "The :at from which tag reads scan the store directly, or nil when there is
+  no sidecar checkpoint (the caller then keeps the full store scan)."
+  []
+  (when-let [ck (text/checkpoint-at)]
+    (try (str (.minusMillis (java.time.Instant/parse ck) tag-tail-margin-ms))
+         (catch Exception _ nil))))
+
+(defn- sql-col [sym]
+  ;; `evidence/claim-type` -> "evidence$claim_type"; quoted for the `?` of
+  ;; ephemeral?. A misspelt column reads as NULL rather than failing, which
+  ;; would make its filter silently vacuous, so the recheck test covers each.
+  (str "\"" (namespace sym) "$" (str/replace (name sym) "-" "_") "\""))
+
+(defn- projected-by-ids
+  "The store's projected rows for IDS (SQL IN, as hydrate-projected)."
+  [node ids cols]
+  (if-not (seq ids)
+    []
+    (let [sql (str "SELECT _id, "
+                   (str/join ", " (map sql-col (remove #{'xt/id} cols)))
+                   " FROM evidence WHERE _id IN ("
+                   (str/join "," (repeat (count ids) "?")) ")")]
+      (fxt/timed-q node (into [sql] ids)))))
+
+(defn- pushdown-match?
+  "The Clojure image of `filter-param-specs` for rows that did not come
+  through the XTQL where clause. since/before are in apply-post-filters."
+  [row q]
+  (every? (fn [[k field]]
+            (let [want (get q k)]
+              (or (nil? want) (= want (get row field)))))
+          [[:type :evidence/type]
+           [:claim-type :evidence/claim-type]
+           [:author :evidence/author]
+           [:session-id :evidence/session-id]
+           [:fork-of :evidence/fork-of]]))
+
+(defn- recheck-projected
+  "Store rows for candidate ids that still satisfy every filter in Q, in
+  candidate order. A candidate the store no longer holds is dropped."
+  [node cands q cols]
+  (let [rows (projected-by-ids node (mapv :id cands) cols)
+        by-id (into {} (map (juxt #(str (:xt/id %)) identity)) rows)
+        ordered (keep #(get by-id (str (:id %))) cands)]
+    (filter #(pushdown-match? % q) (apply-post-filters ordered q))))
+
+(def ^:private tag-recheck-wave 1000)
+
+(defn- recheck-wave
+  "Candidates fetched per re-check round when NEEDED rows are still wanted:
+  twice the need (most candidates survive), within [100, tag-recheck-wave]."
+  [needed]
+  (min tag-recheck-wave (max 100 (* 2 needed))))
+
+(declare scan-window)
+
+(defn- tail-query
+  "Q restricted to the part of the store tag reads scan directly."
+  [q tail-start]
+  (assoc q :since (if (and (:since q) (pos? (compare (:since q) tail-start)))
+                    (:since q)
+                    tail-start)))
+
+(defn- subject-cols [q]
+  (if (or (:subject-type q) (:subject-id q)) filter-cols scalar-filter-cols))
+
+(defn- tag-window
+  "bounded-window for a tag query, or nil when the sidecar cannot serve it.
+  Tail rows (at >= tail start) come from the store scan and are all newer
+  than any candidate, so the page is tail matches then candidate survivors."
+  [node q limit initial-cursor]
+  (when-let [tail-start (tag-tail-start)]
+    (let [tail (scan-window node (tail-query q tail-start) limit initial-cursor)
+          want (- limit (count (:entries tail)))
+          cols (subject-cols q)]
+      (if (or (:incomplete tail) (<= want 0))
+        tail
+        (loop [cursor initial-cursor
+               selected []
+               checked 0]
+          (let [remaining (- want (count selected))
+                wave (recheck-wave remaining)
+                cands (text/tag-candidates {:tags (:tags q) :since (:since q)
+                                            :below-at tail-start :cursor cursor
+                                            :limit wave})
+                selected' (into selected
+                                (take remaining (recheck-projected node cands q cols)))
+                checked' (+ checked (count cands))]
+            (if (or (>= (count selected') want) (< (count cands) wave))
+              (let [full? (>= (count selected') want)]
+                ;; full? implies selected' is non-empty, since want > 0 here.
+                {:entries (into (:entries tail)
+                                (map public-doc (hydrate-projected node selected')))
+                 :next-cursor (when full? (row-cursor (peek selected')))
+                 :scanned (+ (:scanned tail) checked')})
+              (let [lst (peek cands)]
+                (recur [(:at lst) (:id lst)] selected' checked')))))))))
+
+(defn- tag-count
+  "count-evidence for a tag query via the sidecar, or nil when it cannot."
+  [node q]
+  (when-let [tail-start (tag-tail-start)]
+    (let [tail-q (tail-query q tail-start)
+          tail-n (count (apply-post-filters (fetch-filtered node tail-q filter-cols) tail-q))
+          cols (subject-cols q)
+          cands (text/tag-candidates {:tags (:tags q) :since (:since q)
+                                      :below-at tail-start})]
+      (+ tail-n
+         (reduce + (map #(count (recheck-projected node % q cols))
+                        (partition-all tag-recheck-wave cands)))))))
+
+(defn- scan-window
   "Return a cursor page of at most LIMIT exact matches, newest first.
 
   Do not ask XTDB to order full evidence documents. On the full store that
@@ -355,6 +488,12 @@
                :scanned scanned'
                :incomplete true}
               (recur next-cursor selected' scanned'))))))))
+
+;; tag-window falls back to scan-window when there is no sidecar checkpoint.
+(defn- bounded-window
+  [node q limit initial-cursor]
+  (or (when (seq (:tags q)) (tag-window node q limit initial-cursor))
+      (scan-window node q limit initial-cursor)))
 
 (defn- name-of [x]
   (cond (keyword? x) (name x)
@@ -452,7 +591,8 @@
   Projected scan — never materializes full docs."
   [node http-params]
   (let [q (dissoc (parse-query-params http-params) :limit)]
-    {:count (count (apply-post-filters (fetch-filtered node q filter-cols) q))}))
+    {:count (or (when (seq (:tags q)) (tag-count node q))
+                (count (apply-post-filters (fetch-filtered node q filter-cols) q)))}))
 
 ;; ---------------------------------------------------------------------------
 ;; Sessions + chain.
