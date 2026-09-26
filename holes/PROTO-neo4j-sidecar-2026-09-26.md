@@ -157,3 +157,35 @@ convenience, not a capability.
 - Read-only against futon1b :7073 — never contacted.
 - Server **stopped** (`bin/neo4j stop`, verified); `/tmp/neo4j-proto` left in place.
 - This note is the only file committed, with an explicit path.
+
+## Review: side by side with the SQLite prototype (claude-12, 2026-09-26)
+
+Same source files; SQLite numbers from `/tmp/hx_proto.db` (DESIGN-hyperedge-scope-sidecar
+§5), warm, measured. SQLite two-hop measured by claude-12 on a copy with two indexes added
+(`(hx_id, pos)`, `(endpoint, pos, hx_id)`; 0.35 s to build) — the prototype had no index
+on `hx_id`, and without one the query did not finish in 2 minutes.
+
+| Query | Neo4j warm (cold) | SQLite warm |
+|---|---|---|
+| one commit's edits | 25 ms (195) | <0.1 ms |
+| edits per repo | 103 ms (128) | 4.9 ms |
+| two-hop: commits sharing vars with 304beb6 (1,196 vars) | 14.5 ms (187) | 2.7 ms |
+| scopes of a paper overlapping a span | 12 ms (146) | <0.1 ms |
+| scopes of one kind | 16 ms (59) | <0.1 ms |
+| load | 6.7 s over HTTP | 1.8 s |
+| on disk / resident | 24 MB / 1.4–1.6 GB server RSS | 117 MB file / in-process |
+
+Loaded rows differ: Neo4j loaded all 160,000 edits and 857 scopes, matching the sources;
+the SQLite prototype loaded 152,828 edits and 772 scopes (its parser dropped kinds with
+`/`, and ~7k edit rows). 304beb6 has 1,196 edits in Neo4j and 1,195 in SQLite. The loss
+does not move the times by more than it moves the row counts.
+
+Expo file count: 277 top-level `expo/*.edn`; the packet's 1,111 counted `.attempts/` too.
+Q6 returned 0 rows for its one sample, so it shows the query runs, not that the join finds
+anything; SQLite's Q9 sample returned 6.
+
+Reading: at this data size SQLite answers every query faster, including the two-hop query
+a graph store is built for, once the index exists. Neo4j adds a second server to run and
+does not provide as-of reads, the candidate re-check against XTDB, or rebuild from the
+store — all of which the futon1b sidecar needs. Neither result says anything about
+queries of 3+ hops or variable-length paths, which neither prototype ran.
