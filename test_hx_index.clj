@@ -93,7 +93,7 @@
         (let [res (hx/catch-up! node)]
           (check! "one catch-up repairs the missed put"
                   (= [[0 "x"] [1 "y"]] (rows-for "hx:missed:1")))
-          (check! "catch-up reports its work" (pos? (long (:changed res))))))
+          (check! "catch-up reports its work" (pos? (long (or (:changed res) (:filled res)))))))
 
       ;; ---- hook throws: attributable, request already succeeded -----------
       (let [stats-var (var-get (ns-resolve 'futon1b-hxindex '!stats))
@@ -150,7 +150,21 @@
                      (:total-elapsed-ms res) "ms")
             (check! "rebuild from empty reproduces per-type XTDB counts"
                     (= expected got))
-            (check! "rebuild saw every type" (= 2 (count got)))))
+            (check! "rebuild saw every type" (= 2 (count got)))
+            ;; review of 106fa1d: an empty index fills from current rows, not
+            ;; by walking every version from the epoch one scan per page
+            (check! "rebuild of an empty index goes through the fill"
+                    (pos? (long (or (:filled res) 0))))
+            (check! "the fill keeps endpoint positions"
+                    (= [[0 "c1"] [1 "c2"]]
+                       (rows-for "hx:r2")))
+            ;; writes after the fill are repaired by the next catch-up
+            (xt/execute-tx node [[:put-docs :hyperedges
+                                  (hx-doc "hx:r4" :probe/other ["o4"])]
+                                 [:delete-docs :hyperedges "hx:r3"]])
+            (hx/catch-up! node)
+            (check! "a put after the fill is caught up" (= 1 (row-count "hx:r4")))
+            (check! "a delete after the fill is caught up" (zero? (row-count "hx:r3")))))
 
       ;; ---- stats ------------------------------------------------------------
       (let [s (hx/hx-stats)]

@@ -200,6 +200,52 @@
   [node]
   (:latest (first (fxt/timed-q node ["SELECT MAX(_id) AS latest FROM xt.txs"]))))
 
+(defn- current-page
+  "One page of CURRENT hyperedges keyed on _id, with the two columns the index
+   needs, so the fill needs no hydration round-trip."
+  [node after page]
+  (fxt/timed-q
+   node
+   ["SELECT _id, hx$type AS t, hx$endpoints AS ends FROM hyperedges
+     WHERE _id > ? ORDER BY _id LIMIT ?"
+    (str after) (long page)]))
+
+(defn- fill!
+  "Fill an EMPTY index from the current rows (review of 106fa1d, claude-12).
+   Walking the system-time legs from the epoch costs one whole-table scan per
+   page over every version ever written (P0: each page scans), i.e. ~1000
+   scans at 1000/page for the live store; this walks current rows only, in
+   large _id pages, and skips the tombstone leg (nothing to delete in an empty
+   index). The checkpoint is the (system time, id) of the store's newest version,
+   read BEFORE the fill (one scan): every write committed after it has a later system time and
+   is seen by the next catch-up's legs. A clock margin instead would make the
+   next upsert leg re-read recent versions and repair deletes it cannot see,
+   hiding a missing tombstone leg (found by the bad-case test)."
+  [ds node tx-id page]
+  (let [top (first (fxt/timed-q
+                     node ["SELECT _id, _system_from AS marker
+                            FROM hyperedges FOR ALL SYSTEM_TIME
+                            ORDER BY _system_from DESC, _id DESC LIMIT 1"]))
+        n (loop [after "" n 0]
+            (let [rows (current-page node after page)]
+              (if (empty? rows)
+                n
+                (do (jdbc/with-transaction [tx ds]
+                      (doseq [r rows
+                              :let [id (str (row-id r))]]
+                        (jdbc/execute! tx ["DELETE FROM hx_edge WHERE hx_id = ?" id])
+                        (doseq [[pos end] (map-indexed vector (or (:ends r) (:hx/endpoints r)))]
+                          (jdbc/execute! tx ["INSERT INTO hx_edge(hx_id, type, pos, endpoint)
+                                              VALUES (?,?,?,?)"
+                                             id (str (or (:t r) (:hx/type r))) pos (str end)]))))
+                    (recur (str (row-id (last rows))) (+ n (count rows)))))))]
+    ;; (ts, id) of the newest version, same keyset as the legs: re-reading it
+    ;; would let the upsert leg repair a delete of that doc (see docstring).
+    (meta-set! ds "checkpoint-ts" (if top (str (row-marker top)) (str epoch)))
+    (meta-set! ds "checkpoint-id" (if top (str (row-id top)) ""))
+    (meta-set! ds "last-tx-id" (str tx-id))
+    n))
+
 (defonce ^:private !catch-up-running? (atom false))
 
 (defn catch-up!
@@ -209,8 +255,8 @@
    exists ONLY for the bad-case test. Skipped as {:skipped :no-new-tx} when
    xt.txs shows no transaction newer than the last run (pass :force true to
    override, e.g. from rebuild!). Single-flight like the evidence catch-up."
-  [node & {:keys [page force tombstones?]
-           :or {page 1000 force false tombstones? true}}]
+  [node & {:keys [page fill-page force tombstones?]
+           :or {page 1000 fill-page 20000 force false tombstones? true}}]
   (if-not (compare-and-set! !catch-up-running? false true)
     {:skipped :already-running}
     (try
@@ -219,8 +265,18 @@
             started (System/currentTimeMillis)
             tx-id (latest-tx-id node)
             prior-tx (some-> (meta-get ds "last-tx-id") Long/parseLong)]
-        (if (and (not force) (some? prior-tx) (= prior-tx tx-id))
+        (cond
+          (and (not force) (some? prior-tx) (= prior-tx tx-id))
           {:skipped :no-new-tx :tx-id tx-id}
+
+          (nil? (meta-get ds "checkpoint-ts"))
+          (let [n (fill! ds node tx-id fill-page)
+                elapsed (- (System/currentTimeMillis) started)]
+            (swap! !stats assoc :last-catch-up
+                   {:at (str (Instant/now)) :elapsed-ms elapsed :changed n :fill true})
+            {:filled n :elapsed-ms elapsed :tx-id tx-id})
+
+          :else
           (let [checkpoint [(or (meta-get ds "checkpoint-ts") (str epoch))
                             (or (meta-get ds "checkpoint-id") "")]
                 upserted (loop [after checkpoint changed 0]
@@ -264,9 +320,7 @@
   (let [ds (ds*)
         started (System/currentTimeMillis)]
     (jdbc/execute! ds ["DELETE FROM hx_edge"])
-    (meta-set! ds "checkpoint-ts" (str epoch))
-    (meta-set! ds "checkpoint-id" "")
-    (meta-set! ds "last-tx-id" "-1")
+    (jdbc/execute! ds ["DELETE FROM hx_meta WHERE k IN ('checkpoint-ts','checkpoint-id','last-tx-id')"])
     (assoc (catch-up! node :page page :force true)
            :total-elapsed-ms (- (System/currentTimeMillis) started))))
 
