@@ -45,6 +45,10 @@
   (:n (jdbc/execute-one! (ds) ["SELECT count(*) AS n FROM hx_edge WHERE hx_id = ?" id]
                          unqualified)))
 
+(defn- node-type [id]
+  (:type (jdbc/execute-one! (ds) ["SELECT type FROM hx_node WHERE hx_id = ?" id]
+                            unqualified)))
+
 (defn- hx-doc [id type endpoints]
   {:xt/id id :hx/id id :hx/type type :hx/endpoints (vec endpoints)})
 
@@ -70,7 +74,9 @@
         (xt/execute-tx node [[:put-docs :hyperedges d]])
         (hx/on-put! d)
         (check! "hooked put lands rows in endpoint order"
-                (wait-for 5000 #(= [[0 "a"] [1 "b"] [2 "c"]] (rows-for "hx:put:1")))))
+                (wait-for 5000 #(= [[0 "a"] [1 "b"] [2 "c"]] (rows-for "hx:put:1"))))
+        (check! "hooked put lands the hx_node row (P3c)"
+                (wait-for 5000 #(= ":probe/edits" (node-type "hx:put:1")))))
 
       ;; ---- hook: re-put with changed endpoints → old gone, new present ----
       (let [d2 (hx-doc "hx:put:1" :probe/edits ["b" "d"])]
@@ -83,7 +89,9 @@
       (do (xt/execute-tx node [[:delete-docs :hyperedges "hx:put:1"]])
           (hx/on-delete! "hx:put:1")
           (check! "hooked delete drops every row"
-                  (wait-for 5000 #(zero? (row-count "hx:put:1")))))
+                  (wait-for 5000 #(zero? (row-count "hx:put:1"))))
+          (check! "hooked delete drops the hx_node row (P3c)"
+                  (wait-for 5000 #(nil? (node-type "hx:put:1")))))
 
       ;; ---- hook missed: request unaffected, catch-up repairs upsert -------
       (let [d (hx-doc "hx:missed:1" :probe/edits ["x" "y"])]
@@ -93,6 +101,8 @@
         (let [res (hx/catch-up! node)]
           (check! "one catch-up repairs the missed put"
                   (= [[0 "x"] [1 "y"]] (rows-for "hx:missed:1")))
+          (check! "catch-up repairs the missed put's hx_node row (P3c)"
+                  (= ":probe/edits" (node-type "hx:missed:1")))
           (check! "catch-up reports its work" (pos? (long (or (:changed res) (:filled res)))))))
 
       ;; ---- hook throws: attributable, request already succeeded -----------
@@ -125,11 +135,15 @@
           (hx/catch-up! node :force true :tombstones? false)
           (check! "BAD CASE: without the tombstone leg the delete is NOT repaired"
                   (pos? (row-count "hx:missed:1")))
+          (check! "BAD CASE: hx_node also keeps the deleted id"
+                  (some? (node-type "hx:missed:1")))
 
           ;; restored: both legs
           (hx/catch-up! node :force true)
           (check! "with the tombstone leg restored the delete repairs"
-                  (zero? (row-count "hx:missed:1"))))
+                  (zero? (row-count "hx:missed:1")))
+          (check! "with the tombstone leg restored the hx_node row repairs"
+                  (nil? (node-type "hx:missed:1"))))
 
       ;; ---- no-new-tx guard --------------------------------------------------
       (check! "a catch-up with no new transaction skips"
@@ -165,6 +179,30 @@
             (hx/catch-up! node)
             (check! "a put after the fill is caught up" (= 1 (row-count "hx:r4")))
             (check! "a delete after the fill is caught up" (zero? (row-count "hx:r3")))))
+
+      ;; ---- P3c: zero-endpoint hyperedges ------------------------------------
+      ;; A hyperedge with no endpoints has NO hx_edge rows; hx_node must
+      ;; still carry it, from every write path.
+      (let [d (hx-doc "hx:zero:1" :probe/bare [])]
+        (xt/execute-tx node [[:put-docs :hyperedges d]])
+        (hx/on-put! d)
+        (check! "hooked zero-endpoint put: no hx_edge rows but an hx_node row"
+                (wait-for 5000 #(and (zero? (row-count "hx:zero:1"))
+                                     (= ":probe/bare" (node-type "hx:zero:1")))))
+        (check! "type-count counts the zero-endpoint hyperedge"
+                (= 1 (hx/type-count :probe/bare)))
+        (check! "type-end-candidates never returns a zero-endpoint hyperedge"
+                (not-any? #{"hx:zero:1"}
+                          (hx/type-end-candidates
+                           {:type :probe/bare :endpoints [""] :after "" :fetch 10})))
+        ;; unhooked retype: catch-up moves the hx_node row
+        (xt/execute-tx node [[:put-docs :hyperedges
+                              (hx-doc "hx:zero:1" :probe/moved [])]])
+        (hx/catch-up! node)
+        (check! "catch-up retypes a zero-endpoint hyperedge in hx_node"
+                (and (= ":probe/moved" (node-type "hx:zero:1"))
+                     (zero? (hx/type-count :probe/bare))
+                     (= 1 (hx/type-count :probe/moved)))))
 
       ;; ---- stats ------------------------------------------------------------
       (let [s (hx/hx-stats)]

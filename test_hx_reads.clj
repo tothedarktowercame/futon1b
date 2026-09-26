@@ -328,6 +328,57 @@
                                            :system-as-of (Instant/now)})
                               :hx-index)))
 
+      ;; ---- P3c: census from the sidecar incl. zero-endpoint hyperedges -------
+      ;; hx:zero1 has an empty endpoints vector, hx:zero2 no endpoints key at
+      ;; all. Both are invisible to hx_edge; hx_node must count them. These
+      ;; are unhooked writes repaired by catch-up — the parity check below is
+      ;; the "unhooked writes + catch-up" case.
+      (xt/execute-tx node [[:put-docs :hyperedges (hx-doc "hx:zero1" :probe/edits [])]
+                           [:put-docs :hyperedges {:xt/id "hx:zero2" :hx/id "hx:zero2"
+                                                   :hx/type :probe/edits}]])
+      (hx/catch-up! node)
+      (check! "P3c: type-count includes zero-endpoint hyperedges (6 + 2)"
+              (= 8 (hx/type-count :probe/edits)))
+      (let [indexed (graph/census node {:type "probe/edits"})
+            _ (reset! reads-enabled false)
+            scanned (graph/census node {:type "probe/edits"})
+            _ (reset! reads-enabled true)]
+        (check! "P3c: census served from the sidecar (:hx-index present)"
+                (some? (:hx-index indexed)))
+        (check! "P3c: census falls back to the scan when reads are disabled"
+                (not (contains? scanned :hx-index)))
+        (check! "P3c: census parity with the scan incl. zero-endpoint hyperedges"
+                (= 8 (:count indexed) (:count scanned))))
+      (check! "P3c: P3 include-total equals census on the same store"
+              (= (:count (graph/census node {:type "probe/edits"}))
+                 (:count (query node {:type "probe/edits" :limit 1
+                                      :include-total? true}))))
+      (let [ids (set (map :hx/id (:hyperedges
+                                  (query node {:type "probe/edits" :limit 50}))))]
+        (check! "P3c: zero-endpoint hyperedges are type-only read candidates"
+                (and (contains? ids "hx:zero1") (contains? ids "hx:zero2"))))
+      (check! "P3c: a zero-endpoint hyperedge is never a type+end match"
+              (and (not-any? #{"hx:zero1" "hx:zero2"}
+                             (hx/type-end-candidates
+                              {:type :probe/edits :endpoints ["" "E1" "SHARED"]
+                               :after "" :fetch 100}))
+                   (empty? (:hyperedges
+                            (query node {:type "probe/edits" :end ""
+                                         :limit 50})))))
+      ;; hooked write/delete: index-doc!/delete-id! are what the hooks run;
+      ;; the census must move immediately, before any catch-up
+      (let [ds @(var-get (ns-resolve 'futon1b-text '!ds))]
+        (hx/index-doc! ds (hx-doc "hx:hooked:zero" :probe/edits []))
+        (check! "P3c: a hooked zero-endpoint write is counted immediately"
+                (= 9 (:count (graph/census node {:type "probe/edits"}))))
+        (hx/delete-id! ds "hx:hooked:zero")
+        (check! "P3c: a hooked delete is uncounted immediately"
+                (= 8 (:count (graph/census node {:type "probe/edits"})))))
+      ;; BAD CASE (run during development): drop the zero-endpoint handling —
+      ;; e.g. the hx_node upsert in repair-ids! or the zero-endpoint walk in
+      ;; backfill-hx-node! — and "census parity with the scan incl.
+      ;; zero-endpoint hyperedges" FAILs (7 or 6 vs 8). Verified by stubbing.
+
       ;; ---- unusable index ----------------------------------------------------
       ;; (a) a hook failure since the last catch-up: a fresh hyperedge could
       ;; be missing from the candidates in a way the re-check cannot see.
@@ -355,7 +406,12 @@
         (check! "no checkpoint: the scan path runs (results, no annotation)"
                 (let [r (query node {:type "probe/edits" :end "E1" :limit 2})]
                   (and (not (contains? r :hx-index))
-                       (= 2 (:count r)))))))
+                       (= 2 (:count r)))))
+        (check! "P3c: no hx_node backfill yet: census falls back to the scan"
+                (let [r (graph/census node {:type "probe/edits"})]
+                  (and (not (hx/node-index-ready?))
+                       (not (contains? r :hx-index))
+                       (= 8 (:count r)))))))
 
     (println "HX READS: ALL PASS"))
   (shutdown-agents))

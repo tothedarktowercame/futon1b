@@ -62,6 +62,12 @@
    ;; (type, hx_id): P3 type-only keyset reads (type-candidates/type-count) —
    ;; (type, endpoint) cannot deliver hx_id order for a whole type.
    "CREATE INDEX IF NOT EXISTS hx_type_id ON hx_edge(type, hx_id)"
+   ;; P3c: one row per hyperedge, present even with ZERO endpoints (hx_edge
+   ;; has one row per endpoint, so a zero-endpoint hyperedge is invisible to
+   ;; it — type-candidates/type-count and census read from hx_node instead).
+   "CREATE TABLE IF NOT EXISTS hx_node (
+      hx_id TEXT PRIMARY KEY, type TEXT NOT NULL)"
+   "CREATE INDEX IF NOT EXISTS hx_node_type_id ON hx_node(type, hx_id)"
    "CREATE TABLE IF NOT EXISTS hx_meta (k TEXT PRIMARY KEY, v TEXT)"])
 
 (defn- ds* [] @text/!ds)
@@ -89,9 +95,10 @@
 ;; ---------------------------------------------------------------------------
 
 (defn index-doc!
-  "Delete any rows for the doc's hx_id, then insert one row per endpoint
-   position. One SQLite transaction, so readers never see a half-replaced
-   hyperedge (positions may change between versions)."
+  "Delete any hx_edge rows for the doc's hx_id, insert one row per endpoint
+   position, and upsert the hx_node row (one per hyperedge, even with zero
+   endpoints — P3c). One SQLite transaction, so readers never see a
+   half-replaced hyperedge (positions may change between versions)."
   [ds doc]
   (let [id (str (:xt/id doc))
         t (str (:hx/type doc))
@@ -100,11 +107,15 @@
       (jdbc/execute! tx ["DELETE FROM hx_edge WHERE hx_id = ?" id])
       (doseq [[pos end] (map-indexed vector endpoints)]
         (jdbc/execute! tx ["INSERT INTO hx_edge(hx_id, type, pos, endpoint)
-                            VALUES (?,?,?,?)" id t pos (str end)]))))
+                            VALUES (?,?,?,?)" id t pos (str end)]))
+      (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type) VALUES (?,?)
+                          ON CONFLICT(hx_id) DO UPDATE SET type=excluded.type"
+                         id t])))
   (count (:hx/endpoints doc)))
 
 (defn delete-id! [ds id]
-  (jdbc/execute! ds ["DELETE FROM hx_edge WHERE hx_id = ?" (str id)]))
+  (jdbc/execute! ds ["DELETE FROM hx_edge WHERE hx_id = ?" (str id)])
+  (jdbc/execute! ds ["DELETE FROM hx_node WHERE hx_id = ?" (str id)]))
 
 ;; ---------------------------------------------------------------------------
 ;; Write-path hooks. Fire-and-forget; never fail the request; never advance
@@ -206,8 +217,12 @@
               (doseq [[pos end] (map-indexed vector (:hx/endpoints doc))]
                 (jdbc/execute! tx ["INSERT INTO hx_edge(hx_id, type, pos, endpoint)
                                     VALUES (?,?,?,?)"
-                                   id (str (:hx/type doc)) pos (str end)])))
-          (jdbc/execute! tx ["DELETE FROM hx_edge WHERE hx_id = ?" id]))))
+                                   id (str (:hx/type doc)) pos (str end)]))
+              (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type) VALUES (?,?)
+                                  ON CONFLICT(hx_id) DO UPDATE SET type=excluded.type"
+                                 id (str (:hx/type doc))]))
+          (do (jdbc/execute! tx ["DELETE FROM hx_edge WHERE hx_id = ?" id])
+              (jdbc/execute! tx ["DELETE FROM hx_node WHERE hx_id = ?" id])))))
     (count ids)))
 
 (defn- latest-tx-id
@@ -262,7 +277,10 @@
                         (doseq [[pos end] (map-indexed vector (or (:ends r) (:hx/endpoints r)))]
                           (jdbc/execute! tx ["INSERT INTO hx_edge(hx_id, type, pos, endpoint)
                                               VALUES (?,?,?,?)"
-                                             id (str (or (:t r) (:hx/type r))) pos (str end)]))))
+                                             id (str (or (:t r) (:hx/type r))) pos (str end)]))
+                        (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type) VALUES (?,?)
+                                            ON CONFLICT(hx_id) DO UPDATE SET type=excluded.type"
+                                           id (str (or (:t r) (:hx/type r)))])))
                     (recur (str (row-id (last rows))) (+ n (count rows)))))))]
     ;; (ts, id) of the newest version, same keyset as the legs: re-reading it
     ;; would let the upsert leg repair a delete of that doc (see docstring).
@@ -272,6 +290,53 @@
     n))
 
 (defonce ^:private !catch-up-running? (atom false))
+
+(defn backfill-hx-node!
+  "P3c: populate hx_node for a sidecar built before the table existed. Every
+   hyperedge with at least one endpoint is already distinct in hx_edge, so
+   those rows are copied LOCALLY (no XTDB round-trip); zero-endpoint
+   hyperedges are invisible to hx_edge and are paged out of the store
+   (measured 2026-09-28: 0 live, but the census contract must count them).
+   Idempotent (ON CONFLICT DO NOTHING); recorded in hx_meta under
+   hx-node-backfill so it runs once. catch-up! calls this before anything
+   else when the marker is absent — the live server's periodic catch-up
+   therefore backfills on its first run after the reload, no restart and no
+   manual step."
+  [ds node & {:keys [page] :or {page 20000}}]
+  (let [started (System/currentTimeMillis)
+        copied (:next.jdbc/update-count
+                (first (jdbc/execute! ds ["INSERT INTO hx_node(hx_id, type)
+                                           SELECT hx_id, type FROM hx_edge
+                                           GROUP BY hx_id
+                                           ON CONFLICT(hx_id) DO NOTHING"])))
+        zero (loop [after "" n 0]
+               (let [rows (fxt/timed-q
+                           node
+                           ["SELECT _id, hx$type AS t FROM hyperedges
+                             WHERE (hx$endpoints IS NULL
+                                    OR cardinality(hx$endpoints) = 0)
+                             AND _id > ? ORDER BY _id LIMIT ?"
+                            (str after) (long page)])]
+                 (if (empty? rows)
+                   n
+                   (do (jdbc/with-transaction [tx ds]
+                         (doseq [r rows]
+                           (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type)
+                                               VALUES (?,?)
+                                               ON CONFLICT(hx_id) DO NOTHING"
+                                              (str (row-id r))
+                                              (str (or (:t r) (:hx/type r)))])))
+                       (recur (str (row-id (last rows))) (+ n (count rows)))))))]
+    (meta-set! ds "hx-node-backfill" (str (Instant/now)))
+    {:copied-from-hx-edge copied :zero-endpoint zero
+     :elapsed-ms (- (System/currentTimeMillis) started)}))
+
+(defn node-index-ready?
+  "P3c gate: hx_node (the one-row-per-hyperedge table the census and
+   type-only reads count from) has been backfilled. False on a sidecar
+   written before P3c until the first catch-up! after the reload."
+  []
+  (boolean (when-let [ds (ds*)] (meta-get ds "hx-node-backfill"))))
 
 (defn catch-up!
   "Repair the index for everything changed since the checkpoint, then advance
@@ -288,11 +353,17 @@
       (let [ds (ds*)
             _ (when-not ds (throw (ex-info "hxindex: no datasource" {})))
             started (System/currentTimeMillis)
+            ;; P3c: a sidecar written before hx_node existed gets the table
+            ;; backfilled here, BEFORE the no-new-tx skip — the backfill must
+            ;; not wait for a store write.
+            node-backfill (when (nil? (meta-get ds "hx-node-backfill"))
+                            (backfill-hx-node! ds node))
             tx-id (latest-tx-id node)
             prior-tx (some-> (meta-get ds "last-tx-id") Long/parseLong)]
         (cond
           (and (not force) (some? prior-tx) (= prior-tx tx-id))
-          {:skipped :no-new-tx :tx-id tx-id}
+          (cond-> {:skipped :no-new-tx :tx-id tx-id}
+            node-backfill (assoc :hx-node-backfill node-backfill))
 
           (nil? (meta-get ds "checkpoint-ts"))
           (let [n (fill! ds node tx-id fill-page)
@@ -300,7 +371,8 @@
             (meta-set! ds "hook-failures-at-catch-up" (:hook-failures @!stats))
             (swap! !stats assoc :last-catch-up
                    {:at (str (Instant/now)) :elapsed-ms elapsed :changed n :fill true})
-            {:filled n :elapsed-ms elapsed :tx-id tx-id})
+            (cond-> {:filled n :elapsed-ms elapsed :tx-id tx-id}
+              node-backfill (assoc :hx-node-backfill node-backfill)))
 
           :else
           (let [checkpoint [(or (meta-get ds "checkpoint-ts") (str epoch))
@@ -330,9 +402,10 @@
             (meta-set! ds "last-tx-id" (str tx-id))
             (meta-set! ds "hook-failures-at-catch-up" (:hook-failures @!stats))
             (let [elapsed (- (System/currentTimeMillis) started)
-                  res {:changed (+ upserted deleted)
-                       :upsert-leg upserted :tombstone-leg deleted
-                       :elapsed-ms elapsed :tx-id tx-id}]
+                  res (cond-> {:changed (+ upserted deleted)
+                               :upsert-leg upserted :tombstone-leg deleted
+                               :elapsed-ms elapsed :tx-id tx-id}
+                        node-backfill (assoc :hx-node-backfill node-backfill))]
               (swap! !stats assoc :last-catch-up
                      {:at (str (Instant/now)) :elapsed-ms elapsed
                       :changed (:changed res)})
@@ -347,7 +420,8 @@
   (let [ds (ds*)
         started (System/currentTimeMillis)]
     (jdbc/execute! ds ["DELETE FROM hx_edge"])
-    (jdbc/execute! ds ["DELETE FROM hx_meta WHERE k IN ('checkpoint-ts','checkpoint-id','last-tx-id')"])
+    (jdbc/execute! ds ["DELETE FROM hx_node"])
+    (jdbc/execute! ds ["DELETE FROM hx_meta WHERE k IN ('checkpoint-ts','checkpoint-id','last-tx-id','hx-node-backfill')"])
     (assoc (catch-up! node :page page :force true)
            :total-elapsed-ms (- (System/currentTimeMillis) started))))
 
@@ -469,11 +543,13 @@
    at most FETCH ids — one ordered scan over the (type, hx_id) index with
    adjacent-duplicate dedup. The cursor contract is the scan path's: AFTER is
    the last xt/id of the previous window, compared as TEXT, the same
-   lexicographic order XTDB's `order-by xt/id` applies to string ids."
+   lexicographic order XTDB's `order-by xt/id` applies to string ids.
+   P3c: reads hx_node (one row per hyperedge), so zero-endpoint hyperedges
+   ARE candidates — they are real members of the type."
   [{:keys [type after fetch]}]
   (when-let [ds (ds*)]
     (->> (jdbc/execute! ds
-                        ["SELECT DISTINCT hx_id FROM hx_edge
+                        ["SELECT hx_id FROM hx_node
                           WHERE type = ? AND hx_id > ?
                           ORDER BY hx_id LIMIT ?"
                          (str type) (str (or after "")) (long fetch)]
@@ -482,17 +558,16 @@
          (vec))))
 
 (defn type-count
-  "P3 include-total: distinct hx_ids indexed under TYPE. Matches XTDB's
-   type count when the index is caught up AND every hyperedge of the type
-   has at least one endpoint (a zero-endpoint hyperedge has no hx_edge rows
-   and is invisible here). Exact only up to the checkpoint plus hook
-   repairs — a candidate deleted unhooked since the last catch-up still
-   counts until the next catch-up removes it."
+  "P3 include-total / P3c census: hyperedges indexed under TYPE, read from
+   hx_node (one row per hyperedge), so zero-endpoint hyperedges count.
+   Matches XTDB's type count when the index is caught up; exact only up to
+   the checkpoint plus hook repairs — a hyperedge deleted unhooked since the
+   last catch-up still counts until the next catch-up removes it."
   [type]
   (when-let [ds (ds*)]
     (:count (first (jdbc/execute! ds
-                                  ["SELECT count(DISTINCT hx_id) AS count
-                                    FROM hx_edge WHERE type = ?"
+                                  ["SELECT count(*) AS count
+                                    FROM hx_node WHERE type = ?"
                                    (str type)]
                                   unqualified)))))
 
@@ -506,14 +581,22 @@
   []
   (let [ds (ds*)
         per-type (when ds
-                   (jdbc/execute! ds ["SELECT type, count(*) AS rows,
-                                       count(DISTINCT hx_id) AS hyperedges
-                                       FROM hx_edge GROUP BY type
-                                       ORDER BY rows DESC"]
+                   (jdbc/execute! ds ["SELECT n.type, n.hyperedges,
+                                       COALESCE(e.rows, 0) AS rows
+                                       FROM (SELECT type, count(*) AS hyperedges
+                                             FROM hx_node GROUP BY type) n
+                                       LEFT JOIN (SELECT type, count(*) AS rows
+                                                  FROM hx_edge GROUP BY type) e
+                                       ON e.type = n.type
+                                       ORDER BY n.hyperedges DESC"]
                                   unqualified))]
     (assoc @!stats
            :ready (some? ds)
            :per-type per-type
+           :hx-node-hyperedges (when ds
+                                 (:n (first (jdbc/execute! ds ["SELECT count(*) AS n FROM hx_node"]
+                                                           unqualified))))
+           :hx-node-backfilled (node-index-ready?)
            :checkpoint (when ds {:ts (meta-get ds "checkpoint-ts")
                                  :id (meta-get ds "checkpoint-id")
                                  :last-tx-id (meta-get ds "last-tx-id")})

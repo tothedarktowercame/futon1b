@@ -1135,9 +1135,9 @@
   of the previous window, strict >) and `next-cursor` (emitted whenever the
   window came back full, even on an exact final page) are byte-for-byte the
   type branch's, so a cursor minted by either path resumes correctly on the
-  other. `include-total` is the sidecar's count(DISTINCT hx_id) for the
-  type — exact only up to the checkpoint plus hook repairs, and blind to
-  zero-endpoint hyperedges (they have no hx_edge rows); :count and
+  other. `include-total` is the sidecar's hx_node count for the
+  type — exact only up to the checkpoint plus hook repairs, (zero-endpoint
+  hyperedges included, P3c); :count and
   :count-exact? keep the existing path's semantics. :hx-index is the only
   added response key."
   [node {:keys [t n after include-total? fields]} query-fn]
@@ -1238,7 +1238,11 @@
       (if (and limited?
                (not (or repo source-file mission))
                (not (or (:valid-as-of temporal) (:system-as-of temporal)))
-               (hx/reads-usable?))
+               (hx/reads-usable?)
+               ;; P3c: type-only candidates come from hx_node; a pre-P3c
+               ;; sidecar stays on the scan path until its first catch-up
+               ;; backfills the table.
+               (hx/node-index-ready?))
         ;; P3: type-only bounded read from the sidecar; the cursor and
         ;; include-total semantics are the scan path's (see
         ;; hyperedges-indexed-type's docstring).
@@ -1926,14 +1930,25 @@
 ;; Census (A5) — §7. Bound-type count, no doc materialization.
 ;; ---------------------------------------------------------------------------
 
-(defn census [node {:keys [type entity-type]}]
+(defn census
+  "P3c: the :type census answers from the sidecar's hx_node table (one row
+   per hyperedge, zero-endpoint hyperedges included) when the index is
+   usable and backfilled, else the full typed scan. Same response shape
+   plus :hx-index when the sidecar served (as in P2/P3). Exact up to the
+   checkpoint plus hook repairs, like every sidecar read."
+  [node {:keys [type entity-type]}]
   (cond
     type
-    {:type type :kind :hyperedge
-     :count (count (fxt/safe-q node (fxt/pq '[p-type]
-                                            '(-> (from :hyperedges [xt/id hx/type])
-                                                 (where (= hx/type p-type)))
-                                            (normalize-type type))))}
+    (if (and (hx/reads-usable?) (hx/node-index-ready?))
+      {:type type :kind :hyperedge
+       :count (hx/type-count (normalize-type type))
+       :hx-index {:checkpoint (hx/checkpoint)
+                  :hook-failures (:hook-failures @hx/!stats)}}
+      {:type type :kind :hyperedge
+       :count (count (fxt/safe-q node (fxt/pq '[p-type]
+                                              '(-> (from :hyperedges [xt/id hx/type])
+                                                   (where (= hx/type p-type)))
+                                              (normalize-type type))))})
     entity-type
     {:type entity-type :kind :entity
      :count (count (fxt/safe-q node (fxt/pq '[p-type]
