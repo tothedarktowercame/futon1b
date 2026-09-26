@@ -268,3 +268,139 @@ Order rationale: P1–P2 retire the worst measured pain (Q2 scan) with the
 smallest surface; P3–P4 complete the hyperedge contract before the scope work
 adds a second data family; P5–P6 are independent of P3–P4 and could run in
 parallel once P1 lands.
+
+---
+
+## P0 measurements (2026-09-26, kimi-7, E-kimi-task-48)
+
+**Method.** futon1b :7073 exposes no route that accepts an arbitrary XTQL/SQL
+query, so nothing about system time can be measured over HTTP. All numbers
+below come from a **separate throwaway JVM** (`clojure -M:node`, XTDB 2.1.0,
+same coordinates as the server) on a **fresh store** at `/tmp/p0-store`
+populated with 126,001 hyperedge documents (120,000 of type `:p0/edits`, 5,000
+of `:p0/commits`, plus probe rows; populate wall time 4.1 s, measured, 63
+transactions). The live futon1b/futon3c JVMs were untouched; no load was put
+on :7073 for this packet. "Cold" = first run of each query in a freshly
+started JVM/node (OS page cache warm, node-level caches empty); "warm" =
+second pass in the same node. Probe scripts lived in `/tmp` and are not
+committed; the JVM was stopped after the runs.
+
+### 1. Query form that lists hyperedges changed after T
+
+```sql
+SELECT _id, _system_from
+FROM hyperedges FOR ALL SYSTEM_TIME
+WHERE _system_from > ?            -- T
+ORDER BY _system_from
+LIMIT 1000;
+```
+
+With a type filter (also measured, same plan shape):
+
+```sql
+... WHERE _system_from > ? AND hx$type = ? ORDER BY _system_from LIMIT 1000
+```
+
+`FOR ALL SYSTEM_TIME` is required for the upsert-correct semantics (it
+surfaces superseded versions); a default-period query with the same
+`_system_from > ?` predicate also runs (measured 23 ms cold) but only sees
+current versions, which is actually the shape catch-up wants for *content* —
+however it cannot see tombstones either way (see §3).
+
+### 2. Cost on a type-sized dataset — it scans
+
+`EXPLAIN` (measured) for every variant above bottoms out in:
+
+```
+:op :scan  :table "xtdb.public.hyperedges"
+:predicates ["(> _system_from #xt/zdt \"...\")"]
+```
+
+i.e. a full table scan with the `_system_from` predicate evaluated per row;
+the `ORDER BY` is a sort on top, and the type predicate is a second in-scan
+predicate. **XTDB 2.1.0 does not seek on system time.** Timings (measured,
+126k docs):
+
+| Query | Cold | Warm |
+|---|---|---|
+| near T (~8k rows match), LIMIT 1000 | 163 ms | 59 ms |
+| near T + type filter, LIMIT 1000 | 194 ms | 85 ms |
+| T = now (0 rows), LIMIT 1000 | 139 ms | 48 ms |
+| far T (124k rows match), LIMIT 1000 | 229 ms | 104 ms |
+| near T, `COUNT(*)` no limit | 56 ms | 62 ms |
+| far T, `COUNT(*)` no limit | 97 ms | — |
+
+Key observation: **cost is roughly constant in T** (≈ scan cost of the table,
+~50–230 ms at 126k rows) because nothing seeks; even "0 rows after now" pays
+the full scan. Extrapolated to the live largest type (551,794
+`code/v05/edits`, 4.4× this dataset): **~0.3–1.0 s per catch-up poll on the
+serving JVM** (estimated, linear in row count, plus serving-load contention).
+A catch-up polling every minute is therefore fine; polling every second is
+not.
+
+### 3. Retract/upsert visibility (measured)
+
+- **Upsert (re-put of an existing id):** visible to the §1 query. The re-put
+  produces a new version row with `_system_from` = tx time; the old version
+  appears closed (`_system_to` set). Both rows match `_system_from > T`.
+  Measured: re-put `hx:p0/upsert:1` → 2 rows returned, endpoints `["a"]`
+  (closed) and `["b"]` (current).
+- **Delete (`:delete-docs`, the `/api/alpha/documents/retract` path):** NOT
+  visible to `_system_from > T` (measured: 0 rows after a delete tx). The
+  tombstone is a closure of the existing period: `FOR ALL SYSTEM_TIME` shows
+  the row with `_system_to` = delete-tx time. Catch-up must run a **second
+  query**:
+  ```sql
+  SELECT _id, _system_to FROM hyperedges FOR ALL SYSTEM_TIME
+  WHERE _system_to > ?;   -- same checkpoint T
+  ```
+  Measured: 2 fresh tombstones found, 128 ms cold / 88 ms warm; open rows
+  carry `_system_to = NULL` so the predicate is exactly "closed after T".
+  (`_system_to` also scans — same EXPLAIN shape, same cost class.)
+  Caveat measured the hard way: deleting an already-deleted id is a no-op tx
+  that writes no tombstone — idempotent for the sidecar, but the tx still
+  lands in `xt.txs`.
+- **Erase (`:erase-docs`):** the row vanishes from `FOR ALL SYSTEM_TIME`
+  entirely (measured: 0 rows for an erased id). No SQL-visible trace; an
+  erased hyperedge is only detectable by comparing against the sidecar
+  (rebuild/oracle) or by reading the tx log.
+
+### 4. Alternatives evaluated
+
+**(a) Transaction-log tail from a tx-id checkpoint.** The tx table is
+`xt.txs` (not `xt$txs` in 2.1.0): `SELECT * FROM xt.txs WHERE _id > ? ORDER BY _id`
+returns `_id` (a large log offset, not a small sequence), `system-time`,
+`committed`. Measured 21 ms cold / 13 ms warm for 18 rows. But `xt.txs`
+carries **no doc ids** — to map tx → changed hyperedges you either query
+`_system_from = tx.system_time` per tx (same full scan as §2, now once per
+tx — strictly worse for a busy log) or parse the local log file
+(`<store>/log/LOG`, a single binary Arrow/flatbuffer frame file, 20 MB for
+126k docs here, doc ids present in cleartext — parseable with XTDB's serde
+but an undocumented internal format, and it does not exist in this form for
+remote-log deployments). Verdict: viable only as an internal-format
+dependency; not recommended over §2's scan at these costs.
+
+**(b) Post-write hook only + periodic full rebuild.** Full rebuild read of
+the largest type, single query `SELECT _id, hx$type FROM hyperedges WHERE
+hx$type = ?`: measured 1,968 ms cold / 1,708 ms warm for 120k rows on the
+test store → **~8–9 s read for 551,794 `code/v05/edits`** (estimated,
+linear), plus sidecar write time (~1.8 s per 152k edges measured for the
+SQLite prototype in §5) → **~15–20 s for a full edits rebuild** (estimated).
+Cheap enough to run hourly/nightly as the repair oracle, but too heavy as the
+sole freshness mechanism.
+
+### Recommendation for P1's catch-up
+
+Use the evidence-sidecar pattern with a **two-query system-time catch-up**
+owning one checkpoint instant T (persisted in `hx_meta`): (i) `_system_from >
+T` under `FOR ALL SYSTEM_TIME`, paged by `ORDER BY _system_from, _id LIMIT n`
+with keyset continuation, upserts content rows; (ii) `_system_to > T`, which
+deletes sidecar rows for tombstoned ids. Each poll is a bounded full scan —
+~0.1–0.3 s measured at 126k rows, ~0.3–1.0 s estimated at the live 551k —
+so run it on a tens-of-seconds-to-minutes cadence, not per-request. Do not
+build on the tx log: `xt.txs` (measured 13–21 ms) can cheaply detect "any tx
+since checkpoint" as a skip-fast guard, but it exposes no doc ids, and the
+only doc-level tx source is the internal local-log file format. Keep a
+periodic full rebuild (~15–20 s estimated for the largest type) as the
+oracle — it is also the only thing that catches `erase-docs`, which leaves no
+SQL-visible trace.
