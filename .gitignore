@@ -40,3 +40,15 @@ __pycache__/
 # Verified before adding: every *-store* directory on every box is an XTDB
 # store, and no *-store path is tracked in any checkout, so this hides nothing.
 *-store*/
+
+# Data, not source (2026-09-26). Store slices, measurements and run traces
+# live under data/, which never leaves this machine. The tracked benchmark
+# and receipt folders keep their scripts and write-ups; their outputs stay
+# local.
+data/
+benchmarks/**/*.json
+benchmarks/**/*.log
+benchmarks/**/*.edn
+benchmarks/**/*.txt
+holes/receipts/**/*.json
+holes/receipts/**/*.log

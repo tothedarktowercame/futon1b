@@ -12,7 +12,7 @@
 ;; Selection is (mod (hash xt-id) k) — reproducible, no RNG.
 ;;
 ;; Usage: bb textprobe_sample.clj migration-export/graph-snapshot.edn \
-;;           migration-export/evidence.edn textprobe/history-sample-ids.edn
+;;           migration-export/evidence.edn data/textprobe/history-sample-ids.edn
 
 (require '[clojure.pprint :as pp])
 (load-file (str (.getParent (java.io.File. *file*)) "/textprobe_stream.clj"))

@@ -17,8 +17,8 @@
     (edn/read r)))
 
 ;; Load seed slices.
-(def substrate-slice (read-edn "seed/substrate-slice.edn"))
-(def evidence-slice (read-edn "seed/evidence-slice.edn"))
+(def substrate-slice (read-edn "data/seed/substrate-slice.edn"))
+(def evidence-slice (read-edn "data/seed/evidence-slice.edn"))
 
 (def hyperedges (:hyperedges substrate-slice))
 (def entities (:entities substrate-slice))

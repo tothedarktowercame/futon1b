@@ -22,7 +22,7 @@
   (with-open [r (PushbackReader. (io/reader f))]
     (edn/read r)))
 
-(def slice (read-edn "seed/substrate-slice.edn"))
+(def slice (read-edn "data/seed/substrate-slice.edn"))
 (def hyperedges (:hyperedges slice))
 (def entities (:entities slice))
 

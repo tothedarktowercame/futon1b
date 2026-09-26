@@ -19,8 +19,8 @@
 ;; ---------------------------------------------------------------------------
 ;; Load the slice and manifest.
 ;; ---------------------------------------------------------------------------
-(def slice    (read-edn "seed/substrate-slice.edn"))
-(def manifest (read-edn "seed/substrate-slice-manifest.edn"))
+(def slice    (read-edn "data/seed/substrate-slice.edn"))
+(def manifest (read-edn "data/seed/substrate-slice-manifest.edn"))
 
 (def hyperedges (:hyperedges slice))
 (def entities   (:entities slice))

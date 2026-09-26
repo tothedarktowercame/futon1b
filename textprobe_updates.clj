@@ -6,7 +6,7 @@
 ;; be profiled from the export snapshot offline — and the quiet-window history
 ;; sample drawn from it deterministically. See futon2/holes/M-text-sidecar.md.
 ;;
-;; Usage: bb textprobe_updates.clj migration-export/graph-snapshot.edn textprobe/updates.edn
+;; Usage: bb textprobe_updates.clj migration-export/graph-snapshot.edn data/textprobe/updates.edn
 
 (require '[clojure.pprint :as pp])
 (load-file (str (.getParent (java.io.File. *file*)) "/textprobe_stream.clj"))

@@ -27,10 +27,10 @@
                                                                     (:hx/id d))))]))))
 
 (defn -main [& _args]
-  (let [slice       (read-edn "seed/substrate-slice.edn")
+  (let [slice       (read-edn "data/seed/substrate-slice.edn")
         hyperedges  (:hyperedges slice)
         entities    (:entities slice)
-        evidence    (:evidence (read-edn "seed/evidence-slice.edn"))
+        evidence    (:evidence (read-edn "data/seed/evidence-slice.edn"))
         sample-type (keyword "code/v05/calls")
         sample-repo "futon3c-d"
         endpoint-freqs (frequencies (mapcat :hx/endpoints hyperedges))

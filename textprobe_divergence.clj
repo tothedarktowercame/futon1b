@@ -12,7 +12,7 @@
 ;; Deliberately the simplest baseline — analyzer choice is probe P2; the
 ;; divergence RATIO is far less analyzer-sensitive than the token sets.
 ;;
-;; Usage: bb textprobe_divergence.clj history-versions.edn textprobe/divergence.edn
+;; Usage: bb textprobe_divergence.clj history-versions.edn data/textprobe/divergence.edn
 
 (require '[clojure.pprint :as pp]
          '[clojure.set :as set]
