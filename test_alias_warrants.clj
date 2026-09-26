@@ -92,6 +92,7 @@
     (let [_ (req "POST" ENT {:id "id-gone" :name "pat/gone" :type "gadget"} ph)
           r1 (get-ent "pat/gone")
           _ (get-ent "pat/gone")
+          rechecked (:rechecked-out (stats))
           x (req "POST" (str base "/api/alpha/documents/retract")
                  {:documents [{:table :entities :id "id-gone"}]} ph)
           r2 (get-ent "pat/gone")]
@@ -99,7 +100,57 @@
               (and (= 200 (:status r1)) (= 200 (:status x))
                    (= 404 (:status r2))
                    (= :absent (get-in r2 [:body :warrant :warrant/claim])))
-              [r1 x r2]))
+              [r1 x r2])
+      ;; Without the retraction's bump the re-check would still catch the
+      ;; deletion; an unchanged :rechecked-out shows the warrant was retired.
+      (check! "retraction retired the warrant (no re-check needed)"
+              (= rechecked (:rechecked-out (stats)))
+              (stats)))
+    (let [_ (req "POST" (str base "/api/alpha/hyperedge")
+                 {:hx/id "hx:aw" :hx/type "test/aw"
+                  :hx/endpoints ["pat/appears" "pat/batch"]} ph)
+          _ (get-ent "pat/kept")
+          x (req "POST" (str base "/api/alpha/documents/retract")
+                 {:documents [{:table :hyperedges :id "hx:aw"}]} ph)
+          r (get-ent "pat/kept")]
+      (check! "hyperedge-only retraction keeps entity warrants"
+              (and (= 200 (:status x))
+                   (true? (get-in r [:body :warrant :warrant/reused?])))
+              [x r]))
+
+    (println "— direct put-verified! on :entities bumps by itself")
+    (let [_ (get-ent "pat/direct")
+          _ (graph/put-verified! node :entities
+                                 {:xt/id "id-direct" :entity/id "id-direct"
+                                  :entity/name "pat/direct" :entity/type :gadget})
+          r (get-ent "pat/direct")]
+      (check! "entity put via put-verified! is found after a warranted miss"
+              (= 200 (:status r)) r))
+
+    (println "— a failed scan issues nothing")
+    (let [issued (:issued (stats))
+          r1 (with-redefs [graph/scan-alias-ids
+                           (fn [_ _ _] (throw (ex-info "scan failed" {})))]
+               (get-ent "pat/errored"))
+          issued-after-error (:issued (stats))
+          r2 (get-ent "pat/errored")]
+      (check! "throwing scan -> error, not a warranted 404"
+              (and (not= 404 (:status r1))
+                   (nil? (get-in r1 [:body :warrant]))
+                   (= issued issued-after-error))
+              r1)
+      (check! "next lookup scans afresh"
+              (false? (get-in r2 [:body :warrant :warrant/reused?]))
+              r2))
+
+    (println "— long subjects are answered, not kept")
+    (let [long-id (apply str (repeat 2000 "x"))
+          _ (get-ent long-id)
+          r (get-ent long-id)]
+      (check! "2000-char subject is never reused"
+              (and (= 404 (:status r))
+                   (false? (get-in r [:body :warrant :warrant/reused?])))
+              (dissoc (:body r) :entity-id)))
 
     (println "— the store disposes: out-of-band change fails the re-check")
     (let [_ (req "POST" ENT {:id "id-renamed" :name "pat/old-name" :type "gadget"} ph)
@@ -150,6 +201,25 @@
       (try
         (run-tests node base)
         (finally (srv/stop-server! server)))))
+  (println "— a new node does not inherit the old node's warrants")
+  (with-open [node-a (xtn/start-node)
+              node-b (xtn/start-node)]
+    (let [start #(srv/start-server! {:node % :port 0})
+          url #(str "http://127.0.0.1:" (.getPort (.getAddress %))
+                    "/api/alpha/entity/" (enc "pat/elsewhere"))
+          server-a (start node-a)
+          miss (req "GET" (url server-a))
+          _ (srv/stop-server! server-a)
+          _ (xt/execute-tx node-b [[:put-docs :entities
+                                    {:xt/id "id-elsewhere" :entity/id "id-elsewhere"
+                                     :entity/name "pat/elsewhere"
+                                     :entity/type :gadget}]])
+          server-b (start node-b)
+          hit (try (req "GET" (url server-b))
+                   (finally (srv/stop-server! server-b)))]
+      (check! "absent on store A, found on store B after server swap"
+              (and (= 404 (:status miss)) (= 200 (:status hit)))
+              [miss hit])))
   (let [results @!results
         failures (remove :ok? results)]
     (println (format "%n%d/%d PASS"

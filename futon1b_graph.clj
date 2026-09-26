@@ -27,13 +27,16 @@
 (defonce !shape-log (xf/make-shape-log))
 
 
+(declare with-entity-mutation)
+
 (defn put-verified!
   "Transform, put through the rescue ladder, verify by read-back.
   Returns the rescue stage keyword (:ok/:rescued-1/:rescued-2) or throws
   the L0-shaped error (503) if the doc is absent after all stages."
   [node table doc]
   (let [xdoc (xf/transform-doc doc !shape-log {:log-stringify? true})
-        res (ingest/put-doc-with-rescue! node table xdoc !shape-log)]
+        put! #(ingest/put-doc-with-rescue! node table xdoc !shape-log)
+        res (if (= :entities table) (with-entity-mutation put!) (put!))]
     (if (fxt/present? node table (:xt/id xdoc))
       (if (keyword? res) res :ok)
       (throw (gates/layered-error 0 :postcommit-missing-entities
@@ -138,16 +141,23 @@
 ;; A scan result is kept as a warrant, after the Test Registry's: the answer
 ;; plus the basis it holds under. The basis is this process's boot id and a
 ;; generation counter that every :entities write bumps before and after its
-;; transaction (`with-entity-mutation`). A warrant whose basis is not the
-;; current one is not used. The pre-bump means a scan that overlaps a write
-;; carries a basis the post-bump has already retired, so it can never be
-;; stored or reused as current.
+;; transaction (`with-entity-mutation`); `start-server!` bumps it too, since
+;; a warrant describes one node's store. A warrant is used only while its
+;; basis is still the current one, checked when it is read, so a scan that
+;; overlaps a write can be stored but never served: the post-bump has already
+;; retired its basis. (The pre-bump is not needed for that; it keeps the
+;; window in which an overlapping scan is stored at all short.)
 ;;
 ;; This is sound only because this process is the store's single writer: the
 ;; embedded node is held by futon1b-server, and every :entities put or delete
-;; goes through write-entity!, write-entities-batch! or retract-documents!.
-;; A write made any other way (an nREPL form calling xt/execute-tx directly)
-;; must call `invalidate-alias-warrants!`.
+;; goes through put-verified! (which bumps for :entities itself),
+;; write-entities-batch! or retract-documents!. A write made any other way (an
+;; nREPL form calling xt/execute-tx directly) must call
+;; `invalidate-alias-warrants!`.
+;;
+;; "Absent" means the narrow scan returned no rows. run-guarded maps
+;; "table not found" and "not all variables in scope" to [] as well; on
+;; :entities both mean no row has those columns, which is the same answer.
 ;;
 ;; An absence warrant is returned in the entity route's 404 body, so a caller
 ;; can tell "scanned, not there" from a failure. A scan that errors throws and
@@ -158,6 +168,11 @@
 (def ^:private alias-boot-id (str (random-uuid)))
 
 (defonce ^:private !entity-generation (atom 0))
+
+(def ^:private max-warranted-subject-chars
+  "Subjects are client-supplied path segments; longer ones are answered but
+  not kept, so the cache is bounded in bytes as well as entries."
+  1024)
 
 (def ^:private max-alias-warrants
   "Warrants are small ({key ids basis}); the cascade's working set is a few
@@ -258,7 +273,8 @@
                :warrant/ids (mapv :xt/id docs)
                :warrant/basis basis
                :warrant/issued-at (str (java.time.Instant/now))}]
-        (if (= basis (current-alias-basis))
+        (if (and (= basis (current-alias-basis))
+                 (<= (count (str v)) max-warranted-subject-chars))
           (do (store-warrant! k w)
               (swap! !alias-warrant-stats update :issued inc))
           (swap! !alias-warrant-stats update :superseded inc))
@@ -384,11 +400,13 @@
       (with-memory-projection-mutation
         node
         (fn []
-          (with-entity-mutation
-           #(xt/execute-tx node
-                           (mapv (fn [{:keys [table id]}]
-                                   [:delete-docs table id])
-                                 documents)))
+          (let [delete! #(xt/execute-tx node
+                                        (mapv (fn [{:keys [table id]}]
+                                                [:delete-docs table id])
+                                              documents))]
+            (if (some #(= :entities (:table %)) documents)
+              (with-entity-mutation delete!)
+              (delete!)))
           (let [remaining (filterv (fn [{:keys [table id]}]
                                      (fxt/present? node table id))
                                    documents)]
@@ -463,7 +481,7 @@
   "POST /api/alpha/entity — the route where every gate fires (contract §5)."
   [node payload]
   (let [{:keys [doc type queued? public]} (build-entity node payload)
-        rescue (with-entity-mutation #(put-verified! node :entities doc))]
+        rescue (put-verified! node :entities doc)]
       (register-types! node [{:kind :entity :type-id type}])
       (cond-> {:profile "default"
                :entity public

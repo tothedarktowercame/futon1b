@@ -1086,6 +1086,8 @@
                              write-log-path]}]
   (gates/seed-mission-contract!)
   (reset! !node (or node (zm/open-store store-dir)))
+  ;; Warrants describe the previous node's store, if any.
+  (graph/invalidate-alias-warrants!)
   ;; Durable write log: every rescue and failed put appended beside the store.
   (when-let [path (or write-log-path
                       (when store-dir (write-log/file-path store-dir)))]
