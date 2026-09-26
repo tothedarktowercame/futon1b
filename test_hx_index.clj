@@ -204,6 +204,24 @@
                      (zero? (hx/type-count :probe/bare))
                      (= 1 (hx/type-count :probe/moved)))))
 
+      ;; ---- periodic: a skipped run is recorded and retried ------------------
+      (let [calls (atom 0)]
+        (hx/stop-periodic-catch-up!)
+        (hx/start-periodic-catch-up!
+         node :interval-ms 300 :skip-retry-ms 10
+         :catch-up-fn (fn [] (if (< (swap! calls inc) 3)
+                               {:skipped :expensive-read-busy}
+                               {:changed 0})))
+        ;; one scheduled run lands at 300 ms; only the skip retries (10 ms
+        ;; apart) can reach 3 calls before 450 ms
+        (Thread/sleep 450)
+        (hx/stop-periodic-catch-up!)
+        (let [lp (:last-periodic (hx/hx-stats))]
+          (check! "periodic catch-up records a skip and retries it within the interval"
+                  (and (>= @calls 3)
+                       (nil? (get-in lp [:result :skipped]))
+                       (some? (:at lp))))))
+
       ;; ---- stats ------------------------------------------------------------
       (let [s (hx/hx-stats)]
         (check! "hx-stats reports per-type counts, checkpoint, hook failures"

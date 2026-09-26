@@ -528,8 +528,9 @@
    CATCH-UP-FN overrides the run (the server wraps it in an expensive-read
    permit); it defaults to (catch-up! node). Daemon, idempotent,
    fixed-delay; <= 0 disables."
-  [node & {:keys [interval-ms page catch-up-fn]
-           :or {interval-ms default-catch-up-interval-ms page 1000}}]
+  [node & {:keys [interval-ms page catch-up-fn skip-retry-ms]
+           :or {interval-ms default-catch-up-interval-ms page 1000
+                skip-retry-ms 60000}}]
   (cond
     (not (pos? (long interval-ms))) {:ok true :periodic false :reason :disabled}
     (some? @!scheduler) {:ok true :periodic true :reason :already-running}
@@ -541,7 +542,20 @@
        ^Runnable
        (fn []
          (try
-           (let [{:keys [changed skipped]} (run)]
+           ;; A skip (the server's wrapper found no free expensive-read
+           ;; permit within 3 s) used to leave no trace, and 11:45-13:00
+           ;; 2026-09-26 recorded no catch-up at all. Record every outcome
+           ;; and retry a skipped run each minute, up to 10 times, rather
+           ;; than waiting a whole interval.
+           (let [{:keys [changed skipped]}
+                 (loop [tries 1]
+                   (let [r (run)]
+                     (swap! !stats assoc :last-periodic
+                            {:at (str (Instant/now)) :tries tries
+                             :result (select-keys r [:changed :skipped :elapsed-ms])})
+                     (if (and (:skipped r) (< tries 10))
+                       (do (Thread/sleep (long skip-retry-ms)) (recur (inc tries)))
+                       r)))]
              (when (and (nil? skipped) (pos? (long (or changed 0))))
                (println (str "[hxindex] periodic catch-up repaired " changed " id(s)"))
                (flush)))
