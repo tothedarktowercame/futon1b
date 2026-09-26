@@ -1,5 +1,8 @@
 # futon1b — the XTDB 2 substrate store
 
+> **New to FUTON? Start with [futon0/INSTALL.md](https://github.com/tothedarktowercame/futon0/blob/main/INSTALL.md)**, the single guide to
+> installing and running the stack. This is the evidence store in the core install (step 3 of INSTALL.md).
+
 The successor store to futon1a (XTDB 1.24 / RocksDB): one XTDB 2.1.0 node
 owning the store, served over HTTP/EDN by `futon1b_server.clj` — the second
 JVM (approved 2026-07-10; futon3c's I-0 becomes "one coordination JVM + one
