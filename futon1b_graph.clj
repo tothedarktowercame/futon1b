@@ -590,6 +590,26 @@
                                     :relation-srcs (count sigil-src-ids)
                                     :matched matched})))))
 
+(defn entities-query-refusal
+  "The one admissibility rule for an entities read, or nil. Called twice on
+  purpose: by the route BEFORE it takes an expensive-read permit (a 400 must
+  not count as an admitted-then-errored read in the holder stats) and by
+  `entities-query` itself, so an in-process caller cannot construct the same
+  combination the route refuses.
+
+  `after` resumes the stable xt/id ordering; :ordered? false drops that
+  ordering, so the page is an arbitrary slice of the type and the id a caller
+  would resume from means nothing (measured: three unordered windows returned
+  the same rows, and that set was not the first N by id --
+  TN-entities-speedups-2026-09-26.md §2). Paging an unordered read both skips
+  and repeats rows, so the combination is refused rather than served."
+  [{:keys [after ordered?] :or {ordered? true}}]
+  (when (and after (not ordered?))
+    (gates/layered-error
+     4 :unordered-page-has-no-cursor
+     {:after after
+      :hint "drop `after`, or ask for the ordered page (omit `ordered=false`)"})))
+
 (defn entities-query
   "Backend-neutral typed entity read. Returns raw entity documents so callers
   can inspect domain fields written before the HTTP cutover as well as the
@@ -601,11 +621,20 @@
   never nil and never 0, so a caller cannot read \"not asked for\" as \"none\".
   The count is a second full scan of the type (~5.2 s for 331 mission rows,
   TN-entities-speedups-2026-09-26.md), and no caller outside this repo's own
-  tests reads it."
+  tests reads it.
+
+  :ordered? defaults to true. When false the window drops its `order-by` and
+  the response carries no :next-cursor -- the ordering is what the cursor
+  resumes, and it is also what makes the window cost a full type scan (5.7 s
+  against 0.13 s at limit 1, same note §2). An unordered read with `after` is
+  refused, not served: see `entities-query-refusal`."
   ([node opts]
    (entities-query node opts fxt/safe-q))
-  ([node {:keys [type limit after include-total?]
-          :or {include-total? true}} query-fn]
+  ([node {:keys [type limit after include-total? ordered?]
+          :or {include-total? true ordered? true}
+          :as opts} query-fn]
+   (when-let [refusal (entities-query-refusal opts)]
+     (throw refusal))
    (let [t (normalize-type type)
          limited? (and (int? limit) (pos? limit))
          ;; Values ride as parameters (see fxt/pq); the form varies only by
@@ -618,8 +647,8 @@
                 limited? (conj limit))
          clauses (cond-> ['(= entity/type p-type)]
                    after (conj '(> xt/id p-after)))
-         query-tail (cond-> [(cons 'where clauses)
-                             '(order-by {:val xt/id :dir :asc})]
+         query-tail (cond-> [(cons 'where clauses)]
+                      ordered? (conj '(order-by {:val xt/id :dir :asc}))
                       limited? (conj '(limit p-limit)))
          ;; Ordered id window on narrow columns, then hydrate by `_id IN` —
          ;; `[*]` under a type predicate is ~13 s here (see fxt/hydrate-by-ids).
@@ -638,7 +667,9 @@
          window (vec docs)
          ;; The cursor advances over the SERVER window (ids), not the hydrated
          ;; docs, so a dropped row cannot end a walk early.
-         next-cursor (when (and (int? limit) (pos? limit)
+         ;; Only an ordered window has a resumption point (§2 of the note):
+         ;; the last id of an arbitrary slice says nothing about what remains.
+         next-cursor (when (and ordered? (int? limit) (pos? limit)
                                 (= limit (count window-ids)))
                        (peek window-ids))]
      (cond-> {:entities (mapv #(dissoc % :xt/id) window)

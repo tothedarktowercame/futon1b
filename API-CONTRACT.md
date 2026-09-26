@@ -636,7 +636,7 @@ The authoritative Futon1b substrate additionally exposes three semantic
 operations needed by consumers that formerly dereferenced Futon1a's embedded
 XTDB node. These routes expose graph meanings rather than XTDB query forms:
 
-- `GET /api/alpha/entities?type=…&limit=…&after=…&include-total=…` returns raw
+- `GET /api/alpha/entities?type=…&limit=…&after=…&include-total=…&ordered=…` returns raw
   typed entity documents in stable `xt/id` order. `:count` is the true total
   for the type, not the returned window size; a full bounded window includes
   `:next-cursor` for the following request. Legacy top-level domain fields and
@@ -647,6 +647,13 @@ XTDB node. These routes expose graph meanings rather than XTDB query forms:
   default is `true`, unlike `/api/alpha/hyperedges`, where the total has always
   been opt-in (§4): the two routes share the parameter's name and spelling, not
   its default, because this route has always returned a total.
+  `ordered=false` drops the window's ordering, which is the other full scan
+  (same note §2). The page is then an arbitrary but bounded slice of the type
+  and carries **no** `:next-cursor`, because the ordering is what a cursor
+  resumes; asking for `after` together with `ordered=false` is refused
+  `400 {:error {:layer 4 :reason :unordered-page-has-no-cursor}}` rather than
+  served, since paging an unordered read both skips and repeats rows. Default
+  `true`, spelled like `include-total`.
 - `GET /api/alpha/relations?type=…|types=a,b&from=…&to=…&limit=…&hydrate=true`
   returns matching relations. `hydrate=true` adds the referenced entity
   documents once, avoiding N+1 endpoint lookups. Filters are conjunctive;

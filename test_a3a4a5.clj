@@ -250,6 +250,21 @@
     (let [r (req "GET" (str base "/api/alpha/entities?type=gadget&limit=10&include-total=true"))]
       (check! "include-total=true -> the count as before"
               (= 4 (get-in r [:body :count])) r))
+    (let [ordered (req "GET" (str base "/api/alpha/entities?type=gadget&limit=4"))
+          r (req "GET" (str base "/api/alpha/entities?type=gadget&limit=4&ordered=false"))]
+      (check! "ordered=false -> same rows, no cursor (the ordered page has one)"
+              (and (= 200 (:status r))
+                   (some? (get-in ordered [:body :next-cursor]))
+                   (nil? (get-in r [:body :next-cursor]))
+                   (= (set (map :entity/id (get-in ordered [:body :entities])))
+                      (set (map :entity/id (get-in r [:body :entities])))))
+              r))
+    (let [r (req "GET" (str base "/api/alpha/entities?type=gadget&limit=4&ordered=false&after=zzz"))]
+      (check! "ordered=false with after -> 400 :unordered-page-has-no-cursor"
+              (and (= 400 (:status r))
+                   (= :unordered-page-has-no-cursor
+                      (get-in r [:body :error :reason])))
+              r))
 
     (println "— A3 relations/batch (contract §6 batch variant)")
     (let [r (req "POST" (str RELS "/batch")

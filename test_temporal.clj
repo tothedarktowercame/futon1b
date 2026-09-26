@@ -472,6 +472,78 @@
         (is (not (number? (:count result))))
         (is (contains? result :count))))))
 
+(deftest unordered-entity-window-drops-the-cursor
+  ;; `order-by` is the whole cost of the window (5.7 s against 0.13 s at
+  ;; limit 1, TN-entities-speedups-2026-09-26.md §2) and it is also what
+  ;; :next-cursor resumes, so dropping one drops the other.
+  (let [returned [{:xt/id "unordered-a"
+                   :entity/id "unordered-a"
+                   :entity/name "A"
+                   :entity/type :unordered-flag-test}
+                  {:xt/id "unordered-b"
+                   :entity/id "unordered-b"
+                   :entity/name "B"
+                   :entity/type :unordered-flag-test}]
+        capturing (fn [seen]
+                    (fn [_node form]
+                      (swap! seen conj form)
+                      returned))
+        window-body (fn [seen]
+                      (let [[fn-form] (first @seen)
+                            [_fn _params body] fn-form]
+                        body))
+        ordered-by? (fn [body]
+                      (boolean (some #(and (seq? %) (= 'order-by (first %))) body)))]
+    (testing "the ordered window is today's: order-by, then limit"
+      (let [seen (atom [])]
+        (graph/entities-query ::capturing-node
+                              {:type :unordered-flag-test :limit 2}
+                              (capturing seen))
+        (is (ordered-by? (window-body seen)))
+        (is (= '(limit p-limit) (last (window-body seen))))))
+    (testing ":ordered? false issues no order-by and keeps the limit"
+      (let [seen (atom [])
+            result (graph/entities-query ::capturing-node
+                                         {:type :unordered-flag-test :limit 2
+                                          :ordered? false}
+                                         (capturing seen))]
+        (is (not (ordered-by? (window-body seen))))
+        (is (= '(limit p-limit) (last (window-body seen))))
+        (is (not (contains? result :next-cursor)))))
+    (testing "`after` on an unordered read is refused before any statement runs"
+      (is (nil? (graph/entities-query-refusal {:after "some-id"})))
+      (is (nil? (graph/entities-query-refusal {:ordered? false})))
+      (let [refusal (graph/entities-query-refusal {:after "some-id" :ordered? false})]
+        (is (= {:layer 4 :reason :unordered-page-has-no-cursor}
+               (select-keys (:error (ex-data refusal)) [:layer :reason]))))
+      (let [seen (atom [])
+            thrown (try (graph/entities-query ::capturing-node
+                                              {:type :unordered-flag-test :limit 2
+                                               :after "some-id" :ordered? false}
+                                              (capturing seen))
+                        (catch clojure.lang.ExceptionInfo e e))]
+        (is (= :unordered-page-has-no-cursor
+               (get-in (ex-data thrown) [:error :reason])))
+        (is (empty? @seen)))))
+  (let [docs (mapv (fn [i] {:id (format "unordered-row-%02d" i)
+                            :name (format "Unordered %02d" i)
+                            :type "unordered/window"})
+                   (range 6))]
+    (graph/write-entities-batch! *node* {:entities docs})
+    (testing "above the type's size the unordered read returns the same rows"
+      (let [ordered (graph/entities-query *node* {:type :unordered/window :limit 50})
+            unordered (graph/entities-query *node* {:type :unordered/window :limit 50
+                                                    :ordered? false})]
+        (is (= 6 (count (:entities unordered))))
+        (is (= (set (map :entity/id (:entities ordered)))
+               (set (map :entity/id (:entities unordered)))))))
+    (testing "a full window carries a cursor only when it is ordered"
+      (let [ordered (graph/entities-query *node* {:type :unordered/window :limit 6})
+            unordered (graph/entities-query *node* {:type :unordered/window :limit 6
+                                                    :ordered? false})]
+        (is (= "unordered-row-05" (:next-cursor ordered)))
+        (is (not (contains? unordered :next-cursor)))))))
+
 (deftest entity-batch-deduplicates-repeated-names
   (let [entity {:name "batch-local-duplicate" :type "batch/local-duplicate"}
         first-result (graph/write-entities-batch!

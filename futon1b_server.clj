@@ -793,19 +793,22 @@
 (defn- entities-route [^HttpExchange ex]
   (let [p (query-params ex)]
     (if (p "type")
-      (with-expensive-read!
-        ex #(respond! ex 200 (graph/entities-query
-                              @!node {:type (p "type")
-                                      :limit (parse-limit p)
-                                      :after (p "after")
-                                      ;; Same param name as /hyperedges, opposite
-                                      ;; default: there the total is opt-in, here it
-                                      ;; has always been returned, so only an explicit
-                                      ;; `false` drops it and existing callers are
-                                      ;; unchanged. Dropping it saves a full type scan
-                                      ;; (TN-entities-speedups-2026-09-26.md).
-                                      :include-total? (not= "false" (p "include-total"))}
-                              fxt/timed-q)))
+      ;; Both flags are spelled `X=false` and both default to true: unlike
+      ;; /hyperedges, where the total is opt-in, this route has always returned
+      ;; a total and a stable ordering, so only an explicit `false` drops one
+      ;; and no existing caller changes. Each `false` removes one full type scan
+      ;; (TN-entities-speedups-2026-09-26.md).
+      (let [opts {:type (p "type")
+                  :limit (parse-limit p)
+                  :after (p "after")
+                  :include-total? (not= "false" (p "include-total"))
+                  :ordered? (not= "false" (p "ordered"))}]
+        ;; Validate the window before taking a permit: a 400 must not count as
+        ;; an admitted-then-errored read in the holder stats.
+        (when-let [refusal (graph/entities-query-refusal opts)]
+          (throw refusal))
+        (with-expensive-read!
+          ex #(respond! ex 200 (graph/entities-query @!node opts fxt/timed-q))))
       (respond! ex 400 (pr-str {:error "entities requires ?type=<entity-type>"})))))
 
 (defn- entities-batch-route [^HttpExchange ex]
