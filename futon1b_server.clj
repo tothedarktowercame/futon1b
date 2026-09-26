@@ -574,6 +574,7 @@
                          (- now (apply min (map :started-at holders)))
                          0)
      :stats @!expensive-read-stats
+     :alias-warrants (graph/alias-warrant-snapshot)
      :heap {:used-mb (quot (- (.totalMemory rt) (.freeMemory rt)) 1048576)
             :max-mb (quot (.maxMemory rt) 1048576)}
      ;; Metaspace tracks generated query classes (DynamicClassLoader count
@@ -741,11 +742,15 @@
         (respond! ex status body))
 
       :else
-      (if-let [doc (graph/fetch-entity @!node tail)]
-        (respond! ex 200 {:profile "default"
-                          :entity (graph/public-entity doc)})
-        (respond! ex 404 {:error "Entity not found"
-                          :profile "default" :entity-id tail})))))
+      (let [{:keys [doc warrant]} (graph/fetch-entity-warranted @!node tail)]
+        (if doc
+          (respond! ex 200 {:profile "default"
+                            :entity (graph/public-entity doc)})
+          ;; The warrant says the alias scan completed and found nothing,
+          ;; under which entity-write basis (futon1b_graph.clj, alias warrants).
+          (respond! ex 404 (cond-> {:error "Entity not found"
+                                    :profile "default" :entity-id tail}
+                             warrant (assoc :warrant warrant))))))))
 
 (defn- documents-retract-route [^HttpExchange ex]
   (if (= "POST" (.getRequestMethod ex))

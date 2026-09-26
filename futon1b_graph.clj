@@ -127,9 +127,89 @@
 ;; hydrate by `_id IN`. E-fetch-entity-miss-path (2026-08-23): a 404 from
 ;; fetch-entity paid two `[*]` scans, 27 s.
 
-(defn- entities-by-alias
-  "Full docs whose `entity/name` or (when EXTERNAL? ) `entity/external-id`
-  equals V. Name matches sort before external-id matches; ties by id."
+;; ---------------------------------------------------------------------------
+;; Alias warrants (2026-09-26).
+;;
+;; Even narrow, the alias scan cost ~5.5 s under load on 2026-09-26, and the
+;; futon3c memory cascade asked for pattern ids that have no entity, one after
+;; another, re-asking the same ids on every receipt. Each miss held one of the
+;; four query permits for the whole scan, so unrelated reads queued behind it.
+;;
+;; A scan result is kept as a warrant, after the Test Registry's: the answer
+;; plus the basis it holds under. The basis is this process's boot id and a
+;; generation counter that every :entities write bumps before and after its
+;; transaction (`with-entity-mutation`). A warrant whose basis is not the
+;; current one is not used. The pre-bump means a scan that overlaps a write
+;; carries a basis the post-bump has already retired, so it can never be
+;; stored or reused as current.
+;;
+;; This is sound only because this process is the store's single writer: the
+;; embedded node is held by futon1b-server, and every :entities put or delete
+;; goes through write-entity!, write-entities-batch! or retract-documents!.
+;; A write made any other way (an nREPL form calling xt/execute-tx directly)
+;; must call `invalidate-alias-warrants!`.
+;;
+;; An absence warrant is returned in the entity route's 404 body, so a caller
+;; can tell "scanned, not there" from a failure. A scan that errors throws and
+;; issues nothing. A positive warrant only names ids; the docs are hydrated
+;; fresh and re-checked against V, and a failed re-check discards it.
+;; ---------------------------------------------------------------------------
+
+(def ^:private alias-boot-id (str (random-uuid)))
+
+(defonce ^:private !entity-generation (atom 0))
+
+(def ^:private max-alias-warrants
+  "Warrants are small ({key ids basis}); the cascade's working set is a few
+  hundred pattern ids. Oldest are evicted past this."
+  8192)
+
+(defonce ^:private !alias-warrants (atom {:entries {} :insertion-order []}))
+
+(defonce ^:private !alias-warrant-stats
+  (atom {:issued 0 :honoured 0 :rechecked-out 0 :superseded 0}))
+
+(defn- current-alias-basis []
+  {:boot alias-boot-id :entity-generation @!entity-generation})
+
+(defn invalidate-alias-warrants!
+  "Retire every alias warrant: bump the generation and drop the entries."
+  []
+  (swap! !entity-generation inc)
+  (reset! !alias-warrants {:entries {} :insertion-order []})
+  nil)
+
+(defn with-entity-mutation
+  "Run F, a write to :entities, retiring alias warrants before and after."
+  [f]
+  (invalidate-alias-warrants!)
+  (try (f) (finally (invalidate-alias-warrants!))))
+
+(defn alias-warrant-snapshot
+  "Warrant count, current basis and counters for /health."
+  []
+  (merge {:basis (current-alias-basis)
+          :entries (count (:entries @!alias-warrants))}
+         @!alias-warrant-stats))
+
+(defn- current-warrant [k]
+  (let [w (get-in @!alias-warrants [:entries k])]
+    (when (and w (= (:warrant/basis w) (current-alias-basis)))
+      w)))
+
+(defn- store-warrant! [k w]
+  (swap! !alias-warrants
+         (fn [{:keys [entries insertion-order]}]
+           (let [order (cond-> insertion-order
+                         (not (contains? entries k)) (conj k))
+                 overflow (max 0 (- (count order) max-alias-warrants))]
+             {:entries (apply dissoc (assoc entries k w) (take overflow order))
+              :insertion-order (vec (drop overflow order))}))))
+
+(defn- scan-alias-ids
+  "Ordered distinct ids whose `entity/name` or (when EXTERNAL?)
+  `entity/external-id` equals V. Name matches sort before external-id
+  matches; ties by id."
   [node v external?]
   (let [rows (if external?
                (fxt/safe-q node (fxt/pq '[p-v]
@@ -140,29 +220,74 @@
                (fxt/safe-q node (fxt/pq '[p-v]
                                         '(-> (from :entities [xt/id entity/name])
                                              (where (= entity/name p-v)))
-                                        v)))
-        ordered (->> rows
-                     (sort-by (fn [r] [(if (= v (:entity/name r)) 0 1)
-                                       (str (:xt/id r))]))
-                     (map :xt/id)
-                     distinct)]
-    (when (seq ordered)
-      (fxt/hydrate-by-ids node :entities ordered fxt/safe-q))))
+                                        v)))]
+    (->> rows
+         (sort-by (fn [r] [(if (= v (:entity/name r)) 0 1)
+                           (str (:xt/id r))]))
+         (map :xt/id)
+         distinct
+         vec)))
+
+(defn- alias-match? [v external? doc]
+  (or (= v (:entity/name doc))
+      (and external? (= v (:entity/external-id doc)))))
+
+(defn entities-by-alias-warranted
+  "Full docs whose `entity/name` or (when EXTERNAL?) `entity/external-id`
+  equals V, as {:docs [...] :warrant {...}}. The docs are always read from
+  the store; the warrant says which scan named them and under what basis."
+  [node v external?]
+  (let [k [v (boolean external?)]
+        hydrate #(if (seq %) (fxt/hydrate-by-ids node :entities % fxt/safe-q) [])
+        reused (current-warrant k)
+        docs (when reused (hydrate (:warrant/ids reused)))]
+    (if (and reused
+             (= (count docs) (count (:warrant/ids reused)))
+             (every? #(alias-match? v external? %) docs))
+      (do (swap! !alias-warrant-stats update :honoured inc)
+          {:docs docs :warrant (assoc reused :warrant/reused? true)})
+      (let [_ (when reused (swap! !alias-warrant-stats update :rechecked-out inc))
+            basis (current-alias-basis)
+            ids (scan-alias-ids node v external?)
+            docs (filterv #(alias-match? v external? %) (hydrate ids))
+            w {:warrant/claim (if (seq docs) :resolved :absent)
+               :warrant/subject v
+               :warrant/fields (if external?
+                                 [:entity/name :entity/external-id]
+                                 [:entity/name])
+               :warrant/ids (mapv :xt/id docs)
+               :warrant/basis basis
+               :warrant/issued-at (str (java.time.Instant/now))}]
+        (if (= basis (current-alias-basis))
+          (do (store-warrant! k w)
+              (swap! !alias-warrant-stats update :issued inc))
+          (swap! !alias-warrant-stats update :superseded inc))
+        {:docs docs :warrant (assoc w :warrant/reused? false)}))))
+
+(defn- entities-by-alias [node v external?]
+  (:docs (entities-by-alias-warranted node v external?)))
 
 (defn- entities-by-name [node name']
   (entities-by-alias node name' false))
 
-(defn fetch-entity
+(defn fetch-entity-warranted
   "futon1a f1g/fetch-entity: :xt/id → :entity/name → :entity/external-id,
   deterministic smallest-id pick on duplicates. UUID-shaped ids are minted
-  ids, never names/external-ids, so the alias scan is skipped for them."
+  ids, never names/external-ids, so the alias scan is skipped for them.
+  Returns {:doc d} or, when the alias scan ran, {:doc d-or-nil :warrant w}."
   [node id]
-  (or (fxt/q1 node (fxt/pq '[p-id]
-                           '(-> (from :entities [*])
-                                (where (= xt/id p-id)))
-                           id))
-      (when-not (uuid-shaped? id)
-        (first (entities-by-alias node id true)))))
+  (if-let [doc (fxt/q1 node (fxt/pq '[p-id]
+                                    '(-> (from :entities [*])
+                                         (where (= xt/id p-id)))
+                                    id))]
+    {:doc doc}
+    (if (uuid-shaped? id)
+      {:doc nil}
+      (let [{:keys [docs warrant]} (entities-by-alias-warranted node id true)]
+        {:doc (first docs) :warrant warrant}))))
+
+(defn fetch-entity [node id]
+  (:doc (fetch-entity-warranted node id)))
 
 (defn public-entity
   "futon1a normalize-entity: the compat public shape."
@@ -259,10 +384,11 @@
       (with-memory-projection-mutation
         node
         (fn []
-          (xt/execute-tx node
-                         (mapv (fn [{:keys [table id]}]
-                                 [:delete-docs table id])
-                               documents))
+          (with-entity-mutation
+           #(xt/execute-tx node
+                           (mapv (fn [{:keys [table id]}]
+                                   [:delete-docs table id])
+                                 documents)))
           (let [remaining (filterv (fn [{:keys [table id]}]
                                      (fxt/present? node table id))
                                    documents)]
@@ -337,7 +463,7 @@
   "POST /api/alpha/entity — the route where every gate fires (contract §5)."
   [node payload]
   (let [{:keys [doc type queued? public]} (build-entity node payload)
-        rescue (put-verified! node :entities doc)]
+        rescue (with-entity-mutation #(put-verified! node :entities doc))]
       (register-types! node [{:kind :entity :type-id type}])
       (cond-> {:profile "default"
                :entity public
@@ -370,28 +496,30 @@
                           (conj acc (build-entity node entity (mapv :doc acc))))
                         [] entities)
           docs (mapv #(xf/transform-doc (:doc %) !shape-log {:log-stringify? true})
-                     built)]
-      (try (xt/execute-tx node (mapv (fn [d] [:put-docs :entities d]) docs))
-           (catch Exception _ nil))
-      (let [rescue
-            (into {}
-                  (keep (fn [d]
-                          (when-not (fxt/present? node :entities (:xt/id d))
-                            (let [res (ingest/put-doc-with-rescue!
-                                       node :entities d !shape-log)]
-                              (if (fxt/present? node :entities (:xt/id d))
-                                [(:xt/id d) (if (keyword? res) res :ok)]
-                                (throw (gates/layered-error
-                                        0 :postcommit-missing-entities
-                                        {:xt/id (:xt/id d) :table :entities})))))))
-                  docs)]
-        (register-types! node (mapv (fn [t] {:kind :entity :type-id t})
-                                    (distinct (map :type built))))
-        (cond-> {:profile "default"
-                 :count (count built)
-                 :entities (mapv :public built)}
-          (some :queued? built) (assoc :queued? true)
-          (seq rescue) (assoc :rescue rescue))))))
+                     built)
+          rescue
+          (with-entity-mutation
+           (fn []
+             (try (xt/execute-tx node (mapv (fn [d] [:put-docs :entities d]) docs))
+                  (catch Exception _ nil))
+             (into {}
+                   (keep (fn [d]
+                           (when-not (fxt/present? node :entities (:xt/id d))
+                             (let [res (ingest/put-doc-with-rescue!
+                                        node :entities d !shape-log)]
+                               (if (fxt/present? node :entities (:xt/id d))
+                                 [(:xt/id d) (if (keyword? res) res :ok)]
+                                 (throw (gates/layered-error
+                                         0 :postcommit-missing-entities
+                                         {:xt/id (:xt/id d) :table :entities})))))))
+                   docs)))]
+      (register-types! node (mapv (fn [t] {:kind :entity :type-id t})
+                                  (distinct (map :type built))))
+      (cond-> {:profile "default"
+               :count (count built)
+               :entities (mapv :public built)}
+        (some :queued? built) (assoc :queued? true)
+        (seq rescue) (assoc :rescue rescue)))))
 
 (defn entities-latest
   "GET /api/alpha/entities/latest — generic branch + the pattern/library

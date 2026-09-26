@@ -515,6 +515,16 @@ smallest-id pick on duplicates). Id path segment is URL-decoded.
 - **200** `{:profile <x-profile|"default"> :entity {:id :name :type (+
   :external-id :source :props :media/sha256 when present)}}`; **404**
   `{:error "Entity not found" :profile .. :entity-id <id>}`.
+- futon1b addition (2026-09-26): when the alias fallback ran (any id that is
+  not UUID-shaped), the 404 also carries `:warrant {:warrant/claim :absent
+  :warrant/subject <id> :warrant/fields [:entity/name :entity/external-id]
+  :warrant/ids [] :warrant/basis {:boot .. :entity-generation n}
+  :warrant/issued-at .. :warrant/reused? bool}` — the alias scan completed and
+  matched nothing, as of that entity-write basis. A failed scan is an error
+  response, never a warranted 404. Repeat lookups under an unchanged basis
+  reuse the warrant instead of rescanning; any entity write, batch write or
+  retraction retires every warrant. Counters: `/health` → `:alias-warrants`.
+  Mechanism and soundness conditions: `futon1b_graph.clj`, "Alias warrants".
 
 ### GET /api/alpha/entity?source=…&external-id=…
 `app.clj:583-594` → `routes/entity-by-external` (`routes.clj:276-324`). Both
