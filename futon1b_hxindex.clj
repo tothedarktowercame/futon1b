@@ -222,10 +222,19 @@
    next upsert leg re-read recent versions and repair deletes it cannot see,
    hiding a missing tombstone leg (found by the bad-case test)."
   [ds node tx-id page]
-  (let [top (first (fxt/timed-q
-                     node ["SELECT _id, _system_from AS marker
-                            FROM hyperedges FOR ALL SYSTEM_TIME
-                            ORDER BY _system_from DESC, _id DESC LIMIT 1"]))
+  (let [;; MAX, not ORDER BY ... DESC LIMIT 1: the descending sort over
+        ;; FOR ALL SYSTEM_TIME faults on the live store (XTDB 2.1.0,
+        ;; "index: 784264, length: 8 (expected: range(0, 7440))", 2026-09-26)
+        ts (:m (first (fxt/timed-q node ["SELECT MAX(_system_from) AS m
+                                          FROM hyperedges FOR ALL SYSTEM_TIME"])))
+        top (when ts
+              {:marker ts
+               ;; one transaction's rows; MAX is unsupported on string ids
+               :xt/id (row-id (last (fxt/timed-q
+                                     node ["SELECT _id FROM hyperedges
+                                            FOR ALL SYSTEM_TIME WHERE _system_from = ?
+                                            ORDER BY _id"
+                                           ts])))})
         n (loop [after "" n 0]
             (let [rows (current-page node after page)]
               (if (empty? rows)
