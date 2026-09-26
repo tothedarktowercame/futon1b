@@ -174,3 +174,41 @@ statement hit the 60 s deadline, and the handler walking the cause chain
 NPE'd on the end of the chain (`(iterate #(.getCause %) t)` without a
 `take-while some?`). The masking is the one `README-drawbridge.md` warns
 about, arriving one level further in than expected.
+
+---
+
+## Addendum, 10:50–10:52Z: unit 3 live, units 1–2 not
+
+The three changes measured above landed as `5393517` (`include-total=false`),
+`b343d34` (`ordered=false`) and `c95a8f8` (equality hydrate below 40 ids).
+Only the third is in the serving JVM. `(require 'futon1b-xt :reload)` through
+:6769 was safe — `futon1b_xt.clj` was at its committed state, and the
+namespace's semaphore and network-timeout executor are both `defonce`, so a
+reload leaves them alone — and it is enough on its own, because every caller
+reaches `hydrate-by-ids` through its var.
+
+`GET /api/alpha/entities?type=mission&limit=1`, three curls each, no click in
+the air, no other permit holder:
+
+| | 3 runs |
+|---|---|
+| before the reload | 18.12 / 19.88 / 19.71 s |
+| after `(require 'futon1b-xt :reload)` | 10.88 / 11.99 / 10.71 s |
+| the same, with `&include-total=false&ordered=false` | 10.21 s, and the body still carries `:count 331` |
+
+The ~8 s removed is the `_id IN (?)` scan for the single row, as §1 predicted
+(8.8 s → 0.17 s). The third row is the check that the flags are still inert:
+the route's own code is the pre-`5393517` version, and an older route ignores
+unknown query params rather than refusing them — which is also why futon2 can
+pass the flags before this JVM has them.
+
+**`futon1b-graph` and `futon1b-server` were NOT reloaded, and should not be
+until the shared checkout is quiescent.** Both files currently carry another
+agent's uncommitted work in progress (the hyperedge sidecar read path), and
+`futon1b_hxindex.clj:407` — which `futon1b-graph` loads — does not compile at
+this moment (`defonce` with a docstring, three args). `require :reload`
+resolves through the live checkout, so reloading either namespace now would
+install half-finished code into the serving JVM, and reloading `futon1b-graph`
+would fail part-way through redefining it. Nothing was restarted. The flags go
+live on the next reload of those two namespaces from a clean tree, or on the
+next restart, whichever comes first.
