@@ -379,6 +379,131 @@
       ;; backfill-hx-node! — and "census parity with the scan incl.
       ;; zero-endpoint hyperedges" FAILs (7 or 6 vs 8). Verified by stubbing.
 
+      ;; ---- P3d: endpoint-prefix reads (type + end-prefix) -------------------
+      ;; Fixture: probe/prefix rows with a repo-shaped prefix family
+      ;; (code/v05/edits/…), a non-ASCII prefix family (dir:abcd→…), one
+      ;; endpoint that IS the prefix (dir:abcd), one endpoint equal to the
+      ;; prefix minus the trailing separator (code/v05/edits — excluded by
+      ;; the slashed prefix), and a matching endpoint under a DIFFERENT type
+      ;; (hx:q:00 — must never leak into a probe/prefix read).
+      (xt/execute-tx
+       node
+       [[:put-docs :hyperedges (hx-doc "hx:p:00" :probe/prefix ["code/v05/edits/aaa" "other"])]
+        [:put-docs :hyperedges (hx-doc "hx:p:01" :probe/prefix ["code/v05/edits/bbb"])]
+        [:put-docs :hyperedges (hx-doc "hx:p:02" :probe/prefix ["code/v06/edits/ccc"])]
+        [:put-docs :hyperedges (hx-doc "hx:p:03" :probe/prefix ["dir:abcd→file1"])]
+        [:put-docs :hyperedges (hx-doc "hx:p:04" :probe/prefix ["dir:abcd→file2"])]
+        [:put-docs :hyperedges (hx-doc "hx:p:05" :probe/prefix ["dir:abcd"])]
+        [:put-docs :hyperedges (hx-doc "hx:p:06" :probe/prefix ["code/v05/edits"])]
+        [:put-docs :hyperedges (hx-doc "hx:p:07" :probe/prefix ["code/v05/edits/ddd"])]
+        [:put-docs :hyperedges (hx-doc "hx:p:08" :probe/prefix ["code/v05/edits/eee"])]
+        [:put-docs :hyperedges (hx-doc "hx:q:00" :probe/other ["code/v05/edits/zzz"])]])
+      (hx/catch-up! node)
+
+      ;; membership parity: the prefix read (ALL pages) returns exactly the
+      ;; set a full scan of the type filtered in Clojure by str/starts-with?
+      ;; gives. There is no server-side scan path for end-prefix, so the
+      ;; baseline is computed here from a type-only scan.
+      (let [prefix "code/v05/edits/"
+            paged (loop [after nil acc []]
+                    (let [r (query node (cond-> {:type "probe/prefix"
+                                                 :end-prefix prefix
+                                                 :limit 2}
+                                          after (assoc :after after)))]
+                      (if (:next-cursor r)
+                        (recur (:next-cursor r) (into acc (:hyperedges r)))
+                        (into acc (:hyperedges r)))))
+            _ (reset! reads-enabled false)
+            all (query node {:type "probe/prefix" :limit 50})
+            _ (reset! reads-enabled true)
+            expected (->> (:hyperedges all)
+                          (filter #(some (fn [e] (str/starts-with? (str e) prefix))
+                                         (:hx/endpoints %)))
+                          (map :hx/id)
+                          set)
+            paged-ids (map :hx/id paged)]
+        (check! "P3d: the index served the prefix read (:hx-index present)"
+                (some? (:hx-index (query node {:type "probe/prefix"
+                                               :end-prefix prefix :limit 2}))))
+        (check! "P3d: all-pages prefix read == scan filtered by str/starts-with?"
+                (= expected (set paged-ids)))
+        (check! "P3d: cursor paging covers each id exactly once"
+                (and (= (count paged-ids) (count (set paged-ids)))
+                     (= 4 (count paged-ids)))))
+
+      ;; include-total: exact sidecar count over the range
+      (let [r (query node {:type "probe/prefix" :end-prefix "code/v05/edits/"
+                           :limit 2 :include-total? true})]
+        (check! "P3d: include-total equals the set size (count(DISTINCT hx_id))"
+                (and (= 4 (:count r))
+                     (true? (:count-exact? r))
+                     (= 4 (hx/type-end-prefix-count
+                           :probe/prefix "code/v05/edits/"))
+                     (= 2 (count (:hyperedges r))))))
+
+      ;; non-ASCII prefix and a prefix that is itself a full endpoint
+      (let [r (query node {:type "probe/prefix" :end-prefix "dir:abcd→" :limit 10})]
+        (check! "P3d: non-ASCII prefix (dir:abcd→) matches only the → endpoints"
+                (= ["hx:p:03" "hx:p:04"] (mapv :hx/id (:hyperedges r)))))
+      (let [r (query node {:type "probe/prefix" :end-prefix "dir:abcd" :limit 10})]
+        (check! "P3d: a prefix that is itself a full endpoint includes it"
+                (= ["hx:p:03" "hx:p:04" "hx:p:05"]
+                   (mapv :hx/id (:hyperedges r)))))
+      (let [r (query node {:type "probe/prefix" :end-prefix "code/v05/edits" :limit 10})]
+        (check! "P3d: prefix without the trailing separator also matches the exact endpoint"
+                (= ["hx:p:00" "hx:p:01" "hx:p:06" "hx:p:07" "hx:p:08"]
+                   (mapv :hx/id (:hyperedges r)))))
+
+      ;; stale candidate: delete hx:p:01 unhooked; the narrow (id, type,
+      ;; endpoints) re-check must drop it and the window must backfill.
+      (xt/execute-tx node [[:delete-docs :hyperedges "hx:p:01"]])
+      (let [cands (hx/type-end-prefix-candidates
+                   {:type :probe/prefix :prefix "code/v05/edits/"
+                    :after "" :fetch 10})]
+        (check! "P3d: the index still holds the stale candidate (planted)"
+                (some #{"hx:p:01"} cands)))
+      (let [r (query node {:type "probe/prefix" :end-prefix "code/v05/edits/"
+                           :limit 10})]
+        (check! "P3d: stale candidate dropped by the narrow re-check"
+                (= ["hx:p:00" "hx:p:07" "hx:p:08"]
+                   (mapv :hx/id (:hyperedges r)))))
+      (xt/execute-tx node [[:put-docs :hyperedges
+                            (hx-doc "hx:p:01" :probe/prefix ["code/v05/edits/bbb"])]])
+      (hx/catch-up! node)
+
+      ;; refusals
+      (check! "P3d: empty end-prefix refused at layer 4 (400), no type scan"
+              (try (query node {:type "probe/prefix" :end-prefix "" :limit 2})
+                   false
+                   (catch clojure.lang.ExceptionInfo e
+                     (= 4 (get-in (ex-data e) [:error :layer])))))
+      (check! "P3d: end-prefix without type refused at layer 4 (400)"
+              (try (query node {:end-prefix "code/v05/" :limit 2})
+                   false
+                   (catch clojure.lang.ExceptionInfo e
+                     (= 4 (get-in (ex-data e) [:error :layer])))))
+      (let [before (:hook-failures @stats-var)]
+        (swap! stats-var update :hook-failures inc)
+        (check! "P3d: unusable index → typed 503 refusal, not a slow scan"
+                (try (query node {:type "probe/prefix"
+                                  :end-prefix "code/v05/edits/" :limit 2})
+                     false
+                     (catch clojure.lang.ExceptionInfo e
+                       (let [err (:error (ex-data e))]
+                         (and (= 0 (:layer err))
+                              (= :hx-index-unusable (:reason err)))))))
+        (swap! stats-var assoc :hook-failures before)
+        (check! "P3d: reads-usable? restored for the sections below"
+                (hx/reads-usable?)))
+      ;; BAD CASE (verified during development): compute the upper bound
+      ;; wrongly as (str prefix "z") in hx/prefix-successor. "dir:abcdz" is
+      ;; BELOW "dir:abcd→…" (→ is U+2192 > \z), so "P3d: a prefix that is
+      ;; itself a full endpoint includes it" FAILs (returns [hx:p:05]
+      ;; instead of [hx:p:03 hx:p:04 hx:p:05]). (The →-suffixed prefix
+      ;; survives that particular wrong bound only because the fixture's
+      ;; suffix char \f < \z — the full-endpoint prefix is the reliable
+      ;; detector.)
+
       ;; ---- unusable index ----------------------------------------------------
       ;; (a) a hook failure since the last catch-up: a fresh hyperedge could
       ;; be missing from the candidates in a way the re-check cannot see.

@@ -637,6 +637,54 @@
            (take (long fetch))
            (vec)))))
 
+(defn prefix-successor
+  "P3d: the strict upper bound of the string range covering PREFIX: PREFIX
+   with its last code point incremented (\"ab\" → \"ac\", \"dir:x→\" →
+   \"dir:x⇒\"). A range [PREFIX, (prefix-successor PREFIX)) contains exactly
+   the strings equal to PREFIX or beginning with it — including non-ASCII
+   endpoints, which a naive (str PREFIX \"z\") bound would wrongly exclude
+   (any suffix char above \\z, e.g. → U+2192). Callers refuse the empty
+   prefix before reaching here."
+  [^String prefix]
+  (let [len (.length prefix)
+        cp (.codePointBefore prefix len)
+        head (subs prefix 0 (- len (Character/charCount cp)))
+        upper (String. (int-array [(inc cp)]) 0 1)]
+    (str head upper)))
+
+(defn type-end-prefix-candidates
+  "P3d: ordered distinct hx_ids indexed under TYPE (stored as `(str keyword)`,
+   colon included) at ANY endpoint equal to or beginning with PREFIX,
+   keyset-paged on hx_id > AFTER (\"\" pages from the start), at most FETCH
+   ids. One ordered range scan over the (type, endpoint) index; DISTINCT
+   collapses rows for hyperedges with several matching endpoints, so a page
+   may hold fewer than FETCH rows — the caller re-pulls like P2b/P3."
+  [{:keys [type prefix after fetch]}]
+  (when-let [ds (ds*)]
+    (->> (jdbc/execute! ds
+                        ["SELECT DISTINCT hx_id FROM hx_edge
+                          WHERE type = ? AND endpoint >= ? AND endpoint < ?
+                          AND hx_id > ?
+                          ORDER BY hx_id LIMIT ?"
+                         (str type) prefix (prefix-successor prefix)
+                         (str (or after "")) (long fetch)]
+                        unqualified)
+         (map :hx_id)
+         (vec))))
+
+(defn type-end-prefix-count
+  "P3d include-total: hyperedges indexed under TYPE at any endpoint equal to
+   or beginning with PREFIX — count(DISTINCT hx_id) over the prefix range.
+   Exact only up to the checkpoint plus hook repairs, like type-count."
+  [type prefix]
+  (when-let [ds (ds*)]
+    (:count (first (jdbc/execute! ds
+                                  ["SELECT count(DISTINCT hx_id) AS count
+                                    FROM hx_edge
+                                    WHERE type = ? AND endpoint >= ? AND endpoint < ?"
+                                   (str type) prefix (prefix-successor prefix)]
+                                  unqualified)))))
+
 (defn type-candidates
   "P3: ordered distinct hx_ids indexed under TYPE (stored as `(str keyword)`,
    colon included), keyset-paged on hx_id > AFTER (\"\" pages from the start),

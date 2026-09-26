@@ -1177,18 +1177,100 @@
                         :hook-failures (:hook-failures @hx/!stats)}}
       next-cursor (assoc :next-cursor next-cursor))))
 
+(defn- hyperedges-indexed-type-end-prefix
+  "P3d (DESIGN-hyperedge-scope-sidecar-2026-09-26 §7 item 3, Q3): serve a
+  type + endpoint-PREFIX read from the SQLite sidecar. There is NO scan
+  fallback for this shape (today it is paging + client post-filter); the
+  caller refuses with a typed 503 when hx/reads-usable? is false rather
+  than scanning the type.
+
+  Candidates come from a [prefix, prefix-successor) range scan of hx_edge,
+  keyset-paged on hx_id exactly as P3. Every candidate is RE-CHECKED against
+  XTDB with the narrow projection (id, type, endpoints) — a live row must
+  keep the type AND have some endpoint equal to or beginning with the
+  prefix — and full documents (or the `fields` columns) are read only for
+  the rows that pass AND survive the window cut. Ordering (xt/id
+  ascending), keyset cursor and next-cursor semantics are P3's, so a cursor
+  minted here resumes correctly on a later call. `include-total` is the
+  sidecar's count(DISTINCT hx_id) over the range — exact only up to the
+  checkpoint plus hook repairs; :count and :count-exact? keep the P3
+  semantics. :hx-index is the only added response key."
+  [node {:keys [t prefix n after include-total? fields]} query-fn]
+  (let [match? (fn [row]
+                 (and (= t (normalize-type (:hx/type row)))
+                      (some #(str/starts-with? (str %) prefix)
+                            (:hx/endpoints row))))
+        ;; Same pull-until-full loop as P2b/P3: the re-check can drop stale
+        ;; candidates, so a candidate page may yield fewer than n live rows.
+        ids (loop [after (str (or after "")) acc []]
+              (if (>= (count acc) n)
+                (vec (take n acc))
+                (let [cands (hx/type-end-prefix-candidates
+                             {:type t :prefix prefix :after after :fetch n})]
+                  (if (empty? cands)
+                    acc
+                    (let [live (->> (fetch-hyperedge-cols-by-ids
+                                     node [:hx/type :hx/endpoints] cands query-fn)
+                                    (filter match?)
+                                    (map :xt/id))]
+                      (recur (last cands) (into acc live)))))))
+        docs (fetch-hyperedge-cols-by-ids
+              node (when (seq fields)
+                     (vec (keep hyperedge-window-field-source fields)))
+              ids query-fn)
+        out (mapv #(if (seq fields)
+                     (project-hyperedge-fields % fields)
+                     (dissoc % :xt/id))
+                  docs)
+        next-cursor (when (= n (count ids)) (peek ids))]
+    (cond-> {:hyperedges out
+             :count (if include-total?
+                      (hx/type-end-prefix-count t prefix)
+                      (count out))
+             :count-exact? (boolean include-total?)
+             :hx-index {:checkpoint (hx/checkpoint)
+                        :hook-failures (:hook-failures @hx/!stats)}}
+      next-cursor (assoc :next-cursor next-cursor))))
+
 (defn- hyperedges-query-uncached
   "GET /api/alpha/hyperedges?type=… and/or end=… (+limit/latest/after,
   +repo/source-file/mission for type-only queries). When end is present, type
   is an optional pushed-down filter rather than a competing branch. :count is
   the returned window count by default. Explicit include-total opts type-only
   queries into the true type total when unfiltered (contract §4)."
-  [node {:keys [type end limit repo source-file mission after latest? include-total? fields]
+  [node {:keys [type end end-prefix limit repo source-file mission after latest? include-total? fields]
          :or {include-total? false}
          :as opts}
    query-fn]
   (let [temporal (select-keys opts [:valid-as-of :system-as-of])]
   (cond
+    end-prefix
+    ;; P3d: type + endpoint prefix, served ONLY from the sidecar (no scan
+    ;; path exists for this shape — today it is paging + client post-filter).
+    (let [prefix (str end-prefix)
+          t (some-> type normalize-type)]
+      (when-not t
+        (throw (gates/layered-error
+                4 :missing-required
+                {:required ["type"] :hint "end-prefix requires type"})))
+      (when (str/blank? prefix)
+        (throw (gates/layered-error
+                4 :invalid-end-prefix
+                {:hint "end-prefix must be a non-empty string; refusing to scan the type"})))
+      (when (or (:valid-as-of temporal) (:system-as-of temporal))
+        (throw (gates/layered-error
+                4 :invalid-end-prefix
+                {:hint "end-prefix reads do not support as-of; drop valid-as-of/system-as-of"})))
+      (if (hx/reads-usable?)
+        (hyperedges-indexed-type-end-prefix
+         node {:t t :prefix prefix :n (long (or limit 100)) :after after
+               :include-total? include-total? :fields fields} query-fn)
+        (throw (gates/layered-error
+                0 :hx-index-unusable
+                {:hint "end-prefix reads are served only from the hyperedge sidecar; no scan fallback"
+                 :checkpoint (hx/checkpoint)
+                 :hook-failures (:hook-failures @hx/!stats)}))))
+
     end
     (let [end-id (if (uuid-shaped? end)
                    (or (some-> (fetch-entity node end) :entity/name) end)

@@ -887,13 +887,14 @@
 
 (defn- hyperedges-route [^HttpExchange ex]
   (let [p (query-params ex)]
-    (if (or (p "type") (p "end"))
+    (if (or (p "type") (p "end") (p "end-prefix"))
       ;; Validate the window before taking a permit: a 400 must not count as
       ;; an admitted-then-errored read in the holder stats.
       (let [limit (parse-hyperedge-limit p)]
         (with-expensive-read!
          ex #(respond! ex 200 (graph/hyperedges-query
                                @!node {:type (p "type") :end (p "end")
+                                      :end-prefix (p "end-prefix")
                                       :limit limit
                                       :after (p "after")
                                       :repo (p "repo")
