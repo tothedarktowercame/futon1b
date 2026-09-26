@@ -797,7 +797,14 @@
         ex #(respond! ex 200 (graph/entities-query
                               @!node {:type (p "type")
                                       :limit (parse-limit p)
-                                      :after (p "after")}
+                                      :after (p "after")
+                                      ;; Same param name as /hyperedges, opposite
+                                      ;; default: there the total is opt-in, here it
+                                      ;; has always been returned, so only an explicit
+                                      ;; `false` drops it and existing callers are
+                                      ;; unchanged. Dropping it saves a full type scan
+                                      ;; (TN-entities-speedups-2026-09-26.md).
+                                      :include-total? (not= "false" (p "include-total"))}
                               fxt/timed-q)))
       (respond! ex 400 (pr-str {:error "entities requires ?type=<entity-type>"})))))
 

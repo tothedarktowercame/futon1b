@@ -241,6 +241,15 @@
                    (= "red" (some #(get-in % [:entity/props :color])
                                    (get-in r [:body :entities]))))
               r))
+    (let [r (req "GET" (str base "/api/alpha/entities?type=gadget&limit=10&include-total=false"))]
+      (check! "include-total=false -> typed absent count, rows unchanged"
+              (and (= 200 (:status r))
+                   (= {:absent :not-requested} (get-in r [:body :count]))
+                   (= 4 (count (get-in r [:body :entities]))))
+              r))
+    (let [r (req "GET" (str base "/api/alpha/entities?type=gadget&limit=10&include-total=true"))]
+      (check! "include-total=true -> the count as before"
+              (= 4 (get-in r [:body :count])) r))
 
     (println "— A3 relations/batch (contract §6 batch variant)")
     (let [r (req "POST" (str RELS "/batch")

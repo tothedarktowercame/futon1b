@@ -636,11 +636,17 @@ The authoritative Futon1b substrate additionally exposes three semantic
 operations needed by consumers that formerly dereferenced Futon1a's embedded
 XTDB node. These routes expose graph meanings rather than XTDB query forms:
 
-- `GET /api/alpha/entities?type=…&limit=…&after=…` returns raw typed entity
-  documents in stable `xt/id` order. `:count` is the true total for the type,
-  not the returned window size; a full bounded window includes `:next-cursor`
-  for the following request. Legacy top-level domain fields and newer
-  `:entity/props` fields remain interpretable.
+- `GET /api/alpha/entities?type=…&limit=…&after=…&include-total=…` returns raw
+  typed entity documents in stable `xt/id` order. `:count` is the true total
+  for the type, not the returned window size; a full bounded window includes
+  `:next-cursor` for the following request. Legacy top-level domain fields and
+  newer `:entity/props` fields remain interpretable.
+  `include-total=false` skips the total, which is a second full scan of the
+  type (`TN-entities-speedups-2026-09-26.md`); `:count` is then the typed
+  absence `{:absent :not-requested}` — a caller must not read it as `0`. The
+  default is `true`, unlike `/api/alpha/hyperedges`, where the total has always
+  been opt-in (§4): the two routes share the parameter's name and spelling, not
+  its default, because this route has always returned a total.
 - `GET /api/alpha/relations?type=…|types=a,b&from=…&to=…&limit=…&hydrate=true`
   returns matching relations. `hydrate=true` adds the referenced entity
   documents once, avoiding N+1 endpoint lookups. Filters are conjunctive;

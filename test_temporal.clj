@@ -419,6 +419,59 @@
       (is (= 3 (:count result)))
       (is (= "entity-limit-b" (:next-cursor result))))))
 
+(deftest entity-total-is-opt-out-and-its-absence-is-typed
+  ;; The count is a second full scan of the type; no caller outside this file
+  ;; reads it (TN-entities-speedups-2026-09-26.md §3). The flag makes it
+  ;; skippable without letting "not asked for" read as "none".
+  (let [returned [{:xt/id "total-flag-a"
+                   :entity/id "total-flag-a"
+                   :entity/name "A"
+                   :entity/type :total-flag-test}
+                  {:xt/id "total-flag-b"
+                   :entity/id "total-flag-b"
+                   :entity/name "B"
+                   :entity/type :total-flag-test}]
+        expected (mapv #(dissoc % :xt/id) returned)
+        capturing (fn [seen]
+                    (fn [_node form]
+                      (swap! seen conj form)
+                      returned))
+        ;; The count statement is the parameterised read with no `order-by`
+        ;; and no `p-limit`; the window carries both, the hydrate is SQL.
+        count-form? (fn [form]
+                      (and (not (string? (first form)))
+                           (let [[_fn params body] (first form)]
+                             (and (= '[p-type] params)
+                                  (not-any? #(and (seq? %) (= 'order-by (first %)))
+                                            body)))))]
+    (testing "absent :include-total? runs the count, as every caller sees today"
+      (let [seen (atom [])
+            result (graph/entities-query ::capturing-node
+                                         {:type :total-flag-test :limit 2}
+                                         (capturing seen))]
+        (is (= {:entities expected :count 2 :next-cursor "total-flag-b"} result))
+        (is (= 3 (count @seen)))
+        (is (= 1 (count (filter count-form? @seen))))))
+    (testing ":include-total? false issues no count statement"
+      (let [seen (atom [])
+            result (graph/entities-query ::capturing-node
+                                         {:type :total-flag-test :limit 2
+                                          :include-total? false}
+                                         (capturing seen))]
+        (is (= 2 (count @seen)))
+        (is (empty? (filter count-form? @seen)))
+        (is (= {:absent :not-requested} (:count result)))
+        (is (= expected (:entities result)))
+        (is (= "total-flag-b" (:next-cursor result)))))
+    (testing "the absence is typed, so it cannot be read as a value"
+      (let [result (graph/entities-query ::capturing-node
+                                         {:type :total-flag-test :limit 2
+                                          :include-total? false}
+                                         (capturing (atom [])))]
+        (is (some? (:count result)))
+        (is (not (number? (:count result))))
+        (is (contains? result :count))))))
+
 (deftest entity-batch-deduplicates-repeated-names
   (let [entity {:name "batch-local-duplicate" :type "batch/local-duplicate"}
         first-result (graph/write-entities-batch!

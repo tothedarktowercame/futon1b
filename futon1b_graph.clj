@@ -594,10 +594,18 @@
   "Backend-neutral typed entity read. Returns raw entity documents so callers
   can inspect domain fields written before the HTTP cutover as well as the
   equivalent fields carried in :entity/props by post-cutover writes. :count is
-  the true type total; :next-cursor resumes the stable xt/id ordering."
+  the true type total; :next-cursor resumes the stable xt/id ordering.
+
+  :include-total? defaults to true. When false the count statement is not
+  issued at all and :count is the typed absence {:absent :not-requested} --
+  never nil and never 0, so a caller cannot read \"not asked for\" as \"none\".
+  The count is a second full scan of the type (~5.2 s for 331 mission rows,
+  TN-entities-speedups-2026-09-26.md), and no caller outside this repo's own
+  tests reads it."
   ([node opts]
    (entities-query node opts fxt/safe-q))
-  ([node {:keys [type limit after]} query-fn]
+  ([node {:keys [type limit after include-total?]
+          :or {include-total? true}} query-fn]
    (let [t (normalize-type type)
          limited? (and (int? limit) (pos? limit))
          ;; Values ride as parameters (see fxt/pq); the form varies only by
@@ -621,11 +629,12 @@
                                            (cons '-> (cons '(from :entities [xt/id entity/type]) query-tail))
                                            args)))
          docs (fxt/hydrate-by-ids node :entities window-ids query-fn)
-         total (count (query-fn node
-                                (fxt/pq '[p-type]
-                                        '(-> (from :entities [xt/id entity/type])
-                                             (where (= entity/type p-type)))
-                                        t)))
+         total (when include-total?
+                 (count (query-fn node
+                                  (fxt/pq '[p-type]
+                                          '(-> (from :entities [xt/id entity/type])
+                                               (where (= entity/type p-type)))
+                                          t))))
          window (vec docs)
          ;; The cursor advances over the SERVER window (ids), not the hydrated
          ;; docs, so a dropped row cannot end a walk early.
@@ -633,7 +642,7 @@
                                 (= limit (count window-ids)))
                        (peek window-ids))]
      (cond-> {:entities (mapv #(dissoc % :xt/id) window)
-              :count total}
+              :count (if include-total? total {:absent :not-requested})}
        next-cursor (assoc :next-cursor next-cursor)))))
 
 ;; ---------------------------------------------------------------------------
