@@ -17,6 +17,7 @@
             [migration.transform :as xf]
             [migration.ingest :as ingest]
             [futon1b-xt :as fxt]
+            [futon1b-hxindex :as hx]
             [futon1b-request-executor :as request-executor]
             [xtdb.api :as xt]))
 
@@ -419,6 +420,7 @@
               (invalidate-hyperedge-query-cache! t)))
           (doseq [{:keys [table id]} documents
                   :when (= :hyperedges table)]
+            (hx/on-delete! id)
             (refresh-memory-projection-component! node id))
           {:ok true :count (count documents) :documents documents})))))
 

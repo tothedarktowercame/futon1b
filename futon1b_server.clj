@@ -45,6 +45,7 @@
             [zai-memory-1b :as zm]
             [futon1b-xt :as fxt]
             [futon1b-text :as text]
+            [futon1b-hxindex :as hx]
             [futon1b-write-log :as write-log]
             [futon1b-request-executor :as request-executor]
             [xtdb.api :as xt])
@@ -140,6 +141,7 @@
                                             (assoc :valid-from valid-from))
                                           id]])
                     (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
+                    (hx/on-delete! id)
                     (when (= :memory/assert (:hx/type doc))
                       (graph/refresh-memory-projection-component! node id))
                     {:ok true :hx/id id :retracted? true})
@@ -174,6 +176,7 @@
                       (if (present? node id)
                         (do
                           (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
+                          (hx/on-put! doc)
                           (when (= :memory/assert (:hx/type doc))
                             (graph/refresh-memory-projection-component! node id))
                           {:ok true :hx/id id
@@ -261,6 +264,7 @@
                         0 :postcommit-missing-memory-assert
                         {:missing missing})))
               (text/on-append! doc)
+              (hx/on-put! hyperedge-doc)
               (graph/invalidate-hyperedge-query-cache! (:hx/type hyperedge-doc))
               (graph/refresh-memory-projection-component-from-docs!
                node hyperedge-doc doc)
@@ -631,6 +635,20 @@
                                 :error :expensive-read-busy
                                 :retry-after-seconds 1})))))
 
+(defn- hx-catch-up-with-permit!
+  "Hyperedge catch-up takes an expensive-read permit like other table scans:
+   P0 measured that both of its system-time queries scan the whole
+   hyperedges table, so it must not pile onto the two census-class permits
+   unbudgeted. Runs at boot and then every FUTON1B_HX_CATCHUP_MS (default
+   15 min); a busy permit budget skips the run rather than queueing behind
+   serving reads."
+  []
+  (if (.tryAcquire expensive-read-permit expensive-read-wait-ms TimeUnit/MILLISECONDS)
+    (try
+      (hx/catch-up! @!node)
+      (finally (.release expensive-read-permit)))
+    {:skipped :expensive-read-busy}))
+
 (def ^:private tables
   [:hyperedges :entities :evidence :relations :type-catalog :docs :misc])
 
@@ -999,7 +1017,9 @@
       (respond! ex 405 (pr-str {:ok false :error "GET (search) or POST (catch-up)"}))
 
       (= "true" (p "stats"))
-      (respond! ex 200 (pr-str (assoc (text/stats @!node) :ok true)))
+      (respond! ex 200 (pr-str (assoc (text/stats @!node)
+                                      :ok true
+                                      :hx (hx/hx-stats))))
 
       (not (str/blank? (str (p "df"))))
       (let [terms (->> (str/split (p "df") #",")
@@ -1072,6 +1092,7 @@
   ;; scheduled past shutdown means a catch-up against a closed node every
   ;; interval, forever.
   (text/stop-periodic-catch-up!)
+  (hx/stop-periodic-catch-up!)
   (when-let [{:keys [executor companions]} (get @!server-executors server)]
     (swap! !server-executors dissoc server)
     (.shutdownNow ^java.util.concurrent.ExecutorService executor)
@@ -1113,11 +1134,17 @@
     (println "[fts] no store-dir: sidecar not attached")
   (try
     (let [{:keys [path last-at]} (text/init! {:store-dir store-dir})]
+      (hx/init!)
       (println (format "[fts] sidecar at %s (last-at %s)" path (or last-at "none — full build")))
       (doto (Thread. (fn []
                        (try (println "[fts] catch-up:" (pr-str (text/catch-up! @!node)))
                             (catch Throwable t
                               (println "[fts] catch-up failed:" (.getMessage t))))
+                       (try (println "[hxindex] boot catch-up:"
+                                     (pr-str (hx-catch-up-with-permit!)))
+                            (catch Throwable t
+                              (println "[hxindex] boot catch-up failed:"
+                                       (.getMessage t))))
                        ;; Only after the boot build: the repair loop is
                        ;; single-flighted against it anyway, but starting it
                        ;; here keeps the first run a genuine tail scan.
@@ -1125,6 +1152,13 @@
                                      (pr-str (text/start-periodic-catch-up! @!node)))
                             (catch Throwable t
                               (println "[fts] periodic catch-up not started:"
+                                       (.getMessage t))))
+                       (try (println "[hxindex] periodic catch-up:"
+                                     (pr-str (hx/start-periodic-catch-up!
+                                              @!node
+                                              :catch-up-fn hx-catch-up-with-permit!)))
+                            (catch Throwable t
+                              (println "[hxindex] periodic catch-up not started:"
                                        (.getMessage t))))))
         (.setDaemon true)
         (.start)))
