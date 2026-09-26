@@ -294,6 +294,7 @@
           (nil? (meta-get ds "checkpoint-ts"))
           (let [n (fill! ds node tx-id fill-page)
                 elapsed (- (System/currentTimeMillis) started)]
+            (meta-set! ds "hook-failures-at-catch-up" (:hook-failures @!stats))
             (swap! !stats assoc :last-catch-up
                    {:at (str (Instant/now)) :elapsed-ms elapsed :changed n :fill true})
             {:filled n :elapsed-ms elapsed :tx-id tx-id})
@@ -324,6 +325,7 @@
                                   (recur [(str (row-marker lst)) (str (row-id lst))]
                                          (+ changed (count rows))))))))]
             (meta-set! ds "last-tx-id" (str tx-id))
+            (meta-set! ds "hook-failures-at-catch-up" (:hook-failures @!stats))
             (let [elapsed (- (System/currentTimeMillis) started)
                   res {:changed (+ upserted deleted)
                        :upsert-leg upserted :tombstone-leg deleted
@@ -395,6 +397,68 @@
     (.shutdownNow s)
     (reset! !scheduler nil)
     {:ok true :periodic false}))
+
+;; ---------------------------------------------------------------------------
+;; P2 read side: serve type+endpoint reads from the index (DESIGN §7). The
+;; graph read path re-checks every candidate against XTDB before returning
+;; it; this namespace only gates and supplies candidate ids.
+;; ---------------------------------------------------------------------------
+
+;; FUTON1B_HX_READS, default on. An atom (not a def from the env) so a test
+;; or an operator in a REPL can flip it without a restart.
+(defonce !reads-enabled
+  (atom (not= "false" (System/getenv "FUTON1B_HX_READS"))))
+
+(defn reads-usable?
+  "P2 gate (DESIGN §7): the index may serve a read when reads are enabled, a
+   checkpoint exists (the fill has run) and NO write hook has failed since
+   the last catch-up. A failed hook means a hyperedge written after the
+   checkpoint may be missing from the candidates — which the XTDB re-check
+   cannot see (it only drops stale positives) — so the read must fall back
+   to the scan path."
+  []
+  (let [ds (ds*)]
+    (boolean
+     (and @!reads-enabled
+          ds
+          (meta-get ds "checkpoint-ts")
+          (let [stored (meta-get ds "hook-failures-at-catch-up")]
+            (or (nil? stored)
+                (= (try (Long/parseLong stored) (catch Exception _ -1))
+                   (long (:hook-failures @!stats)))))))))
+
+(defn checkpoint
+  "The catch-up watermark the served candidates are complete up to, for the
+   :hx-index response annotation."
+  []
+  (when-let [ds (ds*)]
+    {:ts (meta-get ds "checkpoint-ts")
+     :id (meta-get ds "checkpoint-id")}))
+
+(defn type-end-candidates
+  "Ordered distinct hx_ids indexed under TYPE (stored as `(str keyword)`,
+   colon included) at ANY of ENDPOINTS, keyset-paged on hx_id > AFTER
+   (\"\" pages from the start), at most FETCH ids. One seek per endpoint on
+   the (type, endpoint) index, merged and re-sorted in memory — the same
+   per-target fetch + merge the XTDB scan path does."
+  [{:keys [type endpoints after fetch]}]
+  (when-let [ds (ds*)]
+    (let [t (str type)
+          per-target
+          (fn [e]
+            (jdbc/execute! ds
+                           ["SELECT DISTINCT hx_id FROM hx_edge
+                             WHERE type = ? AND endpoint = ? AND hx_id > ?
+                             ORDER BY hx_id LIMIT ?"
+                            t (str e) (str (or after "")) (long fetch)]
+                           unqualified))]
+      (->> endpoints
+           (mapcat per-target)
+           (map :hx_id)
+           (distinct)
+           (sort)
+           (take (long fetch))
+           (vec)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Stats.

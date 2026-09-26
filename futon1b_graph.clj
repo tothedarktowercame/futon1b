@@ -1022,6 +1022,49 @@
                       (mapv deref))))
        (keep identity)))
 
+(defn- hyperedges-indexed-type-end
+  "P2 (DESIGN-hyperedge-scope-sidecar-2026-09-26 §7): serve a type+end read
+  from the SQLite sidecar and RE-CHECK every candidate against XTDB.
+  hydrate-by-ids drops ids deleted since the last catch-up, and the
+  type/endpoint predicate drops rows whose type or endpoints changed
+  unhooked, so a stale candidate is never returned. What the re-check cannot
+  see — a fresh hyperedge missing from the index after a hook failure — is
+  gated upstream by hx/reads-usable? (falls back to the scan).
+
+  Ordering (str id ascending), windowing (first N) and the response shape
+  ({:hyperedges … :count N}, NO cursor — the scan path's end branch emits
+  none) are the existing path's; :hx-index is the only added key, present
+  only when the index served. `after` is deliberately not applied: the
+  existing end branch ignores it (cursor machinery lives in the type
+  branch), and byte-for-byte parity is the contract."
+  [node {:keys [targets t n fields]} query-fn]
+  (let [target-strs (set (map str targets))
+        match? (fn [doc]
+                 (and (= t (normalize-type (:hx/type doc)))
+                      (some target-strs (map str (:hx/endpoints doc)))))
+        ;; Candidate pages of n, keyset on hx_id: the re-check can drop stale
+        ;; candidates, so a page may yield fewer than n live rows; keep
+        ;; pulling until the window fills or the index is exhausted, or the
+        ;; scan path would return MORE rows than the index on any lag.
+        docs (loop [after "" acc []]
+               (if (>= (count acc) n)
+                 (vec (take n acc))
+                 (let [ids (hx/type-end-candidates
+                            {:type t :endpoints targets :after after :fetch n})]
+                   (if (empty? ids)
+                     acc
+                     (let [live (->> (fxt/hydrate-by-ids node :hyperedges ids query-fn)
+                                     (filter match?))]
+                       (recur (last ids) (into acc live)))))))
+        out (mapv #(if (seq fields)
+                     (project-hyperedge-fields % fields)
+                     (dissoc % :xt/id))
+                  docs)]
+    {:hyperedges out
+     :count (count out)
+     :hx-index {:checkpoint (hx/checkpoint)
+                :hook-failures (:hook-failures @hx/!stats)}}))
+
 (defn- hyperedges-query-uncached
   "GET /api/alpha/hyperedges?type=… and/or end=… (+limit/latest/after,
   +repo/source-file/mission for type-only queries). When end is present, type
@@ -1040,8 +1083,13 @@
                    end)
           targets (distinct [end end-id])
           n (long (or limit 100))
-          t (some-> type normalize-type)
-          projected (->> targets
+          t (some-> type normalize-type)]
+      (if (and t
+               (not (or (:valid-as-of temporal) (:system-as-of temporal)))
+               (hx/reads-usable?))
+        (hyperedges-indexed-type-end
+         node {:targets targets :t t :n n :fields fields} query-fn)
+        (let [projected (->> targets
                          (mapcat
                           (fn [target]
                             (let [clauses (cond-> ['(= ep p-target)]
@@ -1070,7 +1118,7 @@
                        (project-hyperedge-fields % fields)
                        (dissoc % :xt/id))
                     docs)]
-      {:hyperedges out :count (count out)})
+          {:hyperedges out :count (count out)})))
 
     type
     (let [t (normalize-type type)
