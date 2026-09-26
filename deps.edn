@@ -13,7 +13,16 @@
   ;; D1 text sidecar (M-text-sidecar): FTS5 lives in this JVM beside the
   ;; store. next.jdbc arrives transitively via xtdb-core; the driver is
   ;; the version futon3a's meme.arrow store proved.
-  org.xerial/sqlite-jdbc {:mvn/version "3.44.1.0"}}
+  org.xerial/sqlite-jdbc {:mvn/version "3.44.1.0"}
+  ;; Drawbridge (nREPL over HTTP) + /eval inside the serving JVM, :6769
+  ;; (futon1b_drawbridge.clj, 2026-09-26). The same coordinates futon3c's
+  ;; :6768 endpoint runs on.
+  http-kit/http-kit {:mvn/version "2.8.1"}
+  com.cemerick/drawbridge {:mvn/version "0.0.7"}
+  ring/ring-core {:mvn/version "1.11.0"}
+  nrepl/nrepl {:mvn/version "1.1.0"}
+  ;; drawbridge 0.0.7 requires the pre-rename clojure.tools.nrepl namespace.
+  org.clojure/tools.nrepl {:mvn/version "0.2.13"}}
  ;; XTDB 2 is Arrow-based; modern JDKs need java.nio opened to Arrow.
  ;; Run everything via -M:node (throwaway in-process node, E-futon1b-foothold).
  :aliases

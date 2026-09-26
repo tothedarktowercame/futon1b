@@ -26,6 +26,9 @@
 ;;        GET /api/alpha/evidence?… — API-CONTRACT.md §3 (A1, operational
 ;;        switchover). Writes gated by penholder (futon1b-gates, A2).
 ;;
+;;   :6769 (loopback) /repl /eval /admin/eval — Drawbridge + eval inside this
+;;        JVM (futon1b_drawbridge.clj); token in ./.admintoken; started by
+;;        -main only.
 ;; Run: cd /home/joe/code/futon1b && \
 ;;      clojure -M:node -m futon1b-server --store-dir migration-store --port 7073
 ;;      (lucy: --port 7074 — nginx owns :7073 there)
@@ -1190,9 +1193,28 @@
         "--bind-host" (recur (nnext args) (assoc opts :bind-host (second args)))
         "--health-port" (recur (nnext args) (assoc opts :health-port
                                                     (Long/parseLong (second args))))
+        "--drawbridge-port" (recur (nnext args) (assoc opts :drawbridge-port
+                                                        (Long/parseLong (second args))))
         (throw (ex-info (str "Unknown arg: " (first args)) {:args args}))))))
 
+(defn- start-drawbridge!
+  "Drawbridge + /eval on 127.0.0.1 (futon1b-drawbridge), for the serving JVM
+   only: started from -main, never from start-server!, so tests and embedded
+   nodes get no eval endpoint. Port from --drawbridge-port, else
+   FUTON1B_DRAWBRIDGE_PORT, else 6769; 0 disables. A missing token is a
+   startup failure, not a silent skip."
+  [{:keys [drawbridge-port]}]
+  (let [port (or drawbridge-port
+                 (some-> (System/getenv "FUTON1B_DRAWBRIDGE_PORT") Long/parseLong)
+                 6769)]
+    (when (pos? port)
+      (let [start! (requiring-resolve 'futon1b-drawbridge/start!)
+            token ((requiring-resolve 'futon1b-drawbridge/read-token))]
+        (start! {:port port :token token})))))
+
 (defn -main [& args]
-  (start-server! (parse-args args))
+  (let [opts (parse-args args)]
+    (start-server! opts)
+    (start-drawbridge! opts))
   ;; block forever — the server owns this JVM.
   @(promise))
