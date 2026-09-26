@@ -59,6 +59,9 @@
    ;; not-finishing into 2.7 ms:
    "CREATE INDEX IF NOT EXISTS hx_end_pos_id ON hx_edge(endpoint, pos, hx_id)"
    "CREATE INDEX IF NOT EXISTS hx_id_pos ON hx_edge(hx_id, pos)"
+   ;; (type, hx_id): P3 type-only keyset reads (type-candidates/type-count) —
+   ;; (type, endpoint) cannot deliver hx_id order for a whole type.
+   "CREATE INDEX IF NOT EXISTS hx_type_id ON hx_edge(type, hx_id)"
    "CREATE TABLE IF NOT EXISTS hx_meta (k TEXT PRIMARY KEY, v TEXT)"])
 
 (defn- ds* [] @text/!ds)
@@ -459,6 +462,39 @@
            (sort)
            (take (long fetch))
            (vec)))))
+
+(defn type-candidates
+  "P3: ordered distinct hx_ids indexed under TYPE (stored as `(str keyword)`,
+   colon included), keyset-paged on hx_id > AFTER (\"\" pages from the start),
+   at most FETCH ids — one ordered scan over the (type, hx_id) index with
+   adjacent-duplicate dedup. The cursor contract is the scan path's: AFTER is
+   the last xt/id of the previous window, compared as TEXT, the same
+   lexicographic order XTDB's `order-by xt/id` applies to string ids."
+  [{:keys [type after fetch]}]
+  (when-let [ds (ds*)]
+    (->> (jdbc/execute! ds
+                        ["SELECT DISTINCT hx_id FROM hx_edge
+                          WHERE type = ? AND hx_id > ?
+                          ORDER BY hx_id LIMIT ?"
+                         (str type) (str (or after "")) (long fetch)]
+                        unqualified)
+         (map :hx_id)
+         (vec))))
+
+(defn type-count
+  "P3 include-total: distinct hx_ids indexed under TYPE. Matches XTDB's
+   type count when the index is caught up AND every hyperedge of the type
+   has at least one endpoint (a zero-endpoint hyperedge has no hx_edge rows
+   and is invisible here). Exact only up to the checkpoint plus hook
+   repairs — a candidate deleted unhooked since the last catch-up still
+   counts until the next catch-up removes it."
+  [type]
+  (when-let [ds (ds*)]
+    (:count (first (jdbc/execute! ds
+                                  ["SELECT count(DISTINCT hx_id) AS count
+                                    FROM hx_edge WHERE type = ?"
+                                   (str type)]
+                                  unqualified)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Stats.

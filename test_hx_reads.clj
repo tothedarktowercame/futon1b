@@ -203,9 +203,118 @@
                               (hx-doc "hx:e1:01" :probe/edits ["E1" "SHARED"])]])
         (hx/catch-up! node))
 
-      ;; ---- non-indexable parameter combinations stay on the scan path ------
-      (check! "type without end: scan path"
-              (not (contains? (query node {:type "probe/edits" :limit 2})
+      ;; ---- P3: type-only reads from the index -------------------------------
+      ;; Fixture census: probe/edits has 6 rows (hx:e1:00..04, hx:e2),
+      ;; probe/commits 1, probe/other 1 (added in the hook-failure section —
+      ;; this block runs BEFORE it, so probe/other does not exist yet).
+      (let [opts {:type "probe/edits" :limit 2}
+            indexed (query node opts)
+            _ (reset! reads-enabled false)
+            scanned (query node opts)
+            _ (reset! reads-enabled true)]
+        (check! "P3: the index served a type-only limited read"
+                (some? (:hx-index indexed)))
+        (check! "P3: page 1 rows, order, count, cursor match the scan path"
+                (= (comparable indexed) (comparable scanned)))
+        (check! "P3: page 1 emits the expected cursor"
+                (= "hx:e1:01" (:next-cursor indexed))))
+
+      ;; cursor-driven page 2, with and without fields
+      (let [opts {:type "probe/edits" :limit 2 :after "hx:e1:01"}
+            indexed (query node opts)
+            _ (reset! reads-enabled false)
+            scanned (query node opts)
+            _ (reset! reads-enabled true)]
+        (check! "P3: page 2 (cursor) matches the scan path"
+                (= (comparable indexed) (comparable scanned)))
+        (check! "P3: page 2 rows are the expected window"
+                (= ["hx:e1:02" "hx:e1:03"] (mapv :hx/id (:hyperedges indexed)))))
+      (let [opts {:type "probe/edits" :limit 2 :after "hx:e1:01"
+                  :fields ["hx/id" "hx/type" "hx/props.note" "prop/repo"]}
+            indexed (query node opts)
+            _ (reset! reads-enabled false)
+            scanned (query node opts)
+            _ (reset! reads-enabled true)]
+        (check! "P3: page 2 with fields matches the scan path"
+                (= (comparable indexed) (comparable scanned))))
+
+      ;; include-total: exact sidecar count vs the scan path's XTDB census
+      (let [opts {:type "probe/edits" :limit 2 :include-total? true}
+            indexed (query node opts)
+            _ (reset! reads-enabled false)
+            scanned (query node opts)
+            _ (reset! reads-enabled true)]
+        (check! "P3: include-total count and count-exact? match the scan path"
+                (and (= 6 (:count indexed) (:count scanned))
+                     (= 6 (hx/type-count :probe/edits))
+                     (true? (:count-exact? indexed))
+                     (= (:count-exact? scanned) (:count-exact? indexed))))
+        (check! "P3: include-total still returns the limited window"
+                (= 2 (count (:hyperedges indexed)))))
+
+      ;; cross-path cursor: a cursor minted by the INDEXED path must resume
+      ;; correctly on the scan path (and vice versa)
+      (let [indexed-p1 (query node {:type "probe/edits" :limit 2})
+            cursor (:next-cursor indexed-p1)
+            _ (reset! reads-enabled false)
+            scanned-p2 (query node {:type "probe/edits" :limit 2 :after cursor})
+            scanned-p1 (query node {:type "probe/edits" :limit 2})
+            _ (reset! reads-enabled true)
+            indexed-p2 (query node {:type "probe/edits" :limit 2
+                                    :after (:next-cursor scanned-p1)})]
+        (check! "P3: indexed cursor drives the scan path to the same page 2"
+                (and (not (contains? scanned-p2 :hx-index))
+                     (= ["hx:e1:02" "hx:e1:03"]
+                        (mapv :hx/id (:hyperedges scanned-p2)))))
+        (check! "P3: scan cursor drives the indexed path to the same page 2"
+                (and (some? (:hx-index indexed-p2))
+                     (= (comparable scanned-p2) (comparable indexed-p2)))))
+
+      ;; P3 stale candidate: delete hx:e1:04 unhooked; the narrow (id, type)
+      ;; re-check must drop it, and the window must backfill. (Bad case:
+      ;; return candidates WITHOUT the re-check and this test fails — run
+      ;; during development by stubbing the re-check to identity.)
+      (xt/execute-tx node [[:delete-docs :hyperedges "hx:e1:04"]])
+      (let [indexed (query node {:type "probe/edits" :limit 3})
+            _ (reset! reads-enabled false)
+            scanned (query node {:type "probe/edits" :limit 3})
+            _ (reset! reads-enabled true)]
+        (check! "P3: unhooked delete dropped from a type-only read"
+                (not-any? #(= "hx:e1:04" %) (map :hx/id (:hyperedges indexed))))
+        (check! "P3: indexed and scan paths agree exactly after the stale drop"
+                (= (comparable indexed) (comparable scanned))))
+      (xt/execute-tx node [[:put-docs :hyperedges
+                            (hx-doc "hx:e1:04" :probe/edits ["E1" "SHARED"])]])
+      (hx/catch-up! node)
+      ;; type changed unhooked: re-listed under the OLD type, re-check drops it
+      (xt/execute-tx node [[:put-docs :hyperedges
+                            (hx-doc "hx:e1:04" :probe/moved ["E1"])]])
+      (let [limited (query node {:type "probe/edits" :limit 10})]
+        (check! "P3: type-changed unhooked candidate dropped by the re-check"
+                (not-any? #(= "hx:e1:04" %) (map :hx/id (:hyperedges limited)))))
+      (xt/execute-tx node [[:put-docs :hyperedges
+                            (hx-doc "hx:e1:04" :probe/edits ["E1" "SHARED"])]])
+      (hx/catch-up! node)
+      ;; as-of stays on the scan path for type-only reads too
+      (check! "P3: type-only valid-as-of: scan path"
+              (not (contains? (query node {:type "probe/edits" :limit 2
+                                           :valid-as-of (Instant/now)})
+                              :hx-index)))
+
+
+      (check! "type-only with a repo filter: scan path"
+              (not (contains? (query node {:type "probe/edits" :limit 2
+                                           :repo "repo-a"})
+                              :hx-index)))
+      (check! "type-only with a mission filter: scan path"
+              (not (contains? (query node {:type "probe/edits" :limit 2
+                                           :mission "m1"})
+                              :hx-index)))
+      (check! "type-only latest: scan path"
+              (not (contains? (query node {:type "probe/edits" :latest? true})
+                              :hx-index)))
+      (check! "type-only without a limit: scan path"
+              (not (contains? (query node {:type "probe/edits"})
                               :hx-index)))
       (check! "end without type: scan path"
               (not (contains? (query node {:end "E1" :limit 2})

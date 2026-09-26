@@ -1122,6 +1122,61 @@
      :hx-index {:checkpoint (hx/checkpoint)
                 :hook-failures (:hook-failures @hx/!stats)}}))
 
+(defn- hyperedges-indexed-type
+  "P3: serve a type-ONLY read (`type` + `limit`/`after`/`include-total`/
+  `fields` — no end, repo, source-file, mission, latest or as-of) from the
+  SQLite sidecar, re-checking every candidate against XTDB exactly as P2b
+  does for type+end. The narrow re-check projection is (id, type): it drops
+  ids deleted since the last catch-up and rows whose type changed
+  unhooked. Full documents (or the `fields` columns) are read only for the
+  rows that pass AND survive the window cut to `limit`.
+
+  Ordering (xt/id ascending), the keyset cursor (`after` = the last xt/id
+  of the previous window, strict >) and `next-cursor` (emitted whenever the
+  window came back full, even on an exact final page) are byte-for-byte the
+  type branch's, so a cursor minted by either path resumes correctly on the
+  other. `include-total` is the sidecar's count(DISTINCT hx_id) for the
+  type — exact only up to the checkpoint plus hook repairs, and blind to
+  zero-endpoint hyperedges (they have no hx_edge rows); :count and
+  :count-exact? keep the existing path's semantics. :hx-index is the only
+  added response key."
+  [node {:keys [t n after include-total? fields]} query-fn]
+  (let [match? (fn [row] (= t (normalize-type (:hx/type row))))
+        ;; Same pull-until-full loop as P2b: the re-check can drop stale
+        ;; candidates, so a candidate page may yield fewer than n live rows.
+        ids (loop [after (str (or after "")) acc []]
+              (if (>= (count acc) n)
+                (vec (take n acc))
+                (let [cands (hx/type-candidates
+                             {:type t :after after :fetch n})]
+                  (if (empty? cands)
+                    acc
+                    (let [live (->> (fetch-hyperedge-cols-by-ids
+                                     node [:hx/type] cands query-fn)
+                                    (filter match?)
+                                    (map :xt/id))]
+                      (recur (last cands) (into acc live)))))))
+        docs (fetch-hyperedge-cols-by-ids
+              node (when (seq fields)
+                     (vec (keep hyperedge-window-field-source fields)))
+              ids query-fn)
+        out (mapv #(if (seq fields)
+                     (project-hyperedge-fields % fields)
+                     (dissoc % :xt/id))
+                  docs)
+        ;; The type branch emits a cursor whenever the server window is
+        ;; full; `ids` IS the server window here (post re-check, pre cut —
+        ;; identical by construction).
+        next-cursor (when (= n (count ids)) (peek ids))]
+    (cond-> {:hyperedges out
+             :count (if include-total?
+                      (hx/type-count t)
+                      (count out))
+             :count-exact? (boolean include-total?)
+             :hx-index {:checkpoint (hx/checkpoint)
+                        :hook-failures (:hook-failures @hx/!stats)}}
+      next-cursor (assoc :next-cursor next-cursor))))
+
 (defn- hyperedges-query-uncached
   "GET /api/alpha/hyperedges?type=… and/or end=… (+limit/latest/after,
   +repo/source-file/mission for type-only queries). When end is present, type
@@ -1179,8 +1234,18 @@
 
     type
     (let [t (normalize-type type)
-          limited? (and (not latest?) (int? limit) (pos? limit))
-          ;; Values ride as parameters (fxt/pq) so the compiled plan is keyed
+          limited? (and (not latest?) (int? limit) (pos? limit))]
+      (if (and limited?
+               (not (or repo source-file mission))
+               (not (or (:valid-as-of temporal) (:system-as-of temporal)))
+               (hx/reads-usable?))
+        ;; P3: type-only bounded read from the sidecar; the cursor and
+        ;; include-total semantics are the scan path's (see
+        ;; hyperedges-indexed-type's docstring).
+        (hyperedges-indexed-type
+         node {:t t :n (long limit) :after after
+               :include-total? include-total? :fields fields} query-fn)
+        (let [;; Values ride as parameters (fxt/pq) so the compiled plan is keyed
           ;; on which filters are present, not on their values.
           specs (cond-> [['p-type '(= hx/type p-type) t]]
                   ;; denormalized :prop/* columns (H4) let repo/source-file
@@ -1267,7 +1332,7 @@
                         (count out)
                         total)
                :count-exact? (boolean include-total?)}
-        next-cursor (assoc :next-cursor next-cursor))))))
+        next-cursor (assoc :next-cursor next-cursor))))))))
 
 (def ^:private max-hyperedge-query-cache-entries
   "Entries retained before FIFO eviction. Sized against the WORST case, not the
