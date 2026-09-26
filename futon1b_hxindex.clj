@@ -640,7 +640,7 @@
 (defn prefix-successor
   "P3d: the strict upper bound of the string range covering PREFIX: PREFIX
    with its last code point incremented (\"ab\" → \"ac\", \"dir:x→\" →
-   \"dir:x⇒\"). A range [PREFIX, (prefix-successor PREFIX)) contains exactly
+   \"dir:x↓\", U+2192 → U+2193). A range [PREFIX, (prefix-successor PREFIX)) contains exactly
    the strings equal to PREFIX or beginning with it — including non-ASCII
    endpoints, which a naive (str PREFIX \"z\") bound would wrongly exclude
    (any suffix char above \\z, e.g. → U+2192). Callers refuse the empty
