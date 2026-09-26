@@ -450,16 +450,19 @@
                                          {:type :total-flag-test :limit 2}
                                          (capturing seen))]
         (is (= {:entities expected :count 2 :next-cursor "total-flag-b"} result))
-        (is (= 3 (count @seen)))
-        (is (= 1 (count (filter count-form? @seen))))))
+        ;; Count the COUNT statements, not the statements: how many the
+        ;; hydrate takes is `fxt/hydrate-by-ids`' business and changes with
+        ;; its id threshold.
+        (is (= 1 (count (filter count-form? @seen))))
+        (is (seq @seen))))
     (testing ":include-total? false issues no count statement"
       (let [seen (atom [])
             result (graph/entities-query ::capturing-node
                                          {:type :total-flag-test :limit 2
                                           :include-total? false}
                                          (capturing seen))]
-        (is (= 2 (count @seen)))
         (is (empty? (filter count-form? @seen)))
+        (is (seq @seen))
         (is (= {:absent :not-requested} (:count result)))
         (is (= expected (:entities result)))
         (is (= "total-flag-b" (:next-cursor result)))))
@@ -543,6 +546,56 @@
                                                     :ordered? false})]
         (is (= "unordered-row-05" (:next-cursor ordered)))
         (is (not (contains? unordered :next-cursor)))))))
+
+(deftest hydrate-by-ids-splits-at-the-measured-crossover
+  ;; `_id IN` is a table scan at every size and `_id = ?` uses the id index
+  ;; (TN-entities-speedups-2026-09-26.md §1), so small hydrations go by
+  ;; equality. Both branches must keep the caller's id order and drop misses.
+  (let [doc (fn [id] {:xt/id id :entity/id id :entity/name (str "doc-" id)})
+        ;; Rows come back REVERSED, so a result in id order can only come from
+        ;; the caller's ids, not from the order the store answered in.
+        capturing (fn [seen present]
+                    (fn [_node stmt]
+                      (swap! seen conj stmt)
+                      (vec (reverse (keep present (rest stmt))))))
+        present-all (fn [ids] (into {} (map (juxt identity doc)) ids))]
+    (testing "at or below the threshold: one equality statement per id"
+      (let [ids (mapv #(str "eq-" %) (range 3))
+            seen (atom [])
+            out (fxt/hydrate-by-ids ::node :entities ids
+                                    (capturing seen (present-all ids)))]
+        (is (= 3 (count @seen)))
+        (is (every? #(re-find #"WHERE _id = \?$" (first %)) @seen))
+        (is (every? #(= 2 (count %)) @seen))
+        (is (= ids (mapv :xt/id out)))))
+    (testing "exactly at the threshold is still equality"
+      (let [ids (mapv #(format "eq-%03d" %) (range fxt/equality-hydrate-max-ids))
+            seen (atom [])]
+        (fxt/hydrate-by-ids ::node :entities ids (capturing seen (present-all ids)))
+        (is (= fxt/equality-hydrate-max-ids (count @seen)))
+        (is (every? #(re-find #"WHERE _id = \?$" (first %)) @seen))))
+    (testing "above the threshold: one chunked IN statement, id order kept"
+      (let [ids (mapv #(format "in-%03d" %) (range (inc fxt/equality-hydrate-max-ids)))
+            seen (atom [])
+            out (fxt/hydrate-by-ids ::node :entities ids
+                                    (capturing seen (present-all ids)))]
+        (is (= 1 (count @seen)))
+        (is (re-find #"WHERE _id IN \(" (first (first @seen))))
+        (is (= (count ids) (count (re-seq #"\?" (first (first @seen))))))
+        (is (= ids (mapv :xt/id out)))))
+    (testing "missing ids are dropped, in both branches"
+      (let [ids (mapv #(format "miss-%03d" %) (range 4))
+            here (present-all [(first ids) (last ids)])
+            out (fxt/hydrate-by-ids ::node :entities ids (capturing (atom []) here))]
+        (is (= [(first ids) (last ids)] (mapv :xt/id out))))
+      (let [ids (mapv #(format "miss-%03d" %) (range (inc fxt/equality-hydrate-max-ids)))
+            here (present-all [(first ids) (last ids)])
+            out (fxt/hydrate-by-ids ::node :entities ids (capturing (atom []) here))]
+        (is (= [(first ids) (last ids)] (mapv :xt/id out)))))
+    (testing "no ids, no statement"
+      (let [seen (atom [])]
+        (is (= [] (fxt/hydrate-by-ids ::node :entities [] (capturing seen {}))))
+        (is (empty? @seen))))))
 
 (deftest entity-batch-deduplicates-repeated-names
   (let [entity {:name "batch-local-duplicate" :type "batch/local-duplicate"}
