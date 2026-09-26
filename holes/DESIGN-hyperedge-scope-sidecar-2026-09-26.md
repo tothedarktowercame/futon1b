@@ -264,6 +264,28 @@ the v05 data robust to force-push/history edits, which HEAD-var capture is not.)
    freeze commit→var ingest.** Acceptance: new commits produce file edges
    only; census growth of `code/v05/edits` stops.
 
+**As built (claude-12, 2026-09-26).** The packets as dispatched differ from the numbering
+above; each line is one Kimi requisition, reviewed before the next:
+
+| Packet | What it did | futon1b commit(s) | E-kimi-task |
+|---|---|---|---|
+| P0 | measured system-time queries (below) | — | 48 |
+| P1 | `hx_edge` index, write hooks, two-leg catch-up, fill | 106fa1d, ad9b9a4, 55d0a00, c2e7cb5 | 49 |
+| P2 | type+end reads from the index, re-checked | 07256fa | 50 |
+| P2b | narrow re-check; full docs/`fields` only for returned rows | dc646fb | 51 |
+| P3 | type-only paged reads, cursor + include-total (not item 3 above) | 295ebc0 | 52 |
+| P3c | `hx_node` table; census from the index (item 3's Q4) | c9ede34 | 53 |
+| P3e | SQLITE_BUSY: one write lock + bounded retry | 406aaa6 | 56 |
+| — | periodic catch-up records and retries skipped runs | c07db8f | — |
+| P3d | endpoint-prefix reads (item 3's Q3); HTTP param needs a restart | 2e75986, 6e7f0be | 57 |
+| P4 | oracle: per-type counts + endpoint samples vs XTDB (item 4) | 9d6bf2f | 58 |
+| P5 | scope index from run files (item 5) | ad7468b | 59 |
+| P6a | `mark` + `gnode` tables, per-paper replace across all three, Q9 `node-join` (item 6) | 934e4d7 | 60 |
+| P6b | server wiring: `scope/init!`, `FUTON1B_SCOPE_RUNS`, `GET /api/alpha/scopes` | 798f2db | 61 (failed, RST_STREAM), 62 |
+
+The durable copy of the acceptance run is `/home/joe/runs/mark7master-20260921` (copied
+from `/tmp/r7v`). Item 7 (P7) is unchanged and still Joe's decision.
+
 Order rationale: P1–P2 retire the worst measured pain (Q2 scan) with the
 smallest surface; P3–P4 complete the hyperedge contract before the scope work
 adds a second data family; P5–P6 are independent of P3–P4 and could run in
