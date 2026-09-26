@@ -45,8 +45,12 @@ Measured basis from the 8-paper run `mark7master-20260921` (/tmp/r7v):
   :model "mark4-70b"}` is already in the data (measured, sample file).
 - Kind distribution (measured, prototype): connection 693, auxiliary-construction
   39, generalisation 16, difficulty-assessment 14, heuristic-plausibility 5,
-  obstruction 5. (The packet's expository 277 / universal-property 35 belong to
-  other artifact families not in `expo/*.edn`.)
+  obstruction 5. **Review correction (claude-12):** the prototype's regex dropped every
+  kind containing `/`. The expo files hold 857 scope kinds (measured: `grep -o ':kind :[a-z/-]*'`
+  minus the 277 `:kind :expository` passage-source entries), including
+  universal-property/characterizes 35, rationale/telos, computes-invariant/calculation and
+  open-problem/status. The 277 "expository" in the packet is the passage's `:source :kind`,
+  not a scope kind (the packet's error).
 
 Extrapolation to 5,000 papers (estimated, linear from 8 papers ≈ 277
 paper-prefixes seen in filenames / 96 scopes per paper-prefix... using the
@@ -151,13 +155,17 @@ In the terms M-evidence-landscape-index already uses:
   — "this index reflects the store as of tx N". The scope side carries
   `scope-watermark = (run, dir-mtime, file-count)` per run, since the oracle
   is a directory, not a transaction log.
-- **Writes.** Hyperedge rows are written **from the write log**
-  (`futon1b_write_log.clj` already appends every accepted write as EDN lines to
-  `write-log.edn` beside the store): a tailer advances the watermark past each
-  entry and upserts `hx_edge`/`hx_props`. Writing at post time (inside the
-  request path) is rejected: it couples request latency to SQLite and bypasses
-  the serialization the write log already provides — the log is our userspace
-  #5730-style ordering point.
+- **Writes.** *Review correction (claude-12):* the draft said rows come from a tailer
+  over `write-log.edn`. That file records only rescued or failed puts ("A clean put
+  records nothing", `futon1b_write_log.clj` header), so it cannot feed the index. Follow
+  the evidence sidecar's own pattern instead (`futon1b_text.clj`): a post-time hook
+  (`on-append!`-style) that upserts after the XTDB put succeeds and never advances the
+  checkpoint, plus a periodic `catch-up!` that owns the checkpoint. Hyperedges differ from
+  evidence in one way that matters here: they are upserted and retracted, not appended, so
+  an `(at, id)` checkpoint does not see a replacement. The catch-up needs an order that
+  does — XTDB2 system time (`_system_from`) is the candidate; whether a query on it seeks
+  or scans must be measured before P1 is written. The retract route
+  (`/api/alpha/documents/retract`) needs the same hook.
 - **Replacement and retraction.** Same `(type, hx_id)` re-posted → delete
   `hx_edge` rows for that hx_id, re-insert (positions may change). Retraction
   in XTDB terms (doc absent at re-check) → delete by hx_id. Scope re-run of
@@ -224,10 +232,14 @@ the v05 data robust to force-push/history edits, which HEAD-var capture is not.)
 
 ## 7. Implementation packets
 
-1. **P1 — `hx_edge`/`hx_props` schema + write-log tailer.** One behaviour:
-   tail `write-log.edn`, upsert hyperedge rows, advance `hx-watermark-tx`.
-   Acceptance: post a new hyperedge, observe it in the sidecar with watermark
-   ≥ its tx-id, without any store re-scan.
+0. **P0 — measure the catch-up order (discovery, review addition).** Time an XTDB2
+   query for hyperedges with system time after T, cold and warm, on :7073; say whether it
+   is a scan. This decides how P1's catch-up works.
+1. **P1 — `hx_edge`/`hx_props` schema + post-time hook + catch-up.** One behaviour:
+   after a successful hyperedge put, upsert its rows; a periodic catch-up (per P0)
+   repairs missed hooks and owns the checkpoint. Acceptance: post a new hyperedge,
+   observe it in the sidecar; disable the hook, post another, observe it after one
+   catch-up.
 2. **P2 — candidate-backed Q2 (type+endpoint) route.** Serve
    `hyperedges?type&T&end=E` from `hx_type_end`, point-hydrate and re-check
    each candidate against XTDB (I1). Acceptance: the Q2 sha query above
@@ -241,7 +253,8 @@ the v05 data robust to force-push/history edits, which HEAD-var capture is not.)
    hyperedge, sidecar row gone; full rebuild reproduces counts exactly.
 5. **P5 — scope sidecar (file-derived) + Q6–Q8.** Walk a run directory into
    `scope`, with per-run watermark. Acceptance: re-parse of /tmp/r7v
-   reproduces the 772-row kind counts above; Q7 for a sample paper matches
+   reproduces the per-kind counts of the source files (857 scope kinds, with `/`-kinds
+   such as universal-property/characterizes 35 present — the prototype's 772 is the bug); Q7 for a sample paper matches
    `render_scope_margin.py` output for the same interval.
 6. **P6 — re-run replacement + Q9 join table.** `mark` table, scope replace
    transaction. Acceptance: touching one paper's files and re-indexing changes
