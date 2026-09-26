@@ -212,3 +212,28 @@ install half-finished code into the serving JVM, and reloading `futon1b-graph`
 would fail part-way through redefining it. Nothing was restarted. The flags go
 live on the next reload of those two namespaces from a clean tree, or on the
 next restart, whichever comes first.
+
+### Correction to the paragraph above: a reload will not make the flags live
+
+The shared checkout went clean at 10:57Z (`c2e7cb5`, `07256fa` — the
+`defonce` docstring is now a comment), so I looked at what reloading the other
+two namespaces would actually do, and the answer is: not this.
+
+`start-server!` registers each route by VALUE, not by var —
+`(.createContext server "/api/alpha/entities" (handler entities-route))`
+(`futon1b_server.clj:1195`), and `handler` (`:412`) closes the fn it is given
+into a `reify HttpHandler`. So `(require 'futon1b-server :reload)` redefines
+the `entities-route` var while the live context keeps calling the closure
+captured at startup. The flags are parsed in that route fn, so they would stay
+inert. (`(require 'futon1b-graph :reload)` does take effect — `entities-route`
+calls `graph/entities-query` through its var — but on its own it changes
+nothing observable: with no `:include-total?`/`:ordered?` in the opts map both
+default to true, which is today's behaviour.)
+
+Unit 3 reached the running server only because `hydrate-by-ids` is called
+through its var from `futon1b-graph`, which is not how the routes are wired.
+
+**So `5393517` and `b343d34` need a restart, not a reload.** Not done here —
+restarting futon1b is not this packet's to do; it is scheduled by whoever owns
+the pause. `README-drawbridge.md`'s "route implementations reload in place"
+holds for what a route CALLS, not for the route fn itself.
