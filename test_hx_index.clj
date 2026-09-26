@@ -222,6 +222,72 @@
                        (nil? (get-in lp [:result :skipped]))
                        (some? (:at lp))))))
 
+      ;; ---- P4: oracle --------------------------------------------------------
+      (let [o (hx/oracle node)]
+        (check! "P4: oracle is clean after fill + hooked writes/retracts"
+                (and (empty? (:mismatches o))
+                     (empty? (:endpoint-mismatches o))))
+        (check! "P4: oracle reports shape (types, sampled ids, checkpoint, elapsed)"
+                (and (pos? (long (:types-checked o)))
+                     (pos? (long (:sampled-ids o)))
+                     (some? (:checkpoint o))
+                     (number? (:elapsed-ms o))))
+        (check! "P4: hx-stats records :last-oracle"
+                (some? (:last-oracle (hx/hx-stats)))))
+
+      ;; ** BAD CASE A **: an hx_node row deleted behind the index's back.
+      (jdbc/execute! (ds) ["DELETE FROM hx_node WHERE hx_id = ?" "hx:r1"])
+      (let [o (hx/oracle node)]
+        (check! "P4 BAD CASE A: deleted hx_node row caught by the per-type count check"
+                (some #(and (= ":probe/commits" (:type %))
+                            (= 1 (:sidecar %)) (= 2 (:xtdb %)))
+                      (:mismatches o)))
+        (check! "P4 BAD CASE A: the count check re-checked once after a catch-up"
+                (every? :rechecked (:mismatches o))))
+      (let [o (hx/oracle node :recheck false)]
+        (check! "P4: :recheck false is strictly read-only (no drain attempt)"
+                (some #(false? (:rechecked %)) (:mismatches o))))
+      (hx/rebuild! node)
+      (check! "P4: rebuild after a deleted hx_node row leaves the oracle clean"
+              (let [o (hx/oracle node)]
+                (and (empty? (:mismatches o))
+                     (empty? (:endpoint-mismatches o)))))
+
+      ;; ** BAD CASE B **: an extra hx_edge endpoint row planted.
+      (jdbc/execute! (ds) ["INSERT INTO hx_edge(hx_id, type, pos, endpoint)
+                            VALUES ('hx:r2', ':probe/commits', 5, 'planted:endpoint')"])
+      (let [o (hx/oracle node)]
+        (check! "P4 BAD CASE B: planted hx_edge row caught by the endpoint sample check"
+                (some #(and (= "hx:r2" (:id %))
+                            (= ["c1" "c2" "planted:endpoint"] (:sidecar %))
+                            (= ["c1" "c2"] (:xtdb %)))
+                      (:endpoint-mismatches o)))
+        (check! "P4 BAD CASE B: hx_node counts stay clean (the count check cannot see it)"
+                (empty? (:mismatches o))))
+      (hx/rebuild! node)
+
+      ;; ** BAD CASE C **: a type's count off by one (planted hx_node row).
+      (jdbc/execute! (ds) ["INSERT INTO hx_node(hx_id, type)
+                            VALUES ('hx:fake:1', ':probe/commits')"])
+      (let [o (hx/oracle node)]
+        (check! "P4 BAD CASE C: planted hx_node row caught by the per-type count check"
+                (some #(and (= ":probe/commits" (:type %))
+                            (= 3 (:sidecar %)) (= 2 (:xtdb %)))
+                      (:mismatches o)))
+        (check! "P4 BAD CASE C: the endpoint sample check corroborates (no XTDB doc)"
+                (some #(and (= "hx:fake:1" (:id %)) (nil? (:xtdb %)))
+                      (:endpoint-mismatches o))))
+
+      ;; full rebuild after planted damage reproduces XTDB counts exactly
+      (let [res (hx/rebuild! node)
+            o (hx/oracle node)]
+        (check! "P4: full rebuild after planted damage reproduces XTDB counts (oracle clean)"
+                (and (empty? (:mismatches o))
+                     (empty? (:endpoint-mismatches o))
+                     (empty? (:raced o))))
+        (check! "P4: the post-damage rebuild refilled the index"
+                (pos? (long (or (:filled res) 0)))))
+
       ;; ---- stats ------------------------------------------------------------
       (let [s (hx/hx-stats)]
         (check! "hx-stats reports per-type counts, checkpoint, hook failures"

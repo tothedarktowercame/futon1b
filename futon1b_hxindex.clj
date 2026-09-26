@@ -720,6 +720,118 @@
                                   unqualified)))))
 
 ;; ---------------------------------------------------------------------------
+;; P4: oracle — the sidecar checked against XTDB itself (DESIGN §7 item 4).
+;; ---------------------------------------------------------------------------
+
+(defn- xtdb-type-counts*
+  "The census scan branch's own query, called DIRECTLY (graph/census now
+   answers from the sidecar and would make the oracle compare the index
+   with itself)."
+  [node]
+  (into {}
+        (map (fn [row] [(str (:type row)) (long (:n row))]))
+        (fxt/timed-q node ["SELECT hx$type AS type, count(*) AS n
+                            FROM hyperedges GROUP BY hx$type"])))
+
+(defn- sidecar-type-counts* [ds]
+  (into {}
+        (map (fn [row] [(:type row) (long (:n row))]))
+        (jdbc/execute! ds ["SELECT type, count(*) AS n FROM hx_node GROUP BY type"]
+                       unqualified)))
+
+(defn- count-diffs
+  "Types whose hx_node count differs from the XTDB count, over the union of
+   both key sets (a type present on only one side is a mismatch)."
+  [sidecar xtdb]
+  (vec
+   (keep (fn [t]
+           (let [s (long (get sidecar t 0))
+                 x (long (get xtdb t 0))]
+             (when (not= s x)
+               {:type t :sidecar s :xtdb x})))
+         (into (sorted-set) (concat (keys sidecar) (keys xtdb))))))
+
+(defn- endpoint-sample-check
+  "Compare hx_edge rows (ORDER BY pos) with the XTDB document's
+   hx$endpoints for a sample of hx_node ids per type. A sidecar id with no
+   XTDB doc (xt nil) or an XTDB doc with no sidecar rows is a mismatch.
+   Returns {:sampled n :mismatches [...]}."
+  [ds node sample-per-type]
+  (let [types (map :type (jdbc/execute! ds ["SELECT DISTINCT type FROM hx_node ORDER BY type"]
+                                        unqualified))
+        samples (into {}
+                      (map (fn [t]
+                             [t (mapv :hx_id
+                                      (jdbc/execute! ds ["SELECT hx_id FROM hx_node
+                                                          WHERE type = ? ORDER BY hx_id LIMIT ?"
+                                                         t (long sample-per-type)]
+                                                     unqualified))]))
+                      types)]
+    {:sampled (reduce + 0 (map (comp count val) samples))
+     :mismatches
+     (vec
+      (for [[t ids] samples
+            id ids
+            :let [side (mapv :endpoint
+                             (jdbc/execute! ds ["SELECT endpoint FROM hx_edge
+                                                 WHERE hx_id = ? ORDER BY pos" id]
+                                            unqualified))
+                  row (first (fxt/timed-q node ["SELECT hx$endpoints AS ends
+                                                 FROM hyperedges WHERE _id = ?" id]))
+                  xt (when row (mapv str (:ends row)))]
+            :when (not= side xt)]
+        {:type t :id id :sidecar side :xtdb xt}))}))
+
+(defn oracle
+  "P4 (DESIGN §7 item 4): compare the sidecar against XTDB itself. Per type,
+   the hx_node count vs the census scan query (called directly, NOT via
+   graph/census, which now answers from the sidecar); then, for a sample of
+   ids per type, the ordered hx_edge endpoints vs the document's
+   hx/endpoints. Read-only with respect to the INDEX unless :recheck is on.
+
+   Counts can legitimately differ when a write lands between the two reads.
+   Handling: when the first comparison shows a difference, run ONE catch-up!
+   (:force, so a no-new-tx skip cannot mask it) and compare again — a
+   difference that drains is reported under :raced with its before values,
+   one that survives is a real :mismatch. Damage done behind the index's
+   back (a row deleted or planted directly) survives catch-up, which only
+   re-reads ids changed since the checkpoint, so it is reported, not
+   repaired. Pass :recheck false for a strictly read-only run (any
+   difference is then reported as a mismatch without the drain attempt).
+
+   Records the result in hx-stats under :last-oracle."
+  [node & {:keys [sample-per-type recheck]
+           :or {sample-per-type 25 recheck true}}]
+  (let [started (System/currentTimeMillis)
+        ds (ds*)
+        _ (when-not ds (throw (ex-info "hxindex: no sidecar datasource" {})))
+        compare-counts (fn [] (count-diffs (sidecar-type-counts* ds)
+                                           (xtdb-type-counts* node)))
+        first-pass (compare-counts)
+        {:keys [mismatches raced]}
+        (if (and recheck (seq first-pass))
+          (do (catch-up! node :force true)
+              (let [second-pass (compare-counts)
+                    still (set (map :type second-pass))]
+                {:mismatches (mapv #(assoc % :rechecked true) second-pass)
+                 :raced (vec (remove #(still (:type %)) first-pass))}))
+          {:mismatches (if recheck first-pass
+                           (mapv #(assoc % :rechecked false) first-pass))
+           :raced []})
+        end-check (endpoint-sample-check ds node sample-per-type)
+        result {:types-checked (count (into #{} (concat (keys (sidecar-type-counts* ds))
+                                                        (keys (xtdb-type-counts* node)))))
+                :mismatches mismatches
+                :raced raced
+                :sampled-ids (:sampled end-check)
+                :endpoint-mismatches (:mismatches end-check)
+                :checkpoint (checkpoint)
+                :at (str (Instant/now))
+                :elapsed-ms (- (System/currentTimeMillis) started)}]
+    (swap! !stats assoc :last-oracle result)
+    result))
+
+;; ---------------------------------------------------------------------------
 ;; Stats.
 ;; ---------------------------------------------------------------------------
 
