@@ -46,6 +46,7 @@
             [futon1b-xt :as fxt]
             [futon1b-text :as text]
             [futon1b-hxindex :as hx]
+            [futon1b-scopeindex :as scope]
             [futon1b-write-log :as write-log]
             [futon1b-request-executor :as request-executor]
             [xtdb.api :as xt])
@@ -924,6 +925,94 @@
       (respond! ex 400
                 (pr-str {:error "census requires ?type=<hx-type> or ?entity-type=<type>"})))))
 
+;; ---------------------------------------------------------------------------
+;; P6b: scope sidecar routes (futon1b-scopeindex). The ns owns the schema and
+;; the Q6/Q7/Q8 read fns; here is only the HTTP seam.
+;; ---------------------------------------------------------------------------
+
+(def ^:private scope-lines-re #"^(\d+)-(\d+)$")
+
+(defn- parse-scope-lines
+  "Parse ?lines=a-b into [a b] longs; nil when malformed or a > b. Q7's
+   overlap is CLOSED-interval (futon1b-scopeindex ns docstring)."
+  [raw]
+  (when-let [[_ a b] (re-matches scope-lines-re (str raw))]
+    (let [a (Long/parseLong a) b (Long/parseLong b)]
+      (when (<= a b) [a b]))))
+
+(defn- scopes-route
+  "GET /api/alpha/scopes — P6b scope sidecar reads (futon1b-scopeindex).
+   Exactly one selector:
+     ?paper=P            → Q6 scopes-of-paper
+     ?paper=P&lines=a-b  → Q7 scopes-overlapping (closed interval)
+     ?kind=K             → Q8 scopes-of-kind
+   Optional ?run=R restricts the read to one run. 400 on missing,
+   conflicting or malformed params (same shapes as census-route); typed
+   503 :scope-sidecar-unavailable when the sidecar is not attached (no
+   store-dir at startup, or text init failed — the XTDB routes still
+   serve then, so this is a refusal, not a 500)."
+  [^HttpExchange ex]
+  (if-not (= "GET" (.getRequestMethod ex))
+    (respond! ex 405 (pr-str {:ok false :error "GET only"}))
+    (let [ds @text/!ds]
+      (if-not ds
+        (respond! ex 503 (pr-str {:ok false
+                                  :error :scope-sidecar-unavailable
+                                  :hint "sidecar attaches only when the server has a store-dir"}))
+        (let [p (query-params ex)
+              paper (not-empty (p "paper"))
+              kind (not-empty (p "kind"))
+              run (not-empty (p "run"))
+              lines-raw (p "lines")
+              opts (cond-> {} run (assoc :run run))]
+          (cond
+            (= (some? paper) (some? kind))
+            (respond! ex 400
+                      (pr-str {:error "scopes requires exactly one of ?paper=P or ?kind=K"}))
+
+            (and kind (some? lines-raw))
+            (respond! ex 400 (pr-str {:error "?lines= applies only with ?paper="}))
+
+            (and paper (some? lines-raw))
+            (if-let [[a b] (parse-scope-lines lines-raw)]
+              (let [rows (scope/scopes-overlapping ds paper a b opts)]
+                (respond! ex 200 (pr-str {:ok true :scopes rows :count (count rows)})))
+              (respond! ex 400 (pr-str {:error "malformed ?lines= (expected a-b with a <= b)"
+                                        :provided lines-raw})))
+
+            paper
+            (let [rows (scope/scopes-of-paper ds paper opts)]
+              (respond! ex 200 (pr-str {:ok true :scopes rows :count (count rows)})))
+
+            :else
+            (let [rows (scope/scopes-of-kind ds kind opts)]
+              (respond! ex 200 (pr-str {:ok true :scopes rows :count (count rows)})))))))))
+
+(defn- scope-index-runs-from-env!
+  "P6b: index the run dirs listed in FUTON1B_SCOPE_RUNS (colon-separated;
+   unset or empty = none). Called in a background future at startup: a
+   slow or missing run directory must not delay serving, and one failing
+   run must not stop the others (or the server) — same contract as the
+   [fts] catch-up thread. Returns the number of runs successfully
+   indexed, so tests can assert the empty-env case indexes nothing."
+  []
+  (let [runs (->> (str/split (or (System/getenv "FUTON1B_SCOPE_RUNS") "") #":")
+                  (map str/trim)
+                  (remove str/blank?))]
+    (reduce (fn [n run-dir]
+              (try
+                (let [{:keys [run rows elapsed-ms skipped]}
+                      (scope/index-run! run-dir)]
+                  (println (format "[scopeindex] run %s rows %s ms %s%s"
+                                   run rows elapsed-ms
+                                   (if skipped " (watermark unchanged)" "")))
+                  (inc n))
+                (catch Throwable t
+                  (println (format "[scopeindex] run %s failed: %s"
+                                   run-dir (.getMessage t)))
+                  n)))
+            0 runs)))
+
 (defn- write-log-route
   "GET /api/alpha/write-log?limit=N&kind=put-failed|shape — read-only view of
   the rescue/failure record (in-memory tail; :file names the durable copy)."
@@ -1146,7 +1235,17 @@
   (try
     (let [{:keys [path last-at]} (text/init! {:store-dir store-dir})]
       (hx/init!)
+      ;; P6b: scope tables on the same sidecar. The DDL is cheap and
+      ;; idempotent, so it stays on the startup path; run indexing does
+      ;; not — see the future below.
+      (scope/init!)
       (println (format "[fts] sidecar at %s (last-at %s)" path (or last-at "none — full build")))
+      ;; P6b: index FUTON1B_SCOPE_RUNS off the startup path (background
+      ;; future): a slow/absent run dir must not delay serving, and a
+      ;; failing run must not stop the server (scope-index-runs-from-env!
+      ;; catches per run). No startup-periodic re-index in this packet —
+      ;; re-indexing is an operator action until claude-12 says otherwise.
+      (future (scope-index-runs-from-env!))
       (doto (Thread. (fn []
                        (try (println "[fts] catch-up:" (pr-str (text/catch-up! @!node)))
                             (catch Throwable t
@@ -1204,6 +1303,12 @@
     (.createContext server "/api/alpha/relations/batch" (handler relations-batch-route))
     (.createContext server "/api/alpha/graph/inhabited" (handler graph-inhabited-route))
     (.createContext server "/api/alpha/census" (handler census-route))
+    ;; Registered through the VAR, not the fn value: createContext captures
+    ;; its handler argument, and routes captured by value keep calling the
+    ;; old closure until a restart (TN-entities-speedups-2026-09-26.md:
+    ;; "start-server! registers each route by VALUE, not by var"). Passing
+    ;; #'scopes-route lets a later reload of this ns take effect live.
+    (.createContext server "/api/alpha/scopes" (handler #'scopes-route))
     (.createContext server "/api/alpha/write-log" (handler write-log-route))
     (.createContext server "/api/alpha/restart-readiness"
                     (handler restart-readiness-route))
