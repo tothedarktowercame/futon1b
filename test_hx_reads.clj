@@ -10,9 +10,11 @@
    (see -main: the re-check is what drops the stale candidate).
 
   Run: clojure -M:node -m test-hx-reads"
-  (:require [futon1b-text :as text]
+  (:require [clojure.string :as str]
+            [futon1b-text :as text]
             [futon1b-hxindex :as hx]
             [futon1b-graph :as graph]
+            [futon1b-xt :as fxt]
             [xtdb.api :as xt]
             [xtdb.node :as xtn])
   (:import [java.nio.file Files]
@@ -63,7 +65,11 @@
               [:put-docs :hyperedges (hx-doc "hx:c1" :probe/commits ["E1"])]]
              (map (fn [i]
                     [:put-docs :hyperedges
-                     (hx-doc (format "hx:e1:%02d" i) :probe/edits ["E1" "SHARED"])])
+                     (cond-> (hx-doc (format "hx:e1:%02d" i) :probe/edits ["E1" "SHARED"])
+                       ;; one row carries props/repo so the fields projection
+                       ;; has something to select
+                       (= i 0) (assoc :hx/props {:note "p2b"}
+                                      :prop/repo "repo-a"))])
                   (range 5))))
       (hx/catch-up! node)
 
@@ -105,6 +111,71 @@
             _ (reset! reads-enabled true)]
         (check! "an `after` request returns identical windows on both paths"
                 (= (comparable indexed) (comparable scanned))))
+
+      ;; ---- P2b: fields projection parity ------------------------------------
+      ;; The full read selects only the columns the fields need and projects
+      ;; exactly as the scan path does.
+      (let [opts {:type "probe/edits" :end "E1" :limit 3
+                  :fields ["hx/id" "hx/type" "hx/props.note" "prop/repo"]}
+            indexed (query node opts)
+            _ (reset! reads-enabled false)
+            scanned (query node opts)
+            _ (reset! reads-enabled true)]
+        (check! "fields: the index served it"
+                (some? (:hx-index indexed)))
+        (check! "fields: same projected rows, same order, same count"
+                (and (= 3 (:count indexed) (:count scanned))
+                     (= (:hyperedges indexed) (:hyperedges scanned))))
+        (check! "fields: only the requested fields are present"
+                (= {:hx/id "hx:e1:00" :hx/type :probe/edits
+                    :hx/props {:note "p2b"} :prop/repo "repo-a"}
+                   (first (:hyperedges indexed)))))
+
+      ;; ---- P2b: the full-document read runs only for returned ids -----------
+      ;; limit 2 of 5 candidates: the narrow re-check sees the first keyset
+      ;; page, and the `SELECT *` read must receive exactly the two returned
+      ;; ids, not all five candidates.
+      (let [full-read-ids (atom [])
+            counting-qf (fn [n qa]
+                          (when (and (string? (first qa))
+                                     (str/starts-with?
+                                      (first qa)
+                                      "SELECT * FROM hyperedges WHERE _id IN"))
+                            (swap! full-read-ids into (rest qa)))
+                          (fxt/safe-q n qa))
+            _ (graph/invalidate-hyperedge-query-cache!)
+            r (graph/hyperedges-query
+               node {:type "probe/edits" :end "E1" :limit 2} counting-qf)]
+        (check! "counting wrapper: the index served it"
+                (some? (:hx-index r)))
+        (check! "the full-document read ran only for the returned ids"
+                (and (= 2 (:count r))
+                     (= (sort @full-read-ids)
+                        (sort (map :hx/id (:hyperedges r)))))))
+
+      ;; ---- P2b: stale by endpoints-changed-unhooked -------------------------
+      ;; Rewrite hx:e1:02's endpoints in XTDB with no hook and no catch-up:
+      ;; the index still lists it under E1. The narrow re-check (id, type,
+      ;; endpoints) must drop it — no full document is needed to see the
+      ;; endpoints moved.
+      (xt/execute-tx node [[:put-docs :hyperedges
+                            (hx-doc "hx:e1:02" :probe/edits ["ELSEWHERE"])]])
+      (let [candidates (hx/type-end-candidates
+                        {:type :probe/edits :endpoints ["E1"] :after "" :fetch 10})]
+        (check! "the index still holds the endpoint-changed candidate (planted)"
+                (some #{"hx:e1:02"} candidates)))
+      (let [indexed (query node {:type "probe/edits" :end "E1"})
+            _ (reset! reads-enabled false)
+            scanned (query node {:type "probe/edits" :end "E1"})
+            _ (reset! reads-enabled true)]
+        (check! "endpoint-changed unhooked candidate dropped by the narrow re-check"
+                (not-any? #(= "hx:e1:02" %) (map :hx/id (:hyperedges indexed))))
+        (check! "indexed and scan paths agree exactly after the endpoints drop"
+                (= (comparable indexed) (comparable scanned))))
+      ;; restore the row so later checks see the full fixture
+      (xt/execute-tx node [[:put-docs :hyperedges
+                            (hx-doc "hx:e1:02" :probe/edits ["E1" "SHARED"])]])
+      (hx/catch-up! node)
 
       ;; ---- planted stale candidate ------------------------------------------
       ;; Delete hx:e1:01 in XTDB with no hook and no catch-up: the index still

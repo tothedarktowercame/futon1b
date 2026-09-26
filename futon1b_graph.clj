@@ -1022,14 +1022,63 @@
                       (mapv deref))))
        (keep identity)))
 
+(def ^:private indexed-read-chunk-size
+  "Ids per `_id IN (?, …)` statement on the P2b indexed read path. Measured
+  2026-09-26 on the live store (575 code/v05/edits candidates at one
+  endpoint): the per-statement fixed cost dominates at every size, so one
+  large statement always wins — the narrow re-check projection
+  (_id, hx$type, hx$endpoints) ran 575-in-one in 1.8 s vs 2.0 s at chunks
+  of 1000, 4.0 s at 500 and 10.4 s at 100; `SELECT *` for a 100-id window
+  ran 3.6 s in one statement vs 13.8 s at chunks of 25. pgjdbc caps bind
+  parameters at 32767, so 1000 is far inside the wire limit."
+  1000)
+
+(defn- sql-column
+  "SQL column name for a hyperedge attribute keyword (:hx/type → \"hx$type\",
+  :xt/id → \"_id\")."
+  [kw]
+  (if (= :xt/id kw)
+    "_id"
+    (str (namespace kw) "$" (name kw))))
+
+(defn- fetch-hyperedge-cols-by-ids
+  "COLS (attribute keywords; :xt/id is always selected) for IDS from
+  :hyperedges, via chunked SQL `_id IN (?, …)`, in the order of IDS;
+  missing ids are dropped. COLS nil/empty selects full documents
+  (`SELECT *`). A column no row has ever had is simply absent from the
+  result maps (verified live 2026-09-26: unknown columns do not error), so
+  fields naming one project to nothing, exactly as the XTQL scan path."
+  [node cols ids query-fn]
+  (let [ids (vec ids)
+        select (if (seq cols)
+                 (str "SELECT "
+                      (str/join ", " (mapv sql-column (distinct (cons :xt/id cols))))
+                      " FROM hyperedges WHERE _id IN (")
+                 "SELECT * FROM hyperedges WHERE _id IN (")
+        rows (mapcat (fn [chunk]
+                       (query-fn node
+                                 (into [(str select
+                                             (str/join ", " (repeat (count chunk) "?"))
+                                             ")")]
+                                       chunk)))
+                     (partition-all indexed-read-chunk-size ids))
+        by-id (into {} (map (fn [doc] [(:xt/id doc) doc])) rows)]
+    (into [] (keep by-id) ids)))
+
 (defn- hyperedges-indexed-type-end
   "P2 (DESIGN-hyperedge-scope-sidecar-2026-09-26 §7): serve a type+end read
   from the SQLite sidecar and RE-CHECK every candidate against XTDB.
-  hydrate-by-ids drops ids deleted since the last catch-up, and the
-  type/endpoint predicate drops rows whose type or endpoints changed
-  unhooked, so a stale candidate is never returned. What the re-check cannot
-  see — a fresh hyperedge missing from the index after a hook failure — is
-  gated upstream by hx/reads-usable? (falls back to the scan).
+  P2b: the re-check reads only the narrow projection (id, type, endpoints)
+  — measured 2026-09-26 on the live store at 1.8 s for 575 candidates vs
+  9.6 s for hydrate-by-ids' `SELECT *` — and full documents are read only
+  for the rows that pass AND survive the window cut to `limit`. With
+  `fields`, the full read selects only the columns those fields need
+  (hyperedge-window-field-source) and projects exactly as the scan path.
+  The re-check drops ids deleted since the last catch-up and rows whose
+  type or endpoints changed unhooked, so a stale candidate is never
+  returned. What the re-check cannot see — a fresh hyperedge missing from
+  the index after a hook failure — is gated upstream by hx/reads-usable?
+  (falls back to the scan).
 
   Ordering (str id ascending), windowing (first N) and the response shape
   ({:hyperedges … :count N}, NO cursor — the scan path's end branch emits
@@ -1039,23 +1088,31 @@
   branch), and byte-for-byte parity is the contract."
   [node {:keys [targets t n fields]} query-fn]
   (let [target-strs (set (map str targets))
-        match? (fn [doc]
-                 (and (= t (normalize-type (:hx/type doc)))
-                      (some target-strs (map str (:hx/endpoints doc)))))
+        match? (fn [row]
+                 (and (= t (normalize-type (:hx/type row)))
+                      (some target-strs (map str (:hx/endpoints row)))))
         ;; Candidate pages of n, keyset on hx_id: the re-check can drop stale
         ;; candidates, so a page may yield fewer than n live rows; keep
         ;; pulling until the window fills or the index is exhausted, or the
         ;; scan path would return MORE rows than the index on any lag.
-        docs (loop [after "" acc []]
-               (if (>= (count acc) n)
-                 (vec (take n acc))
-                 (let [ids (hx/type-end-candidates
-                            {:type t :endpoints targets :after after :fetch n})]
-                   (if (empty? ids)
-                     acc
-                     (let [live (->> (fxt/hydrate-by-ids node :hyperedges ids query-fn)
-                                     (filter match?))]
-                       (recur (last ids) (into acc live)))))))
+        ids (loop [after "" acc []]
+              (if (>= (count acc) n)
+                (vec (take n acc))
+                (let [cands (hx/type-end-candidates
+                             {:type t :endpoints targets :after after :fetch n})]
+                  (if (empty? cands)
+                    acc
+                    (let [live (->> (fetch-hyperedge-cols-by-ids
+                                     node [:hx/type :hx/endpoints] cands query-fn)
+                                    (filter match?)
+                                    (map :xt/id))]
+                      (recur (last cands) (into acc live)))))))
+        ;; Full documents only for the returned window, projected to the
+        ;; requested fields' source columns when `fields` was supplied.
+        docs (fetch-hyperedge-cols-by-ids
+              node (when (seq fields)
+                     (vec (keep hyperedge-window-field-source fields)))
+              ids query-fn)
         out (mapv #(if (seq fields)
                      (project-hyperedge-fields % fields)
                      (dissoc % :xt/id))
