@@ -46,6 +46,86 @@
       900000))
 
 ;; ---------------------------------------------------------------------------
+;; P3e: SQLITE_BUSY hardening.
+;;
+;; The live hook failures (hx-stats, 2026-09-26, after the 10:57 restart)
+;; were plain [SQLITE_BUSY] — the PRIMARY result code 5, i.e. the busy
+;; handler waited the full busy_timeout (PRAGMA busy_timeout = 10000,
+;; verified live) and the write lock was STILL held: another writer held
+;; the lock longer than 10 s (cause a of the requisition). It is not the
+;; WAL deferred read→write upgrade (cause b): that fails IMMEDIATELY with
+;; SQLITE_BUSY_SNAPSHOT — busy_timeout never applies because no wait can
+;; help — and none of the sidecar's write transactions can even hit it,
+;; because none of them reads inside the transaction (reproduced in
+;; test-hx-busy: the read→write case errors in < 100 ms, the contended
+;; pure-writer case errors only after busy_timeout expires).
+;;
+;; Two layers, chosen from that evidence:
+;; - one in-process lock serializes EVERY hxindex write transaction, so the
+;;   fire-and-forget hooks never contend with catch-up!/fill!/backfill!
+;;   running in this JVM (the measured failures coincided with an init!/
+;;   backfill run in the serving JVM);
+;; - a bounded retry on SQLITE_BUSY absorbs writers this lock cannot reach:
+;;   futon1b-text's FTS writes share the file but not this lock (editing
+;;   text's write paths is deliberately out of scope), and an operator's
+;;   script can hold the lock from another process entirely.
+;;
+;; Failures that outlast the retry still land in hook-failure! and keep
+;; reads-usable? honest — the P2 gate is unchanged.
+;; ---------------------------------------------------------------------------
+
+(defonce ^:private !write-lock (Object.))
+
+(def ^:dynamic *busy-retry*
+  "Bounded retry policy for SQLITE_BUSY on sidecar writes (P3e). Each
+   attempt itself waits up to the connection's busy_timeout (10 s live), so
+   6 attempts cover ~1 minute of external lock-holding before giving up.
+   Rebindable for tests."
+  {:attempts 6 :base-sleep-ms 250})
+
+(defn- busy-error?
+  "True for SQLITE_BUSY (5) and its extended codes (e.g. BUSY_SNAPSHOT 517);
+   matched on the message too because driver/version differences decide
+   whether the extended code reaches SQLException.getErrorCode."
+  [t]
+  (and (instance? java.sql.SQLException t)
+       (let [e ^java.sql.SQLException t
+             code (.getErrorCode e)
+             msg (str (.getMessage e))]
+         (or (= 5 code) (= 517 code)
+             (str/includes? msg "SQLITE_BUSY")
+             (str/includes? msg "database is locked")))))
+
+(defn- with-busy-retry*
+  "Run F, retrying on SQLITE_BUSY with doubling backoff per *busy-retry*.
+   Any other error — and a BUSY that outlasts :attempts — is thrown."
+  [f]
+  (let [{:keys [attempts base-sleep-ms]
+         :or {attempts 6 base-sleep-ms 250}} *busy-retry*]
+    (loop [n 1 sleep-ms (long base-sleep-ms)]
+      (let [r (try {:ok (f)} (catch Throwable t {:err t}))]
+        (if-let [t (:err r)]
+          (if (and (busy-error? t) (< n (long attempts)))
+            (do (Thread/sleep sleep-ms)
+                (recur (inc n) (min 8000 (* 2 sleep-ms))))
+            (throw t))
+          (:ok r))))))
+
+(defn- write-locked*
+  "Run F holding the in-process hx write lock, with the busy retry OUTSIDE
+   the lock (a failed attempt releases the monitor before sleeping, so it
+   never starves the writer this JVM is legitimately waiting on)."
+  [f]
+  (with-busy-retry* (fn [] (locking !write-lock (f)))))
+
+(defmacro ^:private ^{:clj-kondo/lint-as 'clojure.core/with-open} with-write-tx
+  "jdbc/with-transaction under write-locked*: serialized against every other
+   hxindex writer in this JVM and retried on SQLITE_BUSY."
+  [[tx ds] & body]
+  `(write-locked*
+    (fn [] (jdbc/with-transaction [~tx ~ds] ~@body))))
+
+;; ---------------------------------------------------------------------------
 ;; Schema. Shares the futon1b-text datasource (same SQLite file family).
 ;; ---------------------------------------------------------------------------
 
@@ -77,8 +157,10 @@
                             unqualified))))
 
 (defn- meta-set! [ds k v]
-  (jdbc/execute! ds ["INSERT INTO hx_meta(k,v) VALUES(?,?)
-                      ON CONFLICT(k) DO UPDATE SET v=excluded.v" k (str v)]))
+  (write-locked*
+   (fn []
+     (jdbc/execute! ds ["INSERT INTO hx_meta(k,v) VALUES(?,?)
+                         ON CONFLICT(k) DO UPDATE SET v=excluded.v" k (str v)]))))
 
 (defn init!
   "Create the hyperedge tables on the shared sidecar datasource.
@@ -103,7 +185,7 @@
   (let [id (str (:xt/id doc))
         t (str (:hx/type doc))
         endpoints (:hx/endpoints doc)]
-    (jdbc/with-transaction [tx ds]
+    (with-write-tx [tx ds]
       (jdbc/execute! tx ["DELETE FROM hx_edge WHERE hx_id = ?" id])
       (doseq [[pos end] (map-indexed vector endpoints)]
         (jdbc/execute! tx ["INSERT INTO hx_edge(hx_id, type, pos, endpoint)
@@ -114,8 +196,9 @@
   (count (:hx/endpoints doc)))
 
 (defn delete-id! [ds id]
-  (jdbc/execute! ds ["DELETE FROM hx_edge WHERE hx_id = ?" (str id)])
-  (jdbc/execute! ds ["DELETE FROM hx_node WHERE hx_id = ?" (str id)]))
+  (with-write-tx [tx ds]
+    (jdbc/execute! tx ["DELETE FROM hx_edge WHERE hx_id = ?" (str id)])
+    (jdbc/execute! tx ["DELETE FROM hx_node WHERE hx_id = ?" (str id)])))
 
 ;; ---------------------------------------------------------------------------
 ;; Write-path hooks. Fire-and-forget; never fail the request; never advance
@@ -210,7 +293,7 @@
                                           {:hx/type (or (:t r) (:hx/type r))
                                            :hx/endpoints (or (:ends r) (:hx/endpoints r))}])))
                       (partition-all 500 ids))]
-    (jdbc/with-transaction [tx ds]
+    (with-write-tx [tx ds]
       (doseq [id ids]
         (if-let [doc (get present id)]
           (do (jdbc/execute! tx ["DELETE FROM hx_edge WHERE hx_id = ?" id])
@@ -270,7 +353,7 @@
             (let [rows (current-page node after page)]
               (if (empty? rows)
                 n
-                (do (jdbc/with-transaction [tx ds]
+                (do (with-write-tx [tx ds]
                       (doseq [r rows
                               :let [id (str (row-id r))]]
                         (jdbc/execute! tx ["DELETE FROM hx_edge WHERE hx_id = ?" id])
@@ -305,10 +388,12 @@
   [ds node & {:keys [page] :or {page 20000}}]
   (let [started (System/currentTimeMillis)
         copied (:next.jdbc/update-count
-                (first (jdbc/execute! ds ["INSERT INTO hx_node(hx_id, type)
-                                           SELECT hx_id, type FROM hx_edge
-                                           GROUP BY hx_id
-                                           ON CONFLICT(hx_id) DO NOTHING"])))
+                (first (write-locked*
+                        (fn []
+                          (jdbc/execute! ds ["INSERT INTO hx_node(hx_id, type)
+                                              SELECT hx_id, type FROM hx_edge
+                                              GROUP BY hx_id
+                                              ON CONFLICT(hx_id) DO NOTHING"])))))
         zero (loop [after "" n 0]
                (let [rows (fxt/timed-q
                            node
@@ -319,7 +404,7 @@
                             (str after) (long page)])]
                  (if (empty? rows)
                    n
-                   (do (jdbc/with-transaction [tx ds]
+                   (do (with-write-tx [tx ds]
                          (doseq [r rows]
                            (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type)
                                                VALUES (?,?)
@@ -419,9 +504,10 @@
   [node & {:keys [page] :or {page 1000}}]
   (let [ds (ds*)
         started (System/currentTimeMillis)]
-    (jdbc/execute! ds ["DELETE FROM hx_edge"])
-    (jdbc/execute! ds ["DELETE FROM hx_node"])
-    (jdbc/execute! ds ["DELETE FROM hx_meta WHERE k IN ('checkpoint-ts','checkpoint-id','last-tx-id','hx-node-backfill')"])
+    (with-write-tx [tx ds]
+      (jdbc/execute! tx ["DELETE FROM hx_edge"])
+      (jdbc/execute! tx ["DELETE FROM hx_node"])
+      (jdbc/execute! tx ["DELETE FROM hx_meta WHERE k IN ('checkpoint-ts','checkpoint-id','last-tx-id','hx-node-backfill')"]))
     (assoc (catch-up! node :page page :force true)
            :total-elapsed-ms (- (System/currentTimeMillis) started))))
 
