@@ -10,6 +10,7 @@
 ;;   :tx-id/:path/id — no proof-path machinery in v1.
 (ns futon1b-evidence
   (:require [clojure.string :as str]
+            [futon1b-origin :as origin]
             [migration.transform :as xf]
             [migration.ingest :as ingest]
             [futon1b-xt :as fxt]
@@ -40,12 +41,20 @@
   [payload]
   (let [etype (normalize-type (field payload :type))
         claim-type (normalize-type (field payload :claim-type))
-        author (field payload :author)]
+        author (field payload :author)
+        origin-present? (or (contains? payload :evidence/origin) (contains? payload :origin))
+        stamp (field payload :origin)]
     (cond
       (nil? etype) {:invalid {:error "evidence/type required"}}
       (nil? claim-type) {:invalid {:error "evidence/claim-type required"}}
       (or (nil? author) (str/blank? (str author)))
       {:invalid {:error "evidence/author required"}}
+
+      (and origin-present?
+           (or (not (origin/valid? stamp))
+               (not= (str author) (:attributed-author (origin/normalize stamp)))))
+      {:invalid {:error/code :invalid-origin
+                 :error "Invalid evidence/origin: closed write-time provenance contract; attributed-author must match author"}}
 
       :else
       (let [id (or (field payload :id) (str (random-uuid)))
@@ -58,6 +67,8 @@
                          :evidence/at at
                          :evidence/body (or (field payload :body) {})
                          :evidence/tags (vec (or (field payload :tags) []))}
+                  origin-present?
+                  (assoc :evidence/origin (origin/normalize stamp))
                   (field payload :subject)
                   (assoc :evidence/subject (field payload :subject))
                   (field payload :pattern-id)

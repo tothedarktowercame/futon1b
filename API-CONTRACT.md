@@ -858,3 +858,16 @@ when scope=latest; required otherwise). Re-ingests all docs through
    500); all other numeric params swallow parse errors.
 8. Hyperedge scan queries carry a 15s XTDB `:timeout`; census must stay a
    bound-type count-pushdown (a full census scan times out at ~470k docs).
+
+### Write-time origin (M-象-2000 P6o-1)
+
+Evidence writes optionally accept `origin` / `evidence/origin`; absent preserves
+legacy behavior. The map is preserved on reads. Required keys: `kind` (operator,
+agent, harness, unknown), nonblank `actor`, `writer`, `attributed-author` (must
+match author), `authorization` (unknown or a nonblank grant reference),
+`recorded-at` (ISO instant), and `basis` (write-time). Optional nonblank string
+keys: `source-id`, `surface`. EDN keywords and JSON enum strings are accepted.
+Unknown keys, invalid values, missing required keys, or explicit null produce
+HTTP 400 with `:error/code :invalid-origin`. The author is never rewritten.
+Origin records producer knowledge, not proof of identity or an authorization
+grant; missing authority remains unknown. Retrospective attribution is separate.
