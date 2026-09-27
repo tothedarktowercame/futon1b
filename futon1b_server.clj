@@ -94,8 +94,11 @@
       {:endpoint endpoint :end {:entity-id endpoint}})))
 
 (defn build-hyperedge-doc
-  "Watcher payload → futon1b doc (pre-transform)."
+  "Watcher payload → futon1b doc (pre-transform). Minting is a write operation."
   [payload]
+  (when (or (true? (:hx/mint-id payload)) (contains? payload :hx/idempotency-key))
+    (throw (gates/layered-error 4 :act-options-require-hyperedge-write
+                                {:message "Use POST /api/alpha/hyperedge for minted acts"})))
   (let [hx-type (normalize-type (or (:hx/type payload) (:type payload)))
         normalized-ends (mapv normalize-hyperedge-end
                               (or (:hx/endpoints payload) (:endpoints payload)))
@@ -124,7 +127,7 @@
 (defn- present? [node id]
   (fxt/present? node :hyperedges id))
 
-(defn upsert-hyperedge!
+(defn- upsert-derived-hyperedge!
   "Transform + no-op guard + VERIFIED put. Returns response map."
   [node payload]
   (let [retract? (= "retract" (some-> (or (:hx/op payload) (:op payload))
@@ -188,6 +191,84 @@
       (if (= :memory/assert (:hx/type doc))
         (graph/with-memory-projection-mutation node mutate!)
         (mutate!)))))
+
+(defn- act-receipt [node key]
+  (first (fxt/safe-q node (fxt/pq '[p-key]
+                                 '(-> (from :hyperedge-act-keys [*])
+                                      (where (= xt/id p-key))) key))))
+
+(defn- act-history [node id]
+  ;; Verify even future-valid acts. Retraction does not erase their history.
+  (fxt/safe-q node (fxt/pq '[p-id]
+                          '(-> (from :hyperedges {:bind [*] :for-valid-time :all-time})
+                               (where (= xt/id p-id))) id)))
+
+(defn- write-minted-act!
+  [node payload]
+  (let [key (:hx/idempotency-key payload)
+        valid-from (some-> (or (:hx/valid-time payload) (:valid-time payload)) parse-instant)
+        base (-> (dissoc payload :hx/mint-id :hx/idempotency-key)
+                 build-hyperedge-doc
+                 (xf/transform-doc graph/!shape-log {:log-stringify? true})
+                 (dissoc :xt/id :hx/id))
+        request {:doc base :valid-from (some-> valid-from str)}
+        mutate!
+        (fn []
+          ;; One owning JVM per store. Lock the existing node object, not a
+          ;; reload-local registry; the durable receipt is the authority. All
+          ;; writers of this receipt table pass through this critical section.
+          (locking node
+            (if-let [receipt (when key (act-receipt node key))]
+              (do
+                (when-not (= request (edn/read-string (:act/request receipt)))
+                  (throw (gates/layered-error
+                          1 :idempotency-conflict
+                          {:key key :hx/id (:act/id receipt)
+                           :message "idempotency key already names a different act request"})))
+                {:ok true :hx/id (:act/id receipt) :no-op? true})
+              (let [id (str "act:" (random-uuid))
+                    doc (assoc base :xt/id id :hx/id id)
+                    receipt (when key {:xt/id key :act/id id :act/request (pr-str request)})
+                    ops (cond-> [[:put-docs (cond-> {:into :hyperedges}
+                                             valid-from (assoc :valid-from valid-from)) doc]]
+                          receipt (conj [:put-docs :hyperedge-act-keys receipt]))]
+                ;; A receipt without its act would lose the effect on retry.
+                ;; Commit both atomically; never rescue them in separate puts.
+                (xt/execute-tx node ops)
+                (when-not (and (some #(= doc (select-keys % (keys doc))) (act-history node id))
+                               (or (nil? key) (= receipt (act-receipt node key))))
+                  (throw (gates/layered-error
+                          0 :postcommit-missing-act
+                          {:hx/id id :message "act/receipt transaction failed read-back verification"})))
+                (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
+                (hx/on-put! doc)
+                (when (= :memory/assert (:hx/type doc))
+                  (graph/refresh-memory-projection-component! node id))
+                {:ok true :hx/id id :minted? true}))))]
+    (if (= :memory/assert (:hx/type base))
+      (graph/with-memory-projection-mutation node mutate!)
+      (mutate!))))
+
+(defn upsert-hyperedge!
+  "Opt-in act minting; otherwise preserve the existing derived/explicit ID path.
+  Idempotency keys are global to this store, durable, and survive retraction."
+  [node payload]
+  (let [mint (:hx/mint-id payload)
+        key (:hx/idempotency-key payload)]
+    (when (and (contains? payload :hx/mint-id) (not (boolean? mint)))
+      (throw (gates/layered-error 4 :invalid-mint-id {:expected :boolean})))
+    (when (and (contains? payload :hx/idempotency-key)
+               (not (and (true? mint) (string? key) (not (str/blank? key)))))
+      (throw (gates/layered-error 4 :invalid-idempotency-key
+                                {:message "a nonblank string key requires hx/mint-id true"})))
+    (if (true? mint)
+      (do
+        (when (or (:hx/id payload) (:id payload)
+                  (= "retract" (some-> (or (:hx/op payload) (:op payload)) name str/lower-case)))
+          (throw (gates/layered-error 4 :invalid-act-mint
+                                    {:message "minting cannot supply an id or retract; retract the returned hx/id without mint-id"})))
+        (write-minted-act! node payload))
+      (upsert-derived-hyperedge! node payload))))
 
 (defn write-memory-assert!
   "Validate an evidence entry and its :memory/assert hyperedge before writing,

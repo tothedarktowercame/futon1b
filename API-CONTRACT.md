@@ -428,6 +428,32 @@ because the tail is taken wholesale.
   only if the doc exists **and** has `:hx/id`; otherwise **404** `{:error
   "not found" :hx/id <id>}`.
 
+### Minted act IDs (P6b, opt-in on POST /api/alpha/hyperedge)
+
+`:hx/mint-id true` allocates a fresh opaque `act:<random-uuid>` ID at write
+time and returns `{:ok true :hx/id ... :minted? true}`. Two identical acts
+remain distinct. Absent or false preserves the existing derived/explicit-ID
+semantics. The option must be boolean; minting cannot also specify `:hx/id`
+(or `:id`) or request retraction. The pure document builder and compound
+memory/assert writer reject minting options: use the hyperedge write route.
+
+Optional `:hx/idempotency-key` must be a nonblank string with minting enabled.
+Keys are global within the store: callers should namespace delivery keys.
+The act and a receipt in `:hyperedge-act-keys` commit in one XTDB transaction;
+receipt read/check/write is serialized on the existing owning node object.
+No process-local key registry is authoritative. Same key and normalized
+request (including explicit valid time) returns the original ID with
+`:no-op? true`, without another transaction. Reusing a key for a different
+request returns **409** `:idempotency-conflict`. A new key mints a new act.
+Validation failures are **400**. A failed transaction or failed read-back is
+an error, never a successful mint; act and receipt are not rescued separately.
+
+To retract, send the returned `:hx/id` with the original type/endpoints and
+`:hx/op "retract"`, omitting minting/idempotency options. Existing
+`:hx/valid-time` and valid/system as-of reads apply independently to each act.
+Receipts survive retraction, so retrying the original keyed write acknowledges
+its original ID without resurrecting it. New acts require a new delivery key.
+
 ### GET /api/alpha/hyperedges?type=…&end=…&limit=…&as-of=…
 `app.clj:387-403`. Requires `type` **or** `end`, else **400** `{:error "type
 or end parameter required"}`. `limit` = int (unparseable ignored). When both
