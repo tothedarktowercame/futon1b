@@ -66,15 +66,18 @@
 ;;   running in this JVM (the measured failures coincided with an init!/
 ;;   backfill run in the serving JVM);
 ;; - a bounded retry on SQLITE_BUSY absorbs writers this lock cannot reach:
-;;   futon1b-text's FTS writes share the file but not this lock (editing
-;;   text's write paths is deliberately out of scope), and an operator's
-;;   script can hold the lock from another process entirely.
+;;   an operator's script can hold the lock from another process entirely.
+;;   (futon1b-text's FTS writes shared the file but not this lock until
+;;   2026-09-27; the lock is now text/sidecar-write-lock.)
 ;;
 ;; Failures that outlast the retry still land in hook-failure! and keep
 ;; reads-usable? honest — the P2 gate is unchanged.
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private !write-lock (Object.))
+;; The sidecar file's single lock, shared with futon1b-text's evidence
+;; writes (2026-09-27): two in-process locks on one SQLite file only moved
+;; the contention into busy_timeout.
+(def ^:private !write-lock text/sidecar-write-lock)
 
 (def ^:dynamic *busy-retry*
   "Bounded retry policy for SQLITE_BUSY on sidecar writes (P3e). Each

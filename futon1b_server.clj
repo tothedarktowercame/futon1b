@@ -1337,6 +1337,11 @@
                        (try (println "[fts] catch-up:" (pr-str (text/catch-up! @!node)))
                             (catch Throwable t
                               (println "[fts] catch-up failed:" (.getMessage t))))
+                       ;; Until this completes, evidence reads keep scanning
+                       ;; the store (text/complete? is false).
+                       (try (println "[fts] reconcile:" (pr-str (text/reconcile! @!node)))
+                            (catch Throwable t
+                              (println "[fts] reconcile failed:" (.getMessage t))))
                        (try (println "[hxindex] boot catch-up:"
                                      (pr-str (hx-catch-up-with-permit!)))
                             (catch Throwable t

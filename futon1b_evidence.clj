@@ -568,12 +568,64 @@
                :incomplete true}
               (recur next-cursor selected' scanned'))))))))
 
-;; tag-window falls back to scan-window when there is no sidecar checkpoint.
+;; ---------------------------------------------------------------------------
+;; Reads served from the sidecar alone (2026-09-27).
+;;
+;; Any predicate on the evidence table makes XTDB read the whole table: a
+;; session-id filter costs ~2 s whether the session has 6,000 rows or none,
+;; and bounding :at or system time does not prune it (measured in the serving
+;; JVM, 331,225 rows). `limit=1` for a session cost the same as reading all
+;; of it. When text/complete? holds, the sidecar has every acknowledged doc,
+;; so the page comes from its indexes and each candidate is re-read by id
+;; (`_id = ?`, ~20 ms) and re-checked against every filter (contract C1).
+;; Otherwise the tag and scan paths below are unchanged.
+;; ---------------------------------------------------------------------------
+
+(defn- recheck-full
+  "Full store docs for candidate ids that still satisfy every filter in Q, in
+  candidate order. A candidate the store no longer holds is dropped."
+  [node cands q]
+  (let [docs (rows-by-ids node "SELECT * FROM evidence" [] (mapv :id cands))
+        by-id (into {} (map (juxt #(str (:xt/id %)) identity)) docs)
+        ordered (keep #(get by-id (str (:id %))) cands)]
+    (filter #(pushdown-match? % q) (apply-post-filters ordered q))))
+
+(defn- index-window
+  "bounded-window from the sidecar, or nil when it cannot serve Q: temporal
+  reads (the sidecar has no history), fork-of (not indexed), or an index that
+  is not complete right now."
+  [node q limit initial-cursor]
+  (when (and (not (temporal? q))
+             (nil? (:fork-of q))
+             (text/complete?))
+    (loop [cursor initial-cursor
+           selected []
+           checked 0]
+      (let [remaining (- limit (count selected))
+            ;; SQL applied every filter, so candidates nearly all survive:
+            ;; ask for exactly what is missing and let the recheck confirm.
+            wave (min tag-recheck-wave (max 1 remaining))
+            cands (text/attr-candidates q cursor wave)
+            selected' (into selected (take remaining (recheck-full node cands q)))
+            checked' (+ checked (count cands))]
+        (if (or (>= (count selected') limit) (< (count cands) wave))
+          {:entries (mapv public-doc selected')
+           ;; As scan-window: a full page may end exactly at EOF, and the
+           ;; next request proves exhaustion with an empty page.
+           :next-cursor (when (>= (count selected') limit)
+                          (row-cursor (peek selected')))
+           :scanned checked'}
+          (let [lst (peek cands)]
+            (recur [(:at lst) (:id lst)] selected' checked')))))))
+
+;; index-window first; tag-window falls back to scan-window when there is no
+;; sidecar checkpoint.
 (defn- bounded-window
   [node q limit initial-cursor]
   ;; The sidecar has no temporal history. Historical candidate membership must
   ;; come from XTDB, not from today's tag list (which could omit old members).
-  (or (when (and (not (temporal? q)) (seq (:tags q)))
+  (or (index-window node q limit initial-cursor)
+      (when (and (not (temporal? q)) (seq (:tags q)))
         (tag-window node q limit initial-cursor))
       (scan-window node q limit initial-cursor)))
 
