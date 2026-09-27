@@ -11,6 +11,7 @@
 (ns futon1b-evidence
   (:require [clojure.string :as str]
             [futon1b-origin :as origin]
+            [futon1b-harness :as harness]
             [migration.transform :as xf]
             [migration.ingest :as ingest]
             [futon1b-xt :as fxt]
@@ -43,7 +44,10 @@
         claim-type (normalize-type (field payload :claim-type))
         author (field payload :author)
         origin-present? (or (contains? payload :evidence/origin) (contains? payload :origin))
-        stamp (field payload :origin)]
+        stamp (field payload :origin)
+        harness-present? (or (contains? payload :evidence/harness) (contains? payload :harness))
+        execution (field payload :harness)
+        harness-error (when harness-present? (harness/refusal execution))]
     (cond
       (nil? etype) {:invalid {:error "evidence/type required"}}
       (nil? claim-type) {:invalid {:error "evidence/claim-type required"}}
@@ -56,6 +60,10 @@
       {:invalid {:error/code :invalid-origin
                  :error "Invalid evidence/origin: closed write-time provenance contract; attributed-author must match author"}}
 
+      harness-error
+      {:invalid {:error/code :invalid-harness :reason harness-error
+                 :error "Invalid evidence/harness"}}
+
       :else
       (let [id (or (field payload :id) (str (random-uuid)))
             at (or (field payload :at) (str (java.time.Instant/now)))
@@ -67,6 +75,8 @@
                          :evidence/at at
                          :evidence/body (or (field payload :body) {})
                          :evidence/tags (vec (or (field payload :tags) []))}
+                  harness-present?
+                  (assoc :evidence/harness (harness/normalize execution))
                   origin-present?
                   (assoc :evidence/origin (origin/normalize stamp))
                   (field payload :subject)

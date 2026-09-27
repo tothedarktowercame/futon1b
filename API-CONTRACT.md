@@ -871,3 +871,26 @@ Unknown keys, invalid values, missing required keys, or explicit null produce
 HTTP 400 with `:error/code :invalid-origin`. The author is never rewritten.
 Origin records producer knowledge, not proof of identity or an authorization
 grant; missing authority remains unknown. Retrospective attribution is separate.
+
+### Execution harness (M-象-2000 P3-3a)
+
+Evidence POST optionally accepts `harness` / `evidence/harness` (namespaced wins),
+a sibling of origin. Absence stays absent on point and LIST readback; no default
+is inferred. The closed map accepts `kind`, `basis`, `execution-id`, `reason`,
+and `source-ref` only. Kind is `war-machine`, `zai`, `none`, or `unknown`; basis
+is `producer-context`. Enum strings normalize to keywords on EDN reads.
+Execution-id is required for war-machine; reason is required for unknown. Any
+present execution-id, reason or source-ref must be a nonblank string. Zai is
+reserved and refused with reason `zai-harness-not-deployed`. Origin and author
+are unchanged; this stamp establishes no grant.
+
+Invalid input returns HTTP 400, `error/code: invalid-harness`, with `reason` one of
+`invalid-harness-map`, `unexpected-harness-key`, `unknown-harness-kind`,
+`invalid-harness-basis`, `zai-harness-not-deployed`, `missing-execution-id`,
+`missing-harness-reason`, or `invalid-harness-string`.
+
+`harness-kind` LIST filtering is not implemented in this packet. The field is
+preserved in full returned records. There is no harness candidate index; adding
+a nested-map post-filter would expand the common scan projection (see
+`futon1b_evidence.clj` filter-cols cost note) and needs a separate bounded-query
+cost check. Do not rely on an unsupported query parameter to narrow results.
