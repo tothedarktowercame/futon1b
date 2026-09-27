@@ -149,8 +149,31 @@
   (let [specs (temporal-specs-for q)]
     [(mapv second specs) (mapv #(get q (first %)) specs)]))
 
+;; `_id IN (?, ...)` does not use XTDB's id index: it scans the table at every
+;; list size, while `_id = ?` is a point read. Measured 2026-09-27 in the
+;; serving JVM (:6769, evidence 331,225 rows): one id by IN 2,101 ms, by
+;; equality 17 ms (105 ms for SELECT *). The same finding for entities is
+;; TN-entities-speedups-2026-09-26.md §1 and fxt/equality-hydrate-max-ids;
+;; every evidence hydration paid the scan, so a limit=1 read cost two scans.
+(defn- rows-by-ids
+  "Rows of SELECT-SQL (a `SELECT ... FROM evidence [FOR ...]` prefix, with
+  PREFIX-ARGS for its placeholders) whose _id is in IDS, in no defined order.
+  Up to fxt/equality-hydrate-max-ids ids, one `_id = ?` statement per id;
+  above it, one `_id IN` statement."
+  [node select-sql prefix-args ids]
+  (if (<= (count ids) fxt/equality-hydrate-max-ids)
+    (into [] (mapcat #(fxt/timed-q node (conj (into [(str select-sql " WHERE _id = ?")]
+                                                    prefix-args)
+                                              %)))
+          ids)
+    (fxt/timed-q node (into (into [(str select-sql " WHERE _id IN ("
+                                        (str/join "," (repeat (count ids) "?"))
+                                        ")")]
+                                  prefix-args)
+                            ids))))
+
 (defn- hydrate-projected
-  "Hydrate a bounded projected page in one parameterised SQL membership query.
+  "Hydrate a bounded projected page by id (see rows-by-ids).
 
   XTDB 2.1 has no working XTQL list-membership predicate. A variadic XTQL `or`
   also compiles into an oversized JVM method at realistic page sizes. The SQL
@@ -162,12 +185,12 @@
    (if-not (seq projected)
      []
      (let [ids (mapv :xt/id projected)
-           placeholders (str/join "," (repeat (count ids) "?"))
            specs (temporal-specs-for q)
-           sql (str "SELECT * FROM evidence" (apply str (map #(nth % 3) specs))
-                    " WHERE _id IN (" placeholders ")")
-           temporal-args (mapv #(get q (first %)) specs)
-           docs (fxt/timed-q node (into (into [sql] temporal-args) ids))
+           docs (rows-by-ids node
+                             (str "SELECT * FROM evidence"
+                                  (apply str (map #(nth % 3) specs)))
+                             (mapv #(get q (first %)) specs)
+                             ids)
            by-id (into {} (map (juxt :xt/id identity)) docs)]
        (into [] (keep #(get by-id (:xt/id %))) projected)))))
 
@@ -390,15 +413,16 @@
   (str "\"" (namespace sym) "$" (str/replace (name sym) "-" "_") "\""))
 
 (defn- projected-by-ids
-  "The store's projected rows for IDS (SQL IN, as hydrate-projected)."
+  "The store's projected rows for IDS (by id, as hydrate-projected)."
   [node ids cols]
   (if-not (seq ids)
     []
-    (let [sql (str "SELECT _id, "
-                   (str/join ", " (map sql-col (remove #{'xt/id} cols)))
-                   " FROM evidence WHERE _id IN ("
-                   (str/join "," (repeat (count ids) "?")) ")")]
-      (fxt/timed-q node (into [sql] ids)))))
+    (rows-by-ids node
+                 (str "SELECT _id, "
+                      (str/join ", " (map sql-col (remove #{'xt/id} cols)))
+                      " FROM evidence")
+                 []
+                 ids)))
 
 (defn- pushdown-match?
   "The Clojure image of `filter-param-specs` for rows that did not come
