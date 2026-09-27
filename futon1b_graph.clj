@@ -1447,31 +1447,37 @@
   (get-in @!hyperedge-query-cache [:entries cache-key]))
 
 (defn- cache-put!
-  [cache-key result]
+  [cache-key result generation]
   (swap! !hyperedge-query-cache
-         (fn [{:keys [entries insertion-order]}]
-           (let [new-key? (not (contains? entries cache-key))
-                 order (cond-> insertion-order new-key? (conj cache-key))
-                 entries (assoc entries cache-key result)
-                 overflow (max 0 (- (count order)
-                                    max-hyperedge-query-cache-entries))
-                 evicted (take overflow order)]
-             {:entries (apply dissoc entries evicted)
-              :insertion-order (vec (drop overflow order))}))))
+         (fn [{:keys [entries insertion-order] :as state}]
+           ;; A query begun before invalidation may finish afterwards. It may
+           ;; return its snapshot to that caller, but must not cache it for a
+           ;; subsequent read after the write has completed.
+           (if (not= generation (:generation state))
+             state
+             (let [new-key? (not (contains? entries cache-key))
+                   order (cond-> insertion-order new-key? (conj cache-key))
+                   entries (assoc entries cache-key result)
+                   overflow (max 0 (- (count order) max-hyperedge-query-cache-entries))
+                   evicted (take overflow order)]
+               (assoc state :entries (apply dissoc entries evicted)
+                      :insertion-order (vec (drop overflow order))))))))
 
 (defn invalidate-hyperedge-query-cache!
   "Invalidate materialized bounded query windows after a hyperedge mutation.
   With a type, retain windows for every other normalized hyperedge type. The
   zero-arity form remains a full safety/test flush."
   ([]
-   (reset! !hyperedge-query-cache {:entries {} :insertion-order []})
+   (swap! !hyperedge-query-cache
+          #(assoc % :entries {} :insertion-order [] :generation (inc (or (:generation %) 0))))
    nil)
   ([type]
    (let [t (normalize-type type)]
      (swap! !hyperedge-query-cache
-            (fn [{:keys [entries insertion-order]}]
+            (fn [{:keys [entries insertion-order generation]}]
               (let [keep-key? (fn [[_ opts]] (not= t (:type opts)))]
-                {:entries (into {} (filter (comp keep-key? key)) entries)
+                {:generation (inc (or generation 0))
+                 :entries (into {} (filter (comp keep-key? key)) entries)
                  :insertion-order (filterv keep-key? insertion-order)}))))
    nil))
 
@@ -1492,8 +1498,9 @@
        (hyperedges-query-uncached node opts query-fn)
        (if-let [cached (cache-entry cache-key)]
          cached
-         (let [result (hyperedges-query-uncached node opts query-fn)]
-           (cache-put! cache-key result)
+         (let [generation (:generation @!hyperedge-query-cache)
+               result (hyperedges-query-uncached node opts query-fn)]
+           (cache-put! cache-key result generation)
            result))))))
 
 (def ^:private max-memory-projection-endpoints 20)

@@ -64,6 +64,8 @@
 
 ;; ---------------------------------------------------------------------------
 ;; Hyperedge write path.
+;; Await each sidecar hook before success, then invalidate cached windows.
+;; Hook failures remain recorded by hxindex, whose read gate falls back to XTDB.
 ;; ---------------------------------------------------------------------------
 
 (defn stable-hyperedge-id
@@ -144,8 +146,8 @@
                                             valid-from
                                             (assoc :valid-from valid-from))
                                           id]])
+                    (when-let [indexed (hx/on-delete! id)] @indexed)
                     (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
-                    (hx/on-delete! id)
                     (when (= :memory/assert (:hx/type doc))
                       (graph/refresh-memory-projection-component! node id))
                     {:ok true :hx/id id :retracted? true})
@@ -173,14 +175,18 @@
                       (when stored
                         (into {} (filter (comp some? val)) stored))]
                   (if (and (nil? valid-from) (= doc-cmp stored-cmp))
-                    {:ok true :hx/id id :no-op? true}
+                    (do
+                      ;; A concurrent identical put may still be indexing.
+                      (when-let [indexed (hx/on-put! doc)] @indexed)
+                      (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
+                      {:ok true :hx/id id :no-op? true})
                     (let [res
                           (ingest/put-doc-with-rescue!
                            node :hyperedges doc graph/!shape-log valid-from)]
                       (if (present? node id)
                         (do
+                          (when-let [indexed (hx/on-put! doc)] @indexed)
                           (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
-                          (hx/on-put! doc)
                           (when (= :memory/assert (:hx/type doc))
                             (graph/refresh-memory-projection-component! node id))
                           {:ok true :hx/id id
@@ -240,8 +246,8 @@
                   (throw (gates/layered-error
                           0 :postcommit-missing-act
                           {:hx/id id :message "act/receipt transaction failed read-back verification"})))
+                (when-let [indexed (hx/on-put! doc)] @indexed)
                 (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
-                (hx/on-put! doc)
                 (when (= :memory/assert (:hx/type doc))
                   (graph/refresh-memory-projection-component! node id))
                 {:ok true :hx/id id :minted? true}))))]
@@ -346,7 +352,7 @@
                         0 :postcommit-missing-memory-assert
                         {:missing missing})))
               (text/on-append! doc)
-              (hx/on-put! hyperedge-doc)
+              (when-let [indexed (hx/on-put! hyperedge-doc)] @indexed)
               (graph/invalidate-hyperedge-query-cache! (:hx/type hyperedge-doc))
               (graph/refresh-memory-projection-component-from-docs!
                node hyperedge-doc doc)
