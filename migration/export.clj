@@ -28,9 +28,12 @@
 ;; This allows incremental re-runs (re-export only failed populations).
 ;;
 ;; Run: clojure -M:node -m migration.export --output-dir <dir> [--base-url URL]
+;;        [--populations type-catalog,graph,evidence-scope] [--snapshot-timeout-ms MS]
+;;      (--populations evidence-scope is the quiet-window runbook's evidence leg.)
 (ns migration.export
   (:require [clojure.edn :as edn]
-            [clojure.java.io :as io])
+            [clojure.java.io :as io]
+            [clojure.string :as str])
   (:import [java.io PushbackReader File]
            [java.net URL HttpURLConnection]
            [java.nio.charset StandardCharsets])
@@ -461,41 +464,62 @@
 ;; Export orchestrator.
 ;; ---------------------------------------------------------------------------
 
+(def default-populations
+  "What a plain `-m migration.export` exports, in order."
+  [:type-catalog :graph :evidence :hyperedges])
+
+(defn- population-exporters
+  "Population -> export fn of [base-url output-dir]. `:evidence-scope` is the
+  runbook's evidence leg (snapshot scope \"evidence\": captures sessionless
+  evidence, duplicate-free by id-drain); `:evidence` is the session-scoped path."
+  [snapshot-timeout-ms]
+  {:type-catalog   export-type-catalog
+   :graph          export-graph-snapshot
+   :evidence       export-evidence
+   :evidence-scope (fn [base-url output-dir]
+                     (export-via-snapshot base-url output-dir "evidence" "evidence.edn"
+                                          snapshot-timeout-ms))
+   :hyperedges     (fn [base-url output-dir]
+                     (export-via-snapshot base-url output-dir "hyperedges" "hyperedges.edn"
+                                          snapshot-timeout-ms))})
+
 (defn export-all
-  "Export all document populations from the live store.
+  "Export document populations from the live store (all of
+  `default-populations` unless `:populations` names others).
   Returns a summary map."
-  [base-url output-dir]
-  (.mkdirs (File. output-dir))
-  (println "=== Full-store export from" base-url "===")
-  (println "Output dir:" output-dir)
-  (println)
-  (let [start (System/currentTimeMillis)
-        results (atom {})]
-    ;; Export each population, catching failures so partial exports work.
-    ;; Hyperedges + graph use the server-side snapshot (open-q id-iteration),
-    ;; NOT the census path — see export-via-snapshot. Run graph first (works
-    ;; under load); hyperedges needs a quiet serving JVM.
-    (doseq [[label export-fn]
-            [[:type-catalog export-type-catalog]
-             [:graph        export-graph-snapshot]
-             [:evidence     export-evidence]
-             [:hyperedges   export-hyperedges-snapshot]]]
-      (try
-        (let [result (export-fn base-url output-dir)]
-          (swap! results assoc label result))
-        (catch Exception e
-          (println (format "FAIL [%s]: %s" (name label) (.getMessage e)))
-          (swap! results assoc label {:error (.getMessage e)}))))
-    (let [elapsed (- (System/currentTimeMillis) start)
-          summary {:base-url base-url
-                   :output-dir output-dir
-                   :results @results
-                   :sanitize-log @!sanitize-log
-                   :elapsed-ms elapsed}]
-      (write-edn-file (str output-dir "/export-summary.edn") summary)
-      (println)
-      (println (format "=== Export complete in %.1fs ===" (/ elapsed 1000.0)))
-      summary)))
+  ([base-url output-dir] (export-all base-url output-dir {}))
+  ([base-url output-dir {:keys [populations snapshot-timeout-ms]
+                         :or {populations default-populations
+                              snapshot-timeout-ms 600000}}]
+   (.mkdirs (File. output-dir))
+   (println "=== Full-store export from" base-url "===")
+   (println "Output dir:" output-dir)
+   (println "Populations:" (pr-str populations))
+   (println)
+   (let [start (System/currentTimeMillis)
+         results (atom {})
+         exporters (population-exporters snapshot-timeout-ms)]
+     ;; Export each population, catching failures so partial exports work.
+     ;; Hyperedges + graph use the server-side snapshot (open-q id-iteration),
+     ;; NOT the census path — see export-via-snapshot. Run graph first (works
+     ;; under load); hyperedges needs a quiet serving JVM.
+     (doseq [[label export-fn] (map (juxt identity exporters) populations)]
+       (try
+         (let [result (export-fn base-url output-dir)]
+           (swap! results assoc label result))
+         (catch Exception e
+           (println (format "FAIL [%s]: %s" (name label) (.getMessage e)))
+           (swap! results assoc label {:error (.getMessage e)}))))
+     (let [elapsed (- (System/currentTimeMillis) start)
+           summary {:base-url base-url
+                    :output-dir output-dir
+                    :results @results
+                    :sanitize-log @!sanitize-log
+                    :elapsed-ms elapsed}]
+       (write-edn-file (str output-dir "/export-summary.edn") summary)
+       (println)
+       (println (format "=== Export complete in %.1fs ===" (/ elapsed 1000.0)))
+       summary))))
 
 ;; ---------------------------------------------------------------------------
 ;; CLI.
@@ -509,12 +533,23 @@
       (case (first args)
         "--base-url"  (recur (nnext args) (assoc opts :base-url (second args)))
         "--output-dir" (recur (nnext args) (assoc opts :output-dir (second args)))
+        "--populations" (recur (nnext args)
+                               (assoc opts :populations
+                                      (mapv keyword (str/split (second args) #","))))
+        "--snapshot-timeout-ms" (recur (nnext args)
+                                       (assoc opts :snapshot-timeout-ms (Long/parseLong (second args))))
         "--help" (do (println "Usage: clojure -M:node -m migration.export"
-                              "[--base-url URL] [--output-dir DIR]")
+                              "[--base-url URL] [--output-dir DIR]"
+                              "[--populations P1,P2,...] [--snapshot-timeout-ms MS]")
+                     (println "  populations:" (str/join "," (map name (keys (population-exporters 0))))
+                              "(default" (str (str/join "," (map name default-populations)) ")"))
                      (System/exit 0))
         (throw (ex-info (str "Unknown arg: " (first args)) {:args args}))))))
 
 (defn -main [& args]
-  (let [{:keys [base-url output-dir]} (parse-args args)]
-    (export-all base-url output-dir)
+  (let [{:keys [base-url output-dir populations] :as opts} (parse-args args)
+        unknown (remove (set (keys (population-exporters 0))) populations)]
+    (when (seq unknown)
+      (throw (ex-info (str "Unknown population(s): " (str/join "," (map name unknown))) {:populations populations})))
+    (export-all base-url output-dir (select-keys opts [:populations :snapshot-timeout-ms]))
     (shutdown-agents)))

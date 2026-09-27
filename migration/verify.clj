@@ -63,13 +63,22 @@
   (fn [a b] (compare (stable-str a) (stable-str b))))
 
 (defn- fold-key
-  "XTDB 2 case-folds struct field names (SQL column normalization): a nested
-  map key :G is stored and returned as :g (verified live on the
-  e-portfolio-* evidence bodies, 2026-07-10). Key CASE is therefore not a
-  preserved property of the store; canonicalize folds both sides to match."
+  "XTDB 2 normalizes struct field NAMES (SQL column normalization): it
+  lower-cases them (:G stored/returned as :g, verified on e-portfolio-* bodies
+  2026-07-10) AND returns underscores as hyphens (:verdict_hint as
+  :verdict-hint). The underscore fold was verified 2026-09-26 by direct
+  read-back of evidence body e-00005cc7…'s :ingress/candidate: its keys
+  :verdict_hint/:target_agent/:missing_required/:derived_fields all came back
+  hyphenated with values intact, while string VALUES (e.g. \"target_agent\")
+  were untouched — only KEY names fold. Neither key case nor _ vs - is a
+  preserved property of the store, so canonicalize folds both sides to match.
+  (The store literally cannot distinguish :a_b from :a-b, so this reflects its
+  real behavior — it is not a loosening of the comparison.)"
   [k]
   (if (keyword? k)
-    (keyword (namespace k) (clojure.string/lower-case (name k)))
+    (keyword (namespace k) (-> (name k)
+                               clojure.string/lower-case
+                               (clojure.string/replace "_" "-")))
     k))
 
 (defn canonicalize
