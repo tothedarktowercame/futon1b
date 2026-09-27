@@ -13,6 +13,7 @@
             [migration.transform :as xf]
             [migration.ingest :as ingest]
             [futon1b-xt :as fxt]
+            [futon1b-gates :as gates]
             [futon1b-text :as text]))
 
 ;; ---------------------------------------------------------------------------
@@ -102,6 +103,31 @@
   [node projected]
   (keep #(fetch-by-id node (:xt/id %)) projected))
 
+(def ^:private temporal-specs
+  [[:valid-as-of 'p-valid-as-of :for-valid-time " FOR VALID_TIME AS OF ?"]
+   [:system-as-of 'p-system-as-of :for-system-time " FOR SYSTEM_TIME AS OF ?"]])
+
+(defn- temporal-specs-for [q]
+  (filterv #(some? (get q (first %))) temporal-specs))
+
+(defn- temporal? [q]
+  (boolean (seq (temporal-specs-for q))))
+
+(defn- evidence-from
+  "Parameterised temporal FROM; preserve the existing current-time shape."
+  [cols q]
+  (let [specs (temporal-specs-for q)]
+    (list 'from :evidence
+          (if (seq specs)
+            (reduce (fn [opts [_ param axis]]
+                      (assoc opts axis (list 'at param)))
+                    {:bind cols} specs)
+            cols))))
+
+(defn- temporal-params [q]
+  (let [specs (temporal-specs-for q)]
+    [(mapv second specs) (mapv #(get q (first %)) specs)]))
+
 (defn- hydrate-projected
   "Hydrate a bounded projected page in one parameterised SQL membership query.
 
@@ -110,15 +136,19 @@
   surface supports `IN` natively, so the selected ids remain parameters rather
   than generated query code. Restore projected order after hydration because
   SQL `IN` does not define row order. The HTTP limit caps this at 1,000 ids."
-  [node projected]
-  (if-not (seq projected)
-    []
-    (let [ids (mapv :xt/id projected)
-          placeholders (str/join "," (repeat (count ids) "?"))
-          sql (str "SELECT * FROM evidence WHERE _id IN (" placeholders ")")
-          docs (fxt/timed-q node (into [sql] ids))
-          by-id (into {} (map (juxt :xt/id identity)) docs)]
-      (into [] (keep #(get by-id (:xt/id %))) projected))))
+  ([node projected] (hydrate-projected node projected {}))
+  ([node projected q]
+   (if-not (seq projected)
+     []
+     (let [ids (mapv :xt/id projected)
+           placeholders (str/join "," (repeat (count ids) "?"))
+           specs (temporal-specs-for q)
+           sql (str "SELECT * FROM evidence" (apply str (map #(nth % 3) specs))
+                    " WHERE _id IN (" placeholders ")")
+           temporal-args (mapv #(get q (first %)) specs)
+           docs (fxt/timed-q node (into (into [sql] temporal-args) ids))
+           by-id (into {} (map (juxt :xt/id identity)) docs)]
+       (into [] (keep #(get by-id (:xt/id %))) projected)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Write path: append-only, duplicate-id 409, transform + rescue + verify.
@@ -229,10 +259,13 @@
   down to XTQL as parameters. cols = '[*] for full docs, filter-cols for
   cheap scans. Deadlined (E-futon1b-gc-wedge)."
   [node q cols]
-  (let [[params args clauses] (pushdown-params q)
+  (let [[f-params f-args clauses] (pushdown-params q)
+        [t-params t-args] (temporal-params q)
+        params (into f-params t-params)
+        args (into f-args t-args)
         body (if (seq clauses)
-               (list '-> (list 'from :evidence cols) (cons 'where clauses))
-               (list 'from :evidence cols))]
+               (list '-> (evidence-from cols q) (cons 'where clauses))
+               (evidence-from cols q))]
     (fxt/timed-q node (into [(list 'fn params body)] args))))
 
 (def ^:private scalar-filter-cols
@@ -247,15 +280,16 @@
   Global top-K selection happens while reducing these rows, before pagination."
   [q cursor cols]
   (let [[f-params f-args f-clauses] (pushdown-params q)
-        params (into f-params (if cursor '[p-cursor-at p-cursor-id] []))
-        args (into f-args (if cursor (vec cursor) []))
+        [t-params t-args] (temporal-params q)
+        params (into (into f-params t-params) (if cursor '[p-cursor-at p-cursor-id] []))
+        args (into (into f-args t-args) (if cursor (vec cursor) []))
         clauses (cond-> f-clauses
                   cursor (conj (list 'or
                                      (list '< 'evidence/at 'p-cursor-at)
                                      (list 'and
                                            (list '= 'evidence/at 'p-cursor-at)
                                            (list '< 'xt/id 'p-cursor-id)))))
-        source (list 'from :evidence cols)
+        source (evidence-from cols q)
         body (if (seq clauses)
                (list '-> source (cons 'where clauses))
                source)]
@@ -413,7 +447,7 @@
               (let [full? (>= (count selected') want)]
                 ;; full? implies selected' is non-empty, since want > 0 here.
                 {:entries (into (:entries tail)
-                                (map public-doc (hydrate-projected node selected')))
+                                (map public-doc (hydrate-projected node selected' q)))
                  :next-cursor (when full? (row-cursor (peek selected')))
                  :scanned (+ (:scanned tail) checked')})
               (let [lst (peek cands)]
@@ -466,14 +500,14 @@
           (>= (count selected') limit)
           (let [window (vec (take limit selected'))
                 next-cursor (some-> window peek row-cursor)]
-            {:entries (mapv public-doc (hydrate-projected node window))
+            {:entries (mapv public-doc (hydrate-projected node window q))
              ;; A full page may end exactly at EOF. Returning its cursor is safe:
              ;; the next request proves exhaustion with an empty page.
              :next-cursor next-cursor
              :scanned scanned'})
 
           (< (count page) page-size)
-          {:entries (mapv public-doc (hydrate-projected node selected'))
+          {:entries (mapv public-doc (hydrate-projected node selected' q))
            :next-cursor nil
            :scanned scanned'}
 
@@ -483,7 +517,7 @@
               (throw (ex-info "Evidence keyset scan made no progress"
                               {:cursor cursor :limit limit})))
             (if (>= scanned' max-scanned-rows-per-request)
-              {:entries (mapv public-doc (hydrate-projected node selected'))
+              {:entries (mapv public-doc (hydrate-projected node selected' q))
                :next-cursor next-cursor
                :scanned scanned'
                :incomplete true}
@@ -492,7 +526,10 @@
 ;; tag-window falls back to scan-window when there is no sidecar checkpoint.
 (defn- bounded-window
   [node q limit initial-cursor]
-  (or (when (seq (:tags q)) (tag-window node q limit initial-cursor))
+  ;; The sidecar has no temporal history. Historical candidate membership must
+  ;; come from XTDB, not from today's tag list (which could omit old members).
+  (or (when (and (not (temporal? q)) (seq (:tags q)))
+        (tag-window node q limit initial-cursor))
       (scan-window node q limit initial-cursor)))
 
 (defn- name-of [x]
@@ -525,10 +562,24 @@
     (or subject-type subject-id) (filter #(subject-match? % subject-type subject-id))
     pattern-id (filter #(= pattern-id (normalize-type (:evidence/pattern-id %))))))
 
+(defn- parse-temporal-params
+  [p]
+  (reduce (fn [q [key]]
+            (if-let [value (p (name key))]
+              (assoc q key
+                     (try (java.time.Instant/parse value)
+                          (catch java.time.format.DateTimeParseException _
+                            (throw (gates/layered-error
+                                    4 :invalid-temporal-instant
+                                    {:parameter (name key) :value value
+                                     :message (str (name key) " must be an ISO-8601 instant")})))))
+              q))
+          {} temporal-specs))
+
 (defn- parse-query-params
   "String HTTP params (contract §3) → typed filter map."
   [p]
-  (cond-> {}
+  (cond-> (parse-temporal-params p)
     (p "type") (assoc :type (normalize-type (p "type")))
     (p "claim-type") (assoc :claim-type (normalize-type (p "claim-type")))
     (p "author") (assoc :author (p "author"))
@@ -552,34 +603,43 @@
 
   Missing limit uses DEFAULT-PAGE-SIZE. Invalid, non-positive, and oversized
   limits are rejected rather than selecting an unbounded realization path.
-  Continue with the returned :next-cursor map as cursor-at/cursor-id."
+  Continue with the returned :next-cursor map as cursor-at/cursor-id, retaining
+  the same temporal parameters. system-as-of selects XTDB knowledge at T;
+  valid-as-of selects XTDB validity at T. The public writer sets neither time,
+  so validity starts at insertion, NOT at the separate :evidence/at event time.
+  Omitted axes retain XTDB defaults (current time). Malformed instants are 400."
   [node http-params]
-  (let [raw-limit (http-params "limit")
-        parsed-limit (if raw-limit
-                       (try (Long/parseLong raw-limit)
-                            (catch Exception _ ::invalid))
-                       default-page-size)]
-    (if (or (= ::invalid parsed-limit)
-            (not (pos-int? parsed-limit))
-            (> parsed-limit max-page-size))
-      [400 {:ok false
-            :error "limit must be an integer between 1 and 1000"
-            :limit/max max-page-size}]
-      (let [q (parse-query-params http-params)
-            {:keys [entries next-cursor scanned incomplete]}
-            (bounded-window node q parsed-limit (:cursor q))]
-        [200 (cond-> {:entries entries
-                      :count (count entries)
-                      :limit parsed-limit
-                      :scanned scanned}
-               next-cursor
-               (assoc :next-cursor {:at (first next-cursor)
-                                    :id (second next-cursor)})
-               ;; Scan ceiling hit before LIMIT matches: fewer entries than
-               ;; requested does NOT mean end of corpus — continue from cursor.
-               incomplete
-               (assoc :incomplete true
-                      :scan/max max-scanned-rows-per-request))]))))
+  (try
+    (let [raw-limit (http-params "limit")
+          parsed-limit (if raw-limit
+                         (try (Long/parseLong raw-limit)
+                              (catch Exception _ ::invalid))
+                         default-page-size)]
+      (if (or (= ::invalid parsed-limit)
+              (not (pos-int? parsed-limit))
+              (> parsed-limit max-page-size))
+        [400 {:ok false
+              :error "limit must be an integer between 1 and 1000"
+              :limit/max max-page-size}]
+        (let [q (parse-query-params http-params)
+              {:keys [entries next-cursor scanned incomplete]}
+              (bounded-window node q parsed-limit (:cursor q))]
+          [200 (cond-> {:entries entries
+                        :count (count entries)
+                        :limit parsed-limit
+                        :scanned scanned}
+                 next-cursor
+                 (assoc :next-cursor {:at (first next-cursor)
+                                      :id (second next-cursor)})
+                 ;; Scan ceiling hit before LIMIT matches: fewer entries than
+                 ;; requested does NOT mean end of corpus — continue from cursor.
+                 incomplete
+                 (assoc :incomplete true
+                        :scan/max max-scanned-rows-per-request))])))
+    (catch clojure.lang.ExceptionInfo error
+      (if (= :invalid-temporal-instant (get-in (ex-data error) [:error :reason]))
+        (gates/error->response error)
+        (throw error)))))
 
 (defn query-evidence
   "Compatibility helper for in-process callers; returns the validated body."
@@ -591,7 +651,7 @@
   Projected scan — never materializes full docs."
   [node http-params]
   (let [q (dissoc (parse-query-params http-params) :limit)]
-    {:count (or (when (seq (:tags q)) (tag-count node q))
+    {:count (or (when (and (not (temporal? q)) (seq (:tags q))) (tag-count node q))
                 (count (apply-post-filters (fetch-filtered node q filter-cols) q)))}))
 
 ;; ---------------------------------------------------------------------------

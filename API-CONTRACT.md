@@ -214,6 +214,34 @@ URL-decoded here).
   `before` + `include-ephemeral` (the futon3c EvidenceBackend protocol grew
   them 2026-07-10) — flagged as a deliberate contract extension.
 
+#### Futon1b temporal evidence extension (P6, 2026-09-27)
+
+`GET /api/alpha/evidence` and `/api/alpha/evidence/count` accept:
+
+- `system-as-of=T`: select evidence as known to XTDB at system time T.
+- `valid-as-of=T`: select evidence valid at XTDB valid time T.
+- Both may be supplied; each constrains its own axis. An omitted axis keeps
+  XTDB's current-time default. With neither, existing behaviour is unchanged.
+- Values must be ISO-8601 instants with a UTC offset (e.g.
+  `2026-09-24T17:00:00Z`). Invalid or empty values return **400**, with
+  `:error :reason :invalid-temporal-instant` and `:context` naming the
+  parameter, value and an explanatory message. They are never ignored.
+
+The public evidence writer calls `put-doc-with-rescue!` without `valid-from`,
+so XTDB valid time starts at insertion/system time. `:evidence/at` is a
+separate caller-supplied event timestamp: backdating it does **not** backdate
+XTDB validity. `since`/`before` still compare that event-time string; they do
+not substitute for either as-of parameter. Data inserted with explicit
+valid-from through other XTDB ingestion paths is read on its actual valid axis.
+
+Selection, pagination and full-body hydration use the same supplied temporal
+basis. Retain both as-of parameters when following `next-cursor`. Temporal tag
+queries use the authoritative XTDB scan because the tag sidecar stores only
+current membership; current queries continue using the sidecar. Existing page,
+scan and deadline bounds still apply. These parameters are supported on the
+list and count routes only; point, chain, sessions and text-search reads are
+not temporal APIs.
+
 #### Futon1b bounded-page extension (2026-07-22)
 
 Futon1b deliberately does not preserve futon1a's unsafe unbounded realization
