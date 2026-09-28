@@ -190,11 +190,16 @@
      []
      (let [ids (mapv :xt/id projected)
            specs (temporal-specs-for q)
-           docs (rows-by-ids node
-                             (str "SELECT * FROM evidence"
-                                  (apply str (map #(nth % 3) specs)))
-                             (mapv #(get q (first %)) specs)
-                             ids)
+           ;; The doc cache holds current rows only; as-of reads use the store.
+           cached (if (seq specs) {} (text/cached-docs ids))
+           misses (vec (remove #(contains? cached (str %)) ids))
+           docs (into (vec (vals cached))
+                      (when (seq misses)
+                        (rows-by-ids node
+                                     (str "SELECT * FROM evidence"
+                                          (apply str (map #(nth % 3) specs)))
+                                     (mapv #(get q (first %)) specs)
+                                     misses)))
            by-id (into {} (map (juxt :xt/id identity)) docs)]
        (into [] (keep #(get by-id (:xt/id %))) projected)))))
 
@@ -417,16 +422,22 @@
   (str "\"" (namespace sym) "$" (str/replace (name sym) "-" "_") "\""))
 
 (defn- projected-by-ids
-  "The store's projected rows for IDS (by id, as hydrate-projected)."
+  "The store's projected rows for IDS (by id, as hydrate-projected). Rows the
+  sidecar's doc cache holds come from there (the full stored row, a superset
+  of COLS); only the rest are read from the store."
   [node ids cols]
   (if-not (seq ids)
     []
-    (rows-by-ids node
-                 (str "SELECT _id, "
-                      (str/join ", " (map sql-col (remove #{'xt/id} cols)))
-                      " FROM evidence")
-                 []
-                 ids)))
+    (let [cached (text/cached-docs ids)
+          misses (vec (remove #(contains? cached (str %)) ids))]
+      (into (vec (vals cached))
+            (when (seq misses)
+              (rows-by-ids node
+                           (str "SELECT _id, "
+                                (str/join ", " (map sql-col (remove #{'xt/id} cols)))
+                                " FROM evidence")
+                           []
+                           misses))))))
 
 (defn- pushdown-match?
   "The Clojure image of `filter-param-specs` for rows that did not come
@@ -594,6 +605,13 @@
   (let [ids (mapv #(str (:id %)) cands)
         cached (text/cached-docs ids)
         misses (vec (remove #(contains? cached %) ids))
+        _ (when (> (count misses) fxt/equality-hydrate-max-ids)
+            ;; More misses than point reads can cover means one `IN` read of
+            ;; every row with its body. On 2026-09-28 clock-decision restores
+            ;; took waves of 90-1000 such reads each and held query permits
+            ;; for over ten minutes. index-window falls back instead.
+            (throw (ex-info "doc cache misses exceed point-read budget"
+                            {::cache-misses (count misses)})))
         by-id (into cached
                     (map (juxt #(str (:xt/id %)) identity))
                     (when (seq misses)
@@ -609,7 +627,8 @@
   (when (and (not (temporal? q))
              (nil? (:fork-of q))
              (text/complete?))
-    (loop [cursor initial-cursor
+    (try
+     (loop [cursor initial-cursor
            selected []
            checked 0]
       (let [remaining (- limit (count selected))
@@ -627,7 +646,11 @@
                           (row-cursor (peek selected')))
            :scanned checked'}
           (let [lst (peek cands)]
-            (recur [(:at lst) (:id lst)] selected' checked')))))))
+            (recur [(:at lst) (:id lst)] selected' checked')))))
+     (catch clojure.lang.ExceptionInfo e
+       (if (::cache-misses (ex-data e))
+         nil
+         (throw e))))))
 
 ;; index-window first; tag-window falls back to scan-window when there is no
 ;; sidecar checkpoint.
