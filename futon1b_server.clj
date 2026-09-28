@@ -198,6 +198,79 @@
         (graph/with-memory-projection-mutation node mutate!)
         (mutate!)))))
 
+;; Batch hyperedge write (2026-09-28). The multi-watcher's commit-ingest
+;; posts a code/v05/var and a code/v05/edits hyperedge per changed var per
+;; commit, each its own request, XTDB transaction and hx index wait: ~10/s
+;; while it caught up on a 45-minute backlog. Those writes carry a
+;; valid-time, for which upsert-derived-hyperedge! does no no-op read, so a
+;; batch of them is one transaction and one index update. Anything else
+;; (retract, mint, no valid-time, :memory/assert) takes the single-write path
+;; item by item, unchanged.
+(def ^:private hyperedge-batch-max 500)
+
+(defn- batchable-hyperedge? [payload]
+  (and (not (contains? payload :hx/mint-id))
+       (not (contains? payload :hx/idempotency-key))
+       (not= "retract" (some-> (or (:hx/op payload) (:op payload)) name str/lower-case))
+       (some? (or (:hx/valid-time payload) (:valid-time payload)))))
+
+(declare upsert-hyperedge!)
+
+(defn write-hyperedges-batch!
+  "Write PAYLOADS (single-route hyperedge payloads) and return one result per
+  payload, in order, each as the single route would return it. Batchable
+  puts share one XTDB transaction and one hx index update; if that
+  transaction fails, each is retried alone through the single-write path
+  (and its rescue ladder)."
+  [node payloads]
+  (when (> (count payloads) hyperedge-batch-max)
+    (throw (gates/layered-error 4 :batch-too-large
+                                {:max hyperedge-batch-max :count (count payloads)})))
+  (let [write-one (fn [p]
+                 (try (upsert-hyperedge! node p)
+                      (catch Exception e
+                        {:ok false :error (.getMessage e)})))
+        prepared (mapv (fn [p]
+                         (if (batchable-hyperedge? p)
+                           (try
+                             (let [doc (xf/transform-doc (build-hyperedge-doc p)
+                                                         graph/!shape-log {:log-stringify? true})]
+                               (if (= :memory/assert (:hx/type doc))
+                                 {:single p}
+                                 {:doc doc
+                                  :valid-from (parse-instant (or (:hx/valid-time p) (:valid-time p)))
+                                  :payload p}))
+                             (catch Exception e
+                               {:result {:ok false :error (.getMessage e)}}))
+                           {:single p}))
+                       payloads)
+        batch (filterv :doc prepared)
+        committed? (when (seq batch)
+                     (try
+                       (xt/execute-tx node (mapv (fn [{:keys [doc valid-from]}]
+                                                   [:put-docs {:into :hyperedges :valid-from valid-from}
+                                                    doc])
+                                                 batch))
+                       true
+                       (catch Exception e
+                         (println (str "[hyperedges-batch] transaction failed for "
+                                       (count batch) " doc(s), retrying singly: "
+                                       (.getMessage e)))
+                         (flush)
+                         false)))]
+    (when committed?
+      (when-let [ds @text/!ds]
+        (hx/index-docs! ds (mapv :doc batch)))
+      (doseq [t (distinct (map (comp :hx/type :doc) batch))]
+        (graph/invalidate-hyperedge-query-cache! t)))
+    (mapv (fn [{:keys [doc payload single result]}]
+            (cond
+              result result
+              single (write-one single)
+              committed? {:ok true :hx/id (:xt/id doc)}
+              :else (write-one payload)))
+          prepared)))
+
 (defn- act-receipt [node key]
   (first (fxt/safe-q node (fxt/pq '[p-key]
                                  '(-> (from :hyperedge-act-keys [*])
@@ -915,6 +988,17 @@
       (respond! ex 200 (pr-str res)))
     (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
 
+(defn- hyperedges-batch-route [^HttpExchange ex]
+  (if (= "POST" (.getRequestMethod ex))
+    (let [payload (parse-payload ex)
+          _ (penholder! ex payload)
+          items (:hyperedges payload)]
+      (if-not (sequential? items)
+        (respond! ex 400 (pr-str {:ok false :error "body needs :hyperedges, a list of hyperedge payloads"}))
+        (let [results (write-hyperedges-batch! @!node (vec items))]
+          (respond! ex 200 (pr-str {:ok (every? :ok results) :results results})))))
+    (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
+
 (defn- relations-batch-route [^HttpExchange ex]
   (if (= "POST" (.getRequestMethod ex))
     (let [payload (parse-payload ex)
@@ -1394,6 +1478,7 @@
     (.createContext server "/api/alpha/relations" (handler relations-route))
     ;; longer prefix wins (see NB above): batch must out-rank /relations
     (.createContext server "/api/alpha/relations/batch" (handler relations-batch-route))
+    (.createContext server "/api/alpha/hyperedges/batch" (handler hyperedges-batch-route))
     (.createContext server "/api/alpha/graph/inhabited" (handler graph-inhabited-route))
     (.createContext server "/api/alpha/census" (handler census-route))
     ;; Registered through the VAR, not the fn value: createContext captures

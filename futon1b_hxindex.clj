@@ -198,6 +198,22 @@
                          id t])))
   (count (:hx/endpoints doc)))
 
+(defn index-docs!
+  "index-doc! for DOCS in one SQLite transaction (the hyperedge batch write)."
+  [ds docs]
+  (with-write-tx [tx ds]
+    (doseq [doc docs]
+      (let [id (str (:xt/id doc))
+            t (str (:hx/type doc))]
+        (jdbc/execute! tx ["DELETE FROM hx_edge WHERE hx_id = ?" id])
+        (doseq [[pos end] (map-indexed vector (:hx/endpoints doc))]
+          (jdbc/execute! tx ["INSERT INTO hx_edge(hx_id, type, pos, endpoint)
+                              VALUES (?,?,?,?)" id t pos (str end)]))
+        (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type) VALUES (?,?)
+                            ON CONFLICT(hx_id) DO UPDATE SET type=excluded.type"
+                           id t]))))
+  (count docs))
+
 (defn delete-id! [ds id]
   (with-write-tx [tx ds]
     (jdbc/execute! tx ["DELETE FROM hx_edge WHERE hx_id = ?" (str id)])
