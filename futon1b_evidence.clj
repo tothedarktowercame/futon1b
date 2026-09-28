@@ -768,7 +768,13 @@
              (text/complete?))
     (let [cands (text/attr-candidates q nil (inc index-count-max))]
       (when (<= (count cands) index-count-max)
-        (count (recheck-full node cands q))))))
+        ;; Rows the doc cache lacks would be read from the store with their
+        ;; bodies, all at once: up to index-count-max full rows in the heap.
+        ;; Only take that path when the misses are a handful of point reads.
+        (let [ids (mapv #(str (:id %)) cands)
+              cached (text/cached-docs ids)]
+          (when (<= (- (count ids) (count cached)) fxt/equality-hydrate-max-ids)
+            (count (recheck-full node cands q))))))))
 
 (defn count-evidence
   "GET /api/alpha/evidence/count → {:count n} (same filters, no limit).

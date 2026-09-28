@@ -425,8 +425,15 @@
       {})))
 
 (defn backfill-docs!
-  "Fill ev_doc for every store row it lacks, in one streaming store read
-  (~1,800 rows/s, 2026-09-27), flushing every 500 rows. Safe to repeat."
+  "Fill ev_doc for every store row it lacks, in one streaming store read,
+  flushing every 500 rows. Safe to repeat.
+
+  DO NOT RUN THIS AGAINST THE LIVE STORE. XTDB builds the whole result before
+  the stream yields a row: on 2026-09-28 00:07 it drove the serving heap to
+  4,092 of 4,096 MB, held a query permit for seven minutes, and every Agency
+  turn failed with \"futon1b read did not obtain evidence\" until the query
+  was cancelled through xtdb.pgwire. It is fine on test-sized stores; the live
+  backfill needs bounded windows."
   [node]
   (let [ds @!ds
         have (into #{} (map :id) (jdbc/execute! ds ["SELECT id FROM ev_doc"] unqualified))
