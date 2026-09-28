@@ -163,6 +163,24 @@
         (is (= (scan-path #(evidence/fetch-by-id node "fresh"))
                (get (text/cached-docs ["fresh"]) "fresh")))))
 
+    (testing "re-indexing replaces a doc's text row through ev_fts_map"
+      (let [q1 (fn [sql & args]
+                 (first (vals (jdbc/execute-one! @text/!ds (into [sql] args)))))
+            doc (first (map fixture-doc [5]))]
+        (is (= 1 (q1 "SELECT count(*) FROM ev_fts WHERE id = ?" "n-0005")))
+        (text/on-append! doc)
+        (text/on-append! doc)
+        (is (text/complete?))
+        (is (= 1 (q1 "SELECT count(*) FROM ev_fts WHERE id = ?" "n-0005")))
+        (is (= (q1 "SELECT rowid FROM ev_fts WHERE id = ?" "n-0005")
+               (q1 "SELECT fts_rowid FROM ev_fts_map WHERE id = ?" "n-0005")))
+        ;; A store created before the map: filled from ev_fts in one pass.
+        (jdbc/execute! @text/!ds ["DELETE FROM ev_fts_map"])
+        (jdbc/execute! @text/!ds ["DELETE FROM fts_meta WHERE k = 'fts-map'"])
+        (text/ensure-fts-map! @text/!ds)
+        (is (= (q1 "SELECT count(*) FROM ev_fts")
+               (q1 "SELECT count(*) FROM ev_fts_map")))))
+
     (testing "a failed append stops index reads until it is repaired"
       (let [good @text/!ds
             doc {:xt/id "failed" :evidence/id "failed" :evidence/at (at-hours 901)

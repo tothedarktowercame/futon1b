@@ -127,6 +127,12 @@
    ;; first within a session, and newest first overall.
    "CREATE INDEX IF NOT EXISTS ev_attr_session_at ON ev_attr(session, at);"
    "CREATE INDEX IF NOT EXISTS ev_attr_at ON ev_attr(at, id);"
+;; ev_fts rows by evidence id. FTS5 cannot index its `id` column, so
+   ;; `DELETE FROM ev_fts WHERE id = ?` scanned the whole table (0.6 s and
+   ;; up at 332k rows, 2026-09-28) inside the write lock, for every indexed
+   ;; doc. See ensure-fts-map!.
+   "CREATE TABLE IF NOT EXISTS ev_fts_map (id TEXT NOT NULL, fts_rowid INTEGER NOT NULL,
+      PRIMARY KEY (id, fts_rowid)) WITHOUT ROWID;"
    ;; The stored evidence row as XTDB returns it (SELECT *), transit-encoded.
    ;; See the doc cache section.
    "CREATE TABLE IF NOT EXISTS ev_doc (id TEXT PRIMARY KEY, doc BLOB NOT NULL);"
@@ -144,6 +150,16 @@
   (jdbc/execute! ds ["INSERT INTO fts_meta(k,v) VALUES(?,?)
                       ON CONFLICT(k) DO UPDATE SET v=excluded.v" k (str v)]))
 
+(defn ensure-fts-map!
+  "Fill ev_fts_map from ev_fts once (one scan), recorded in fts_meta. Until
+  it is filled, index-batch! deletes from ev_fts by scanning, as before."
+  [ds]
+  (when-not (= "complete" (meta-get ds "fts-map"))
+    (jdbc/with-transaction [tx ds]
+      (jdbc/execute! tx ["INSERT OR IGNORE INTO ev_fts_map(id, fts_rowid)
+                          SELECT id, rowid FROM ev_fts"])
+      (meta-set! tx "fts-map" "complete"))))
+
 (defn init!
   "Open (or create) the sidecar db beside the store. Idempotent."
   [{:keys [store-dir path]}]
@@ -153,6 +169,7 @@
         ds (jdbc/get-datasource {:dbtype "sqlite" :dbname file
                                  :busy_timeout 10000})]
     (doseq [stmt ddl] (jdbc/execute! ds [stmt]))
+    (ensure-fts-map! ds)
     (reset! !ds ds)
     (swap! !stats assoc :last-at (meta-get ds "last-at"))
     {:ok true :path file :last-at (meta-get ds "last-at")}))
@@ -220,7 +237,11 @@
     (doseq [d docs]
       (let [id (str (:xt/id d))
             subject (:evidence/subject d)]
-        (jdbc/execute! tx ["DELETE FROM ev_fts WHERE id = ?" id])
+        (if (= "complete" (meta-get tx "fts-map"))
+          (do (jdbc/execute! tx ["DELETE FROM ev_fts WHERE rowid IN
+                                    (SELECT fts_rowid FROM ev_fts_map WHERE id = ?)" id])
+              (jdbc/execute! tx ["DELETE FROM ev_fts_map WHERE id = ?" id]))
+          (jdbc/execute! tx ["DELETE FROM ev_fts WHERE id = ?" id]))
         (jdbc/execute! tx ["DELETE FROM ev_attr WHERE id = ?" id])
         (jdbc/execute! tx ["DELETE FROM ev_tags WHERE id = ?" id])
         (jdbc/execute! tx ["INSERT INTO ev_fts(id, author, at, session, body)
@@ -230,6 +251,7 @@
                            (str (:evidence/at d))
                            (some-> (:evidence/session-id d) str)
                            (body-text d)])
+        (jdbc/execute! tx ["INSERT INTO ev_fts_map(id, fts_rowid) VALUES (?, last_insert_rowid())" id])
         (jdbc/execute! tx ["INSERT INTO ev_attr(
                               id, type, claim_type, author, at, session,
                               subject_type, subject_id, pattern_id,
