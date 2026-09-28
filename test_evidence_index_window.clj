@@ -112,12 +112,31 @@
     ;; The index says n-0003 is in session s1; the store says s0.
     (jdbc/execute! @text/!ds ["UPDATE ev_attr SET session = 's1' WHERE id = 'n-0003'"])
 
+    (testing "backfill-docs! caches every stored row"
+      (is (= (inc n-docs) (:filled (text/backfill-docs! node))))
+      (is (zero? (:filled (text/backfill-docs! node))) "a repeat fills nothing"))
+    ;; Two cache misses: these must still come from the store.
+    (jdbc/execute! @text/!ds ["DELETE FROM ev_doc WHERE id IN ('n-0010', 'n-0301')"])
+
     (testing "each query returns the store scan's rows, in its order, across pages"
       (doseq [q queries
               limit [1 7]]
         (is (= (:ids (scan-path #(run-query node q limit)))
                (:ids (run-query node q limit)))
-            (pr-str q limit))))
+            (pr-str q limit)))
+      (doseq [q queries]
+        (is (= (:count (scan-path #(evidence/count-evidence node q)))
+               (:count (evidence/count-evidence node q)))
+            (str "count " (pr-str q)))))
+
+    (testing "cached rows are the stored rows"
+      (doseq [id ["n-0000" "n-0007" "n-0011" "lost" "n-0010"]]
+        (is (= (scan-path #(evidence/fetch-by-id node id))
+               (evidence/fetch-by-id node id))
+            id))
+      (is (= (dissoc (scan-path #(evidence/fetch-by-id node "n-0007")) :evidence/body)
+             (dissoc (get (text/cached-docs ["n-0007"]) "n-0007") :evidence/body)))
+      (is (not (contains? (text/cached-docs ["n-0010"]) "n-0010")) "the miss is real"))
 
     (testing "absolute facts, so the two paths cannot agree on a wrong answer"
       (let [ids (set (:ids (run-query node {"session-id" "s1"} 50)))]
@@ -138,7 +157,11 @@
                  :evidence/session-id "s1" :evidence/tags [] :evidence/body {}}]
         (xt/execute-tx node [[:put-docs :evidence doc]])
         (text/on-append! doc)
-        (is (= ["fresh"] (first-page-ids node {"session-id" "s1"} 1)))))
+        (is (= ["fresh"] (first-page-ids node {"session-id" "s1"} 1)))
+        (is (wait-for 5000 #(contains? (text/cached-docs ["fresh"]) "fresh"))
+            "the writer reads the stored row back into the cache")
+        (is (= (scan-path #(evidence/fetch-by-id node "fresh"))
+               (get (text/cached-docs ["fresh"]) "fresh")))))
 
     (testing "a failed append stops index reads until it is repaired"
       (let [good @text/!ds

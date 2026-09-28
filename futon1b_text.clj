@@ -24,7 +24,8 @@
             [clojure.edn :as edn]
             [clojure.string :as str]
             [futon1b-xt :as fxt]
-            [xtdb.api :as xt])
+            [xtdb.api :as xt]
+            [xtdb.serde :as serde])
   (:import [java.time Instant]
            [java.time.temporal ChronoUnit]
            [java.util.concurrent Executors LinkedBlockingQueue
@@ -126,6 +127,9 @@
    ;; first within a session, and newest first overall.
    "CREATE INDEX IF NOT EXISTS ev_attr_session_at ON ev_attr(session, at);"
    "CREATE INDEX IF NOT EXISTS ev_attr_at ON ev_attr(at, id);"
+   ;; The stored evidence row as XTDB returns it (SELECT *), transit-encoded.
+   ;; See the doc cache section.
+   "CREATE TABLE IF NOT EXISTS ev_doc (id TEXT PRIMARY KEY, doc BLOB NOT NULL);"
    "CREATE TABLE IF NOT EXISTS ev_tags (
   id TEXT, tag TEXT, PRIMARY KEY (tag, id)) WITHOUT ROWID;"
    "CREATE INDEX IF NOT EXISTS ev_tags_id ON ev_tags(id);"
@@ -337,6 +341,111 @@
       (finally (reset! !catch-up-running? false)))))
 
 ;; ---------------------------------------------------------------------------
+;; Doc cache: the stored row, so index-served reads need not touch XTDB.
+;;
+;; Reading `evidence$body` is what makes evidence reads cost what they do: XTDB
+;; keeps it as one union of every body shape ever written (a 3,595-char type,
+;; 2026-09-27), so a point read with the body costs 80-160 ms against ~20 ms
+;; without, and 590 docs by `_id IN` cost 8.8 s. ev_doc holds each row exactly
+;; as `SELECT * FROM evidence` returns it (transit round-trips it exactly), read
+;; back from the store after commit by its own thread, so a slow read-back
+;; never holds up ev_attr. Evidence is append-only (a duplicate id is a 409),
+;; so a cached row does not go stale. A missing row is only a cache miss: the
+;; caller reads it from the store.
+;; ---------------------------------------------------------------------------
+
+(defonce ^:private !node
+  ;; The store node, for read-backs. Set by reconcile!.
+  (atom nil))
+
+(defonce ^:private doc-queue (LinkedBlockingQueue.))
+(defonce ^:private !doc-filler (atom nil))
+
+(def ^:private doc-fill-batch
+  "Read-backs per round: at or below fxt/equality-hydrate-max-ids, so each
+  round is point reads rather than one full-table `IN` read."
+  fxt/equality-hydrate-max-ids)
+
+(defn- encode-doc ^bytes [doc] (serde/write-transit doc :json))
+
+(defn- decode-doc [^bytes b] (serde/read-transit b :json))
+
+(defn- put-docs!
+  "Upsert stored rows into ev_doc."
+  [ds docs]
+  (when (seq docs)
+    (with-sidecar-write*
+      nil
+      #(jdbc/with-transaction [tx ds]
+         (doseq [d docs]
+           (jdbc/execute! tx ["INSERT INTO ev_doc(id, doc) VALUES (?,?)
+                               ON CONFLICT(id) DO UPDATE SET doc=excluded.doc"
+                              (str (:xt/id d)) (encode-doc d)]))))))
+
+(defn- doc-filler-loop []
+  (try
+    (loop []
+      (let [batch (java.util.ArrayList.)]
+        (.add batch (.take doc-queue))
+        (.drainTo doc-queue batch (dec doc-fill-batch))
+        (try
+          (when-let [node @!node]
+            (put-docs! @!ds (fxt/hydrate-by-ids node :evidence (vec batch))))
+          (catch InterruptedException e (throw e))
+          (catch Throwable t
+            ;; A miss, not a loss: reads fall back to the store for these ids.
+            (println (str "[fts] doc cache read-back failed for " (.size batch)
+                          " id(s): " (.getSimpleName (class t)) ": " (.getMessage t)))
+            (flush)))
+        (recur)))
+    (catch InterruptedException _ nil)))
+
+(defn- queue-doc-fill! [id]
+  (locking !doc-filler
+    (when-not (some-> ^Thread @!doc-filler .isAlive)
+      (reset! !doc-filler (doto (Thread. ^Runnable doc-filler-loop "fts-doc-filler")
+                            (.setDaemon true)
+                            (.start)))))
+  (.put doc-queue (str id)))
+
+(defn cached-docs
+  "id -> stored row for the IDS ev_doc holds; absent ids are cache misses."
+  [ids]
+  (let [ds @!ds]
+    (if (and ds (seq ids))
+      (into {}
+            (mapcat (fn [chunk]
+                      (map (fn [r] [(:id r) (decode-doc (:doc r))])
+                           (jdbc/execute! ds (into [(str "SELECT id, doc FROM ev_doc WHERE id IN ("
+                                                         (str/join "," (repeat (count chunk) "?"))
+                                                         ")")]
+                                                   chunk)
+                                          unqualified))))
+            (partition-all 500 (map str ids)))
+      {})))
+
+(defn backfill-docs!
+  "Fill ev_doc for every store row it lacks, in one streaming store read
+  (~1,800 rows/s, 2026-09-27), flushing every 500 rows. Safe to repeat."
+  [node]
+  (let [ds @!ds
+        have (into #{} (map :id) (jdbc/execute! ds ["SELECT id FROM ev_doc"] unqualified))
+        flush! (fn [buf] (put-docs! ds buf) [])
+        [buf n] (fxt/timed-reduce-q
+                 node ["SELECT * FROM evidence"]
+                 (fn [[buf n] row]
+                   (if (contains? have (str (:xt/id row)))
+                     [buf n]
+                     (let [buf (conj buf row)]
+                       (if (>= (count buf) 500)
+                         [(flush! buf) (inc n)]
+                         [buf (inc n)]))))
+                 [[] 0]
+                 1800)]
+    (flush! buf)
+    {:filled n :already (count have)}))
+
+;; ---------------------------------------------------------------------------
 ;; Live appends: one queue, one writer (2026-09-27).
 ;;
 ;; on-append! used to index each doc in its own future and give up after one
@@ -406,6 +515,7 @@
         (.drainTo append-queue batch (dec append-batch-max))
         (try
           (index-appends! (mapv second batch))
+          (doseq [[_ d] batch] (queue-doc-fill! (:xt/id d)))
           (catch InterruptedException e (throw e))
           (catch Throwable t
             (doseq [[_ d] batch] (record-failure! d t))))
@@ -474,6 +584,7 @@
    never repaired; comparing the two id sets is what makes `complete?` true.
    Docs committed after the store read arrive through on-append!."
   [node]
+  (reset! !node node)
   (let [ds @!ds
         store-ids (into [] (map #(str (:xt/id %)))
                         (fxt/timed-q node ["SELECT _id FROM evidence"] 300))
@@ -493,7 +604,8 @@
 (defn attr-candidates
   "Candidate {:id :at} rows for an evidence list read, with every filter of Q
    the index holds applied in SQL (attr-clauses, plus include-ephemeral=false),
-   strictly below CURSOR [at id] when given, newest first, at most LIMIT.
+   strictly below CURSOR [at id] when given, newest first, at most LIMIT
+   (nil = all).
 
    Candidates only (contract C1): the caller re-checks each against the store.
    Complete only while `complete?` holds. nil when no sidecar is attached."
@@ -515,11 +627,12 @@
                      " JOIN ev_tags t0 ON t0.id = a.id AND t0.tag IN (?,?)")
                    (when (seq clauses)
                      (str " WHERE " (str/join " AND " clauses)))
-                   " ORDER BY a.at DESC, a.id DESC LIMIT ?")]
-      (jdbc/execute! ds (-> [sql]
-                            (into (when first-tag (index-enum-values first-tag)))
-                            (into params)
-                            (conj limit))
+                   " ORDER BY a.at DESC, a.id DESC"
+                   (when limit " LIMIT ?"))]
+      (jdbc/execute! ds (cond-> (-> [sql]
+                                    (into (when first-tag (index-enum-values first-tag)))
+                                    (into params))
+                          limit (conj limit))
                      unqualified))))
 
 (defonce ^:private !scheduler (atom nil))
@@ -996,5 +1109,6 @@
             :periodic? (some? @!scheduler)
             :appends {:enqueued (.get enqueued-seq) :indexed (.get indexed-seq)
                       :failed (count @!failed-ids)
-                      :reconciled-at @!reconciled-at}
+                      :reconciled-at @!reconciled-at
+                      :doc-fill-queued (.size doc-queue)}
             :catch-up-running? @!catch-up-running?))))

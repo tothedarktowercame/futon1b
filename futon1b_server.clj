@@ -1342,6 +1342,13 @@
                        (try (println "[fts] reconcile:" (pr-str (text/reconcile! @!node)))
                             (catch Throwable t
                               (println "[fts] reconcile failed:" (.getMessage t))))
+                       ;; Off this thread: one streaming store read of every
+                       ;; row ev_doc lacks (minutes on first boot). Until it
+                       ;; finishes, index reads take cache misses from the store.
+                       (future
+                         (try (println "[fts] doc backfill:" (pr-str (text/backfill-docs! @!node)))
+                              (catch Throwable t
+                                (println "[fts] doc backfill failed:" (.getMessage t)))))
                        (try (println "[hxindex] boot catch-up:"
                                      (pr-str (hx-catch-up-with-permit!)))
                             (catch Throwable t
