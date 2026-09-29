@@ -199,6 +199,49 @@
              (get-in result
                      [:temporal-basis :projection-generation]))))))
 
+(deftest moving-watermark-does-not-rebuild-projection
+  ;; 2026-09-29 outage: evidence appends moved the global watermark inside
+  ;; every point refresh, and each memory write fell back to a full rebuild
+  ;; (80-250 s x 5 attempts) under the node lock.
+  (let [endpoint "pattern/projection-watermark-moves"
+        memory-id "e-projection-watermark-moves"
+        edge-id "hx-projection-watermark-moves"
+        ticks (atom 0)]
+    (graph/memory-projection-components *node* {:endpoints [endpoint] :limit 3})
+    (is (= :ok
+           (graph/put-verified!
+            *node* :evidence
+            {:xt/id memory-id
+             :evidence/id memory-id
+             :evidence/type :memory
+             :evidence/claim-type :observation
+             :evidence/author "projection-watermark-test"
+             :evidence/session-id "projection-watermark-session"
+             :evidence/at "2026-09-29T00:00:00Z"
+             :evidence/body {:hook "Watermark moves hook"}
+             :evidence/tags [:memory]})))
+    (with-redefs-fn
+      {#'graph/node-watermark (fn [_] {:tick (swap! ticks inc)})
+       #'graph/initialize-memory-projection!
+       (fn [_] (throw (ex-info "unexpected projection rebuild" {})))}
+      (fn []
+        (is (:ok
+             (server/upsert-hyperedge!
+              *node*
+              {:hx/id edge-id
+               :hx/type :memory/assert
+               :hx/endpoints [memory-id endpoint]
+               :hx/props {:domain :mathematics
+                          :state :current
+                          :attachment-status :reviewed
+                          :roles {:entry memory-id
+                                  :patterns [endpoint]}}})))
+        (is (= [memory-id]
+               (mapv #(get-in % [:entry :evidence/id])
+                     (get-in (graph/memory-projection-components
+                              *node* {:endpoints [endpoint] :limit 3})
+                             [:groups 0 :components]))))))))
+
 (deftest historical-projection-bypasses-current-index
   (with-redefs [graph/initialize-memory-projection!
                 (fn [_]

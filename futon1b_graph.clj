@@ -1745,7 +1745,11 @@
                       node (mapv :xt/id selected+) {})
                 components (mapv hydrated-row->component rows)
                 observed-watermark (node-watermark node)
-                moved? (not= source-watermark observed-watermark)]
+                ;; Only a memory mutation invalidates the build. The global
+                ;; watermark moves on every evidence append, so gating on it
+                ;; livelocked: 80-250 s per hydrate, never quiet, 5 attempts.
+                moved? (not= source-generation
+                             (memory-projection-generation node))]
             (println "[memory-projection]"
                      (pr-str {:operation-id operation-id :stage :hydrated
                               :attempt attempt :source-moved? moved?
@@ -1756,8 +1760,8 @@
                       0 :memory-projection-source-moved-after-quiescence
                       {:build-attempts attempt
                        :max-build-attempts max-memory-projection-build-attempts
-                       :source-watermark source-watermark
-                       :observed-watermark observed-watermark})))
+                       :source-generation source-generation
+                       :observed-generation (memory-projection-generation node)})))
             (if moved?
               (recur (inc attempt))
               (let [prior-revision
@@ -1775,12 +1779,23 @@
                  :build-ms (elapsed-ms started)})))))))))
 
 (defn refresh-memory-projection-component!
-  "Point-refresh one current memory/assert component after its verified put."
+  "Point-refresh one current memory/assert component after its verified put.
+
+  The global XTDB watermark is NOT a coherence signal here: every evidence
+  append moves it, so on a live store it moves inside almost every point read.
+  Falling back to a full rebuild on that (as this did until 2026-09-29) held
+  the node lock for up to 18 minutes per memory write and exhausted the
+  request workers. Every memory/assert writer calls this after its own
+  transaction under `with-memory-projection-mutation`, so a crossing memory
+  mutation re-reads its own component; the one read here is current for
+  `edge-id`."
   [node edge-id]
-  (when (contains? @!memory-projection-indexes node)
+  (if-not (contains? @!memory-projection-indexes node)
+    ;; No index yet (first build in flight): flag the generation so that build
+    ;; is not certified without this mutation.
+    (advance-memory-projection-generation! node)
     (locking !memory-projection-indexes
-      (let [source-watermark (node-watermark node)
-            row (first (hydrate-memory-components node [edge-id] {}))
+      (let [row (first (hydrate-memory-components node [edge-id] {}))
             component (when (= :memory/assert (:hx/type row))
                         (hydrated-row->component row))
             observed-watermark (node-watermark node)
@@ -1792,20 +1807,15 @@
         (when projection-relevant?
           (let [source-generation
                 (advance-memory-projection-generation! node)]
-            (if (= source-watermark observed-watermark)
-              (swap! !memory-projection-indexes
-                     update node
-                     (fn [{:keys [revision components-by-id]}]
-                       (build-memory-projection-index
-                        (inc revision)
-                        (cond-> (dissoc components-by-id edge-id)
-                          component (assoc edge-id component))
-                        observed-watermark
-                        source-generation)))
-              ;; Another transaction crossed the point-refresh window. Rebuild
-              ;; the whole bounded projection rather than certifying a mixed
-              ;; snapshot.
-              (initialize-memory-projection! node)))))))
+            (swap! !memory-projection-indexes
+                   update node
+                   (fn [{:keys [revision components-by-id]}]
+                     (build-memory-projection-index
+                      (inc revision)
+                      (cond-> (dissoc components-by-id edge-id)
+                        component (assoc edge-id component))
+                      observed-watermark
+                      source-generation))))))))
   nil)
 
 (defn refresh-memory-projection-component-from-docs!
