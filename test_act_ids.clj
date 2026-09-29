@@ -103,6 +103,22 @@
             (is (empty? (ids-at :test/future {})))
             (is (= #{(:hx/id res)} (ids-at :test/future {:valid-as-of (.plusSeconds future-time 1)})))))
 
+        (testing "nil-valued props: XTDB drops the keys, the act is verified and listed"
+          ;; 2026-09-29: an attestation with :proposal-author nil committed,
+          ;; failed the exact read-back (503 postcommit-missing-act), and a
+          ;; cached empty listing of its type was never invalidated.
+          (let [p (assoc payload :hx/type :test/nil-props :hx/idempotency-key "nil-props"
+                         :hx/props {:who nil :what "x" :inner {:ref nil :ids []}})
+                _ (is (empty? (ids-at :test/nil-props {})))
+                [status res] (put! p)
+                [status2 res2] (put! p)]
+            (is (= 200 status)) (is (:minted? res))
+            (is (= #{(:hx/id res)} (ids-at :test/nil-props {})))
+            (is (= {:what "x" :inner {:ids []}}
+                   (:hx/props (server/fetch-current node (:hx/id res)))))
+            (testing "a retry with the same key replays the same act"
+              (is (= 200 status2)) (is (= (:hx/id res) (:hx/id res2))))))
+
         (testing "invalid opt-ins fail explicitly"
           (doseq [p [(assoc payload :hx/id "chosen-id")
                      (assoc payload :hx/op "retract")

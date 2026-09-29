@@ -282,6 +282,16 @@
                           '(-> (from :hyperedges {:bind [*] :for-valid-time :all-time})
                                (where (= xt/id p-id))) id)))
 
+(defn- drop-nil-values
+  "XTDB does not store a nil-valued key, so the document read back lacks it.
+   Drop such keys before the write, so the exact read-back compares like with
+   like instead of failing an act that has committed."
+  [x]
+  (cond
+    (map? x) (into (empty x) (keep (fn [[k v]] (when-not (nil? v) [k (drop-nil-values v)]))) x)
+    (vector? x) (mapv drop-nil-values x)
+    :else x))
+
 (defn- write-minted-act!
   [node payload]
   (let [key (:hx/idempotency-key payload)
@@ -289,7 +299,8 @@
         base (-> (dissoc payload :hx/mint-id :hx/idempotency-key)
                  build-hyperedge-doc
                  (xf/transform-doc graph/!shape-log {:log-stringify? true})
-                 (dissoc :xt/id :hx/id))
+                 (dissoc :xt/id :hx/id)
+                 drop-nil-values)
         request {:doc base :valid-from (some-> valid-from str)}
         mutate!
         (fn []
@@ -316,6 +327,9 @@
                 (xt/execute-tx node ops)
                 (when-not (and (some #(= doc (select-keys % (keys doc))) (act-history node id))
                                (or (nil? key) (= receipt (act-receipt node key))))
+                  ;; The transaction may have committed anyway; a cached empty
+                  ;; listing of this type must not outlive it.
+                  (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
                   (throw (gates/layered-error
                           0 :postcommit-missing-act
                           {:hx/id id :message "act/receipt transaction failed read-back verification"})))
