@@ -294,6 +294,49 @@
                 (and (seq (:per-type s))
                      (some? (get-in s [:checkpoint :ts]))
                      (number? (:hook-failures s))
-                     (some? (get-in s [:last-catch-up :elapsed-ms]))))))
+                     (some? (get-in s [:last-catch-up :elapsed-ms])))))
+
+      ;; ---- gate: a hook failing DURING a catch-up keeps reads closed ----
+      ;; An unhooked write plus a failed hook land while the tombstone leg
+      ;; runs (after the upsert leg has paged). The row is not repaired by
+      ;; this run, so the gate must stay shut until the next one. Before
+      ;; 2026-09-30 the failure count was recorded at the END of the run and
+      ;; the gate opened with the row missing.
+      (let [stats-var (var-get (ns-resolve 'futon1b-hxindex '!stats))
+            real-page @#'futon1b-hxindex/changed-page
+            injected? (atom false)]
+        (hx/catch-up! node :force true)
+        (with-redefs [futon1b-hxindex/changed-page
+                      (fn [n col after page]
+                        (when (and (= col "_system_to") (compare-and-set! injected? false true))
+                          (xt/execute-tx node [[:put-docs :hyperedges
+                                                (hx-doc "hx:gate:1" :probe/gate ["g"])]])
+                          (swap! stats-var update :hook-failures inc))
+                        (real-page n col after page))]
+          (hx/catch-up! node :force true))
+        (check! "a hook failure during catch-up keeps reads-usable? false"
+                (or (not (hx/reads-usable?)) (pos? (row-count "hx:gate:1"))))
+        (hx/catch-up! node :force true)
+        (check! "the next catch-up repairs the row and reopens the gate"
+                (and (hx/reads-usable?) (pos? (row-count "hx:gate:1")))))
+
+      ;; ---- a failed tombstone leg does not skip past its deletes ----------
+      ;; A direct delete, then a later direct put; the tombstone leg fails.
+      ;; Before 2026-09-30 the upsert leg had already saved its checkpoint
+      ;; past the delete, so the next run's tombstone leg never saw it.
+      (let [real-page @#'futon1b-hxindex/changed-page]
+        (xt/execute-tx node [[:put-docs :hyperedges (hx-doc "hx:tomb:1" :probe/tomb ["t"])]])
+        (hx/catch-up! node :force true)
+        (xt/execute-tx node [[:delete-docs :hyperedges "hx:tomb:1"]])
+        (xt/execute-tx node [[:put-docs :hyperedges (hx-doc "hx:tomb:2" :probe/tomb ["u"])]])
+        (with-redefs [futon1b-hxindex/changed-page
+                      (fn [n col after page]
+                        (if (= col "_system_to")
+                          (throw (ex-info "probe: tombstone leg fails" {}))
+                          (real-page n col after page)))]
+          (try (hx/catch-up! node :force true) (catch clojure.lang.ExceptionInfo _ nil)))
+        (hx/catch-up! node :force true)
+        (check! "a delete survives a failed tombstone leg and is repaired next run"
+                (and (zero? (row-count "hx:tomb:1")) (pos? (row-count "hx:tomb:2"))))))
     (println "HX INDEX: ALL PASS"))
   (shutdown-agents))

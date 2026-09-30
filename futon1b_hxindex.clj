@@ -457,6 +457,11 @@
       (let [ds (ds*)
             _ (when-not ds (throw (ex-info "hxindex: no datasource" {})))
             started (System/currentTimeMillis)
+            ;; Read before anything else. A hook that fails while this run is
+            ;; in flight is not known to be repaired by it, so it must keep
+            ;; reads-usable? false until the NEXT catch-up; recording the
+            ;; count at the end (as before 2026-09-30) forgave it.
+            failures-at-start (:hook-failures @!stats)
             ;; P3c: a sidecar written before hx_node existed gets the table
             ;; backfilled here, BEFORE the no-new-tx skip — the backfill must
             ;; not wait for a store write.
@@ -472,7 +477,7 @@
           (nil? (meta-get ds "checkpoint-ts"))
           (let [n (fill! ds node tx-id fill-page)
                 elapsed (- (System/currentTimeMillis) started)]
-            (meta-set! ds "hook-failures-at-catch-up" (:hook-failures @!stats))
+            (meta-set! ds "hook-failures-at-catch-up" failures-at-start)
             (swap! !stats assoc :last-catch-up
                    {:at (str (Instant/now)) :elapsed-ms elapsed :changed n :fill true})
             (cond-> {:filled n :elapsed-ms elapsed :tx-id tx-id}
@@ -481,16 +486,21 @@
           :else
           (let [checkpoint [(or (meta-get ds "checkpoint-ts") (str epoch))
                             (or (meta-get ds "checkpoint-id") "")]
-                upserted (loop [after checkpoint changed 0]
-                           (let [rows (changed-page node "_system_from" after page)]
-                             (if (empty? rows)
-                               changed
-                               (do (repair-ids! ds node (map row-id rows))
-                                   (let [lst (last rows)
-                                         hi [(str (row-marker lst)) (str (row-id lst))]]
-                                     (meta-set! ds "checkpoint-ts" (first hi))
-                                     (meta-set! ds "checkpoint-id" (second hi))
-                                     (recur hi (+ changed (count rows)))))))) ;; ids superseded by an upsert are re-upserted by repair-ids!;
+                ;; The upsert leg's position is saved only after BOTH legs
+                ;; finish. Saved page by page (as before 2026-09-30), a
+                ;; tombstone leg that then failed left the next run starting
+                ;; past deletes it never repaired: both legs start from the
+                ;; saved checkpoint.
+                [upserted upsert-hi]
+                (loop [after checkpoint changed 0]
+                  (let [rows (changed-page node "_system_from" after page)]
+                    (if (empty? rows)
+                      [changed after]
+                      (do (repair-ids! ds node (map row-id rows))
+                          (let [lst (last rows)]
+                            (recur [(str (row-marker lst)) (str (row-id lst))]
+                                   (+ changed (count rows))))))))
+                ;; ids superseded by an upsert are re-upserted by repair-ids!;
                 ;; the tombstone leg exists for DELETEs, which _system_from
                 ;; never sees (P0 §3).
                 deleted (if-not tombstones?
@@ -503,8 +513,10 @@
                                   (repair-ids! ds node (map row-id rows))
                                   (recur [(str (row-marker lst)) (str (row-id lst))]
                                          (+ changed (count rows))))))))]
+            (meta-set! ds "checkpoint-ts" (first upsert-hi))
+            (meta-set! ds "checkpoint-id" (second upsert-hi))
             (meta-set! ds "last-tx-id" (str tx-id))
-            (meta-set! ds "hook-failures-at-catch-up" (:hook-failures @!stats))
+            (meta-set! ds "hook-failures-at-catch-up" failures-at-start)
             (let [elapsed (- (System/currentTimeMillis) started)
                   res (cond-> {:changed (+ upserted deleted)
                                :upsert-leg upserted :tombstone-leg deleted
