@@ -88,8 +88,9 @@
                     :cadence "on put/delete; catch-up every FUTON1B_ENT_CATCHUP_MS (15 min) after explicit fill"}
     :gate {:fn 'futon1b-entindex/reads-usable?
            :means "reads enabled, an explicit fill established a checkpoint, no hook has failed since catch-up"}
-    :serves []
-    :fallback "none in P1; no route reads this index"
+    :serves ["GET /api/alpha/entities?type=…"
+             "GET /api/alpha/entities/latest?type=… (entity bodies; pattern/library sigil relation stays in XTDB)"]
+    :fallback "the existing XTDB type-window scan and hydration path"
     :stands-in-for "xtdb#3663"}
 
    {:sidecar/id :scopes

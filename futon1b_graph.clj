@@ -28,6 +28,33 @@
 
 (defonce !shape-log (xf/make-shape-log))
 
+(defonce ^:private entity-write-stripes
+  (vec (repeatedly 256 #(Object.))))
+
+(def ^:dynamic *entity-write-locking?*
+  "Rebindable only for the same-id ordering bad-case test. Production writes
+  always hold the stripe from the XTDB mutation through the awaited hook."
+  true)
+
+(defn- entity-stripe [id]
+  (Math/floorMod (hash (str id)) (count entity-write-stripes)))
+
+(defn- with-entity-id-locks
+  "Run F while holding every entity-id stripe in ascending numeric order.
+  Ordering prevents batch deadlock; unrelated stripes remain concurrent."
+  [ids f]
+  (if-not *entity-write-locking?*
+    (f)
+    (let [locks (->> ids
+                     (map entity-stripe)
+                     distinct
+                     sort
+                     (mapv entity-write-stripes))]
+      ((reduce (fn [inner lock]
+                 #(locking lock (inner)))
+               f
+               (reverse locks))))))
+
 
 (declare with-entity-mutation)
 
@@ -37,20 +64,26 @@
   the L0-shaped error (503) if the doc is absent after all stages."
   [node table doc]
   (let [xdoc (xf/transform-doc doc !shape-log {:log-stringify? true})
-        put! #(ingest/put-doc-with-rescue! node table xdoc !shape-log)
-        res (if (= :entities table) (with-entity-mutation put!) (put!))]
-    (if (fxt/present? node table (:xt/id xdoc))
-      (do
-        (when (= :entities table)
-          ;; A rescued write may have stringified nil-bearing/deep values.
-          ;; Cache the actual stored document, not the pre-rescue input.
-          (let [stored (if (= res :ok)
-                         xdoc
-                         (first (fxt/hydrate-by-ids node :entities [(:xt/id xdoc)])))]
-            (ent/await-hook! (ent/on-put! stored))))
-        (if (keyword? res) res :ok))
-      (throw (gates/layered-error 0 :postcommit-missing-entities
-                                  {:xt/id (:xt/id xdoc) :table table})))))
+        write! (fn []
+                 (let [put! #(ingest/put-doc-with-rescue! node table xdoc !shape-log)
+                       res (if (= :entities table) (with-entity-mutation put!) (put!))]
+                   (if (fxt/present? node table (:xt/id xdoc))
+                     (do
+                       (when (= :entities table)
+                         ;; A rescued write may have stringified nil-bearing/deep values.
+                         ;; Cache the actual stored document, not the pre-rescue input.
+                         (let [stored (if (= res :ok)
+                                        xdoc
+                                        (first (fxt/hydrate-by-ids
+                                                node :entities [(:xt/id xdoc)])))]
+                           (ent/await-hook! (ent/on-put! stored))))
+                       (if (keyword? res) res :ok))
+                     (throw (gates/layered-error
+                             0 :postcommit-missing-entities
+                             {:xt/id (:xt/id xdoc) :table table})))))]
+    (if (= :entities table)
+      (with-entity-id-locks [(:xt/id xdoc)] write!)
+      (write!))))
 
 ;; ---------------------------------------------------------------------------
 ;; Type registry (A5) — futon1a.model.type-registry ported.
@@ -406,35 +439,38 @@
                         (update acc :types conj t)
                         (assoc acc :unresolved? true))))
                   {:types #{} :unresolved? false}
-                  documents)]
-      (with-memory-projection-mutation
-        node
+                  documents)
+          entity-ids (keep #(when (= :entities (:table %)) (:id %)) documents)]
+      (with-entity-id-locks
+        entity-ids
         (fn []
-          (let [delete! #(xt/execute-tx node
-                                        (mapv (fn [{:keys [table id]}]
-                                                [:delete-docs table id])
-                                              documents))]
-            (if (some #(= :entities (:table %)) documents)
-              (with-entity-mutation delete!)
-              (delete!)))
-          (let [remaining (filterv (fn [{:keys [table id]}]
-                                     (fxt/present? node table id))
-                                   documents)]
-            (when (seq remaining)
-              (throw (gates/layered-error 0 :postcommit-retraction-failed
-                                          {:remaining remaining}))))
-          (if (:unresolved? retracted-hyperedge-types)
-            (invalidate-hyperedge-query-cache!)
-            (doseq [t (:types retracted-hyperedge-types)]
-              (invalidate-hyperedge-query-cache! t)))
-          (doseq [{:keys [table id]} documents
-                  :when (= :hyperedges table)]
-            (hx/on-delete! id)
-            (refresh-memory-projection-component! node id))
-          (doseq [{:keys [table id]} documents
-                  :when (= :entities table)]
-            (ent/await-hook! (ent/on-delete! id)))
-          {:ok true :count (count documents) :documents documents})))))
+          (with-memory-projection-mutation
+            node
+            (fn []
+             (let [delete! #(xt/execute-tx node
+                                           (mapv (fn [{:keys [table id]}]
+                                                   [:delete-docs table id])
+                                                 documents))]
+               (if (seq entity-ids)
+                 (with-entity-mutation delete!)
+                 (delete!)))
+             (let [remaining (filterv (fn [{:keys [table id]}]
+                                        (fxt/present? node table id))
+                                      documents)]
+               (when (seq remaining)
+                 (throw (gates/layered-error 0 :postcommit-retraction-failed
+                                             {:remaining remaining}))))
+             (if (:unresolved? retracted-hyperedge-types)
+               (invalidate-hyperedge-query-cache!)
+               (doseq [t (:types retracted-hyperedge-types)]
+                 (invalidate-hyperedge-query-cache! t)))
+             (doseq [{:keys [table id]} documents
+                     :when (= :hyperedges table)]
+               (hx/on-delete! id)
+               (refresh-memory-projection-component! node id))
+             (doseq [id entity-ids]
+               (ent/await-hook! (ent/on-delete! id)))
+              {:ok true :count (count documents) :documents documents})))))))
 
 (defn entity-by-external
   "GET /api/alpha/entity?source=…&external-id=… (contract §5): both params
@@ -530,28 +566,35 @@
           docs (mapv #(xf/transform-doc (:doc %) !shape-log {:log-stringify? true})
                      built)
           rescue
-          (with-entity-mutation
-           (fn []
-             (try (xt/execute-tx node (mapv (fn [d] [:put-docs :entities d]) docs))
-                  (catch Exception _ nil))
-             (into {}
-                   (keep (fn [d]
-                           (when-not (fxt/present? node :entities (:xt/id d))
-                             (let [res (ingest/put-doc-with-rescue!
-                                        node :entities d !shape-log)]
-                               (if (fxt/present? node :entities (:xt/id d))
-                                 [(:xt/id d) (if (keyword? res) res :ok)]
-                                 (throw (gates/layered-error
-                                         0 :postcommit-missing-entities
-                                         {:xt/id (:xt/id d) :table :entities})))))))
-                   docs)))]
-      (let [rescued-ids (set (keys rescue))
-            rescued-docs (into {}
-                               (map (juxt :xt/id identity))
-                               (fxt/hydrate-by-ids node :entities rescued-ids))]
-        (doseq [doc docs]
-          (ent/await-hook!
-           (ent/on-put! (get rescued-docs (:xt/id doc) doc)))))
+          (with-entity-id-locks
+            (map :xt/id docs)
+            (fn []
+              (let [rescue
+                    (with-entity-mutation
+                     (fn []
+                       (try (xt/execute-tx
+                             node (mapv (fn [d] [:put-docs :entities d]) docs))
+                            (catch Exception _ nil))
+                       (into {}
+                             (keep (fn [d]
+                                     (when-not (fxt/present? node :entities (:xt/id d))
+                                       (let [res (ingest/put-doc-with-rescue!
+                                                  node :entities d !shape-log)]
+                                         (if (fxt/present? node :entities (:xt/id d))
+                                           [(:xt/id d) (if (keyword? res) res :ok)]
+                                           (throw (gates/layered-error
+                                                   0 :postcommit-missing-entities
+                                                   {:xt/id (:xt/id d)
+                                                    :table :entities})))))))
+                             docs)))
+                    rescued-ids (set (keys rescue))
+                    rescued-docs (into {}
+                                       (map (juxt :xt/id identity))
+                                       (fxt/hydrate-by-ids node :entities rescued-ids))]
+                (doseq [doc docs]
+                  (ent/await-hook!
+                   (ent/on-put! (get rescued-docs (:xt/id doc) doc))))
+                rescue)))]
       (register-types! node (mapv (fn [t] {:kind :entity :type-id t})
                                   (distinct (map :type built))))
       (cond-> {:profile "default"
@@ -570,21 +613,27 @@
   nothing and Zone served `{:entities []}` with HTTP 200 — 1,372 rows present,
   0 returned, no error a consumer could see. Sigil presence is now an
   ATTRIBUTE (`:sigiled? true`) and the envelope carries `:sigil-join` so an
-  empty library and a broken join are distinguishable."
+  empty library and a broken join are distinguishable. When the entity-index
+  gate holds, entity bodies come from ent_node; the pattern/library relation
+  query remains on XTDB."
   ([node opts]
    (entities-latest node opts fxt/safe-q))
   ([node {:keys [type limit]} query-fn]
    (let [t (normalize-type type)
          n (long (max 1 (or limit 1)))
+         indexed? (ent/reads-usable?)
          ;; ids first, hydrate by `_id IN` (see fxt/hydrate-by-ids): the
          ;; whole-type `[*]` pull was ~12 s for 1,351 pattern/library rows.
-         all (fxt/hydrate-by-ids node :entities
-                                 (mapv :xt/id
-                                       (query-fn node (fxt/pq '[p-type]
-                                                              '(-> (from :entities [xt/id entity/type])
-                                                                   (where (= entity/type p-type)))
-                                                              t)))
-                                 query-fn)
+         all (if indexed?
+               (ent/type-page {:type t})
+               (fxt/hydrate-by-ids
+                node :entities
+                (mapv :xt/id
+                      (query-fn node (fxt/pq '[p-type]
+                                             '(-> (from :entities [xt/id entity/type])
+                                                  (where (= entity/type p-type)))
+                                             t)))
+                query-fn))
          library? (= t :pattern/library)
          sigil-src-ids (when library?
                          (->> (query-fn node '(-> (from :relations [relation/type relation/src])
@@ -605,6 +654,7 @@
      (cond-> {:profile "default"
               :type (if t (subs (str t) 1) (str type))
               :entities docs}
+       indexed? (assoc :ent-index {:checkpoint (ent/checkpoint)})
        library? (assoc :sigil-join {:patterns (count all)
                                     :relation-srcs (count sigil-src-ids)
                                     :matched matched})))))
@@ -629,6 +679,21 @@
      {:after after
       :hint "drop `after`, or ask for the ordered page (omit `ordered=false`)"})))
 
+(defn- entities-query-indexed
+  [{:keys [type limit after include-total?]
+    :or {include-total? true}}]
+  (let [t (normalize-type type)
+        limited? (and (int? limit) (pos? limit))
+        docs (ent/type-page {:type t :after after :limit limit})
+        next-cursor (when (and limited? (= limit (count docs)))
+                      (some-> docs peek :xt/id str))]
+    (cond-> {:entities (mapv #(dissoc % :xt/id) docs)
+             :count (if include-total?
+                      (ent/type-count t)
+                      {:absent :not-requested})
+             :ent-index {:checkpoint (ent/checkpoint)}}
+      next-cursor (assoc :next-cursor next-cursor))))
+
 (defn entities-query
   "Backend-neutral typed entity read. Returns raw entity documents so callers
   can inspect domain fields written before the HTTP cutover as well as the
@@ -642,11 +707,12 @@
   TN-entities-speedups-2026-09-26.md), and no caller outside this repo's own
   tests reads it.
 
-  :ordered? defaults to true. When false the window drops its `order-by` and
-  the response carries no :next-cursor -- the ordering is what the cursor
-  resumes, and it is also what makes the window cost a full type scan (5.7 s
-  against 0.13 s at limit 1, same note §2). An unordered read with `after` is
-  refused, not served: see `entities-query-refusal`."
+  :ordered? defaults to true. On the XTDB fallback, false drops `order-by` and
+  the response carries no :next-cursor. The entity index is ordered by
+  (type,id) at no extra cost, so its false case may return that stable order
+  and a cursor. An unordered read with `after` remains refused: see
+  `entities-query-refusal`. When reads-usable? holds, bodies and optional total
+  come from ent_node and the response carries :ent-index with its checkpoint."
   ([node opts]
    (entities-query node opts fxt/safe-q))
   ([node {:keys [type limit after include-total? ordered?]
@@ -654,7 +720,9 @@
           :as opts} query-fn]
    (when-let [refusal (entities-query-refusal opts)]
      (throw refusal))
-   (let [t (normalize-type type)
+   (if (ent/reads-usable?)
+     (entities-query-indexed opts)
+     (let [t (normalize-type type)
          limited? (and (int? limit) (pos? limit))
          ;; Values ride as parameters (see fxt/pq); the form varies only by
          ;; which clauses are present, so the compiled plan is reused.
@@ -693,7 +761,7 @@
                        (peek window-ids))]
      (cond-> {:entities (mapv #(dissoc % :xt/id) window)
               :count (if include-total? total {:absent :not-requested})}
-       next-cursor (assoc :next-cursor next-cursor)))))
+       next-cursor (assoc :next-cursor next-cursor))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Relations (A3) — §6. Stable rel| ids, both key spellings.

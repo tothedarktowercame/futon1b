@@ -1,8 +1,9 @@
 (ns futon1b-entindex
   "Current-entity SQLite sidecar (M-entities-sidecar P1).
 
-  This namespace maintains but does not serve an entity index. Verified
-  writes call on-put!/on-delete! and wait for the returned future. Hook
+  This namespace maintains the entity index and supplies gated typed reads.
+  futon1b-graph serves its decoded bodies only while reads-usable? holds.
+  Verified writes call on-put!/on-delete! and wait for the returned future. Hook
   failures never fail the store write and never advance the checkpoint.
   catch-up! repairs missed writes from both system-time legs after an
   operator has explicitly run fill!. Each store page is evaluated through
@@ -365,6 +366,30 @@
   (when-let [ds (ds*)]
     {:ts (meta-get ds "checkpoint-ts") :id (meta-get ds "checkpoint-id")
      :last-tx-id (meta-get ds "last-tx-id")}))
+
+(defn type-page
+  "Complete decoded entity documents for TYPE, ordered by id. AFTER is a
+  strict cursor and LIMIT nil means all remaining rows. Used only when
+  reads-usable? holds; callers own that gate."
+  [{:keys [type after limit]}]
+  (let [ds (or (ds*) (throw (ex-info "entindex: no datasource" {})))
+        limited? (and (int? limit) (pos? limit))
+        sql (str "SELECT doc FROM ent_node WHERE type = ?"
+                 (when after " AND id > ?")
+                 " ORDER BY id"
+                 (when limited? " LIMIT ?"))
+        args (cond-> [sql (str type)]
+               after (conj (str after))
+               limited? (conj (long limit)))]
+    (mapv (comp text/decode-doc :doc)
+          (jdbc/execute! ds args unqualified))))
+
+(defn type-count
+  "Cheap exact current sidecar count for TYPE; callers own reads-usable?."
+  [type]
+  (let [ds (or (ds*) (throw (ex-info "entindex: no datasource" {})))]
+    (:n (first (jdbc/execute! ds ["SELECT count(*) AS n FROM ent_node WHERE type = ?"
+                                  (str type)] unqualified)))))
 
 (defn reads-usable? []
   (let [ds (ds*)]
