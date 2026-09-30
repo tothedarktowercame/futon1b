@@ -239,9 +239,12 @@
   write can overwrite that newer row, so the fill leaves the read gate CLOSED;
   the first catch-up! replays every version after the pre-fill checkpoint and
   is what opens it. Progress is in !fill-progress (and ent-stats)."
-  [node & {:keys [chunk pause-ms busy-tries busy-retry-ms with-page-permit]
-           :or {chunk 1000 pause-ms 5000 busy-tries 30 busy-retry-ms 10000
-                with-page-permit @!with-page-permit}}]
+  [node & {:keys [chunk pause-ms busy-tries busy-retry-ms with-page-permit
+                  min-free-permits]
+           :or {chunk 250 pause-ms 2000 busy-tries 30 busy-retry-ms 10000
+                with-page-permit @!with-page-permit
+                ;; offline tests have no contention; the server passes 2
+                min-free-permits 0}}]
   (when-not (<= 1 (long chunk) 2000)
     (throw (ex-info "entindex: fill chunk must be 1..2000" {:chunk chunk})))
   (let [ds (or (ds*) (throw (ex-info "entindex: no datasource" {})))
@@ -252,17 +255,39 @@
     (reset! !fill-stop? false)
     (try
       (let [started (System/currentTimeMillis)
-            tx-id (with-busy-retry busy-tries busy-retry-ms
-                                   #(latest-tx-id node with-page-permit))
-            top (with-busy-retry busy-tries busy-retry-ms
-                                 #(newest-version node with-page-permit))
+            ;; Resumable. The pre-fill checkpoint is saved on the first run and
+            ;; reused, so a stopped fill (stop-fill!, a restart) continues:
+            ;; every row it wrote was read after that checkpoint, and every
+            ;; change after the checkpoint is replayed by the first catch-up.
+            ;; Only then may a resume skip ids already in ent_node.
+            resuming? (some? (meta-get ds "fill-top-ts"))
+            tx-id (if resuming?
+                    (some-> (meta-get ds "fill-tx-id") parse-long)
+                    (with-busy-retry busy-tries busy-retry-ms
+                                     #(latest-tx-id node with-page-permit)))
+            top (if resuming?
+                  (let [ts (meta-get ds "fill-top-ts")]
+                    (when (seq ts) {:marker ts :xt/id (meta-get ds "fill-top-id")}))
+                  (with-busy-retry busy-tries busy-retry-ms
+                                   #(newest-version node with-page-permit)))
+            _ (when-not resuming?
+                (meta-set! ds "fill-tx-id" (str tx-id))
+                (meta-set! ds "fill-top-id" (if top (str (row-id top)) ""))
+                ;; written last: its presence is what marks a resumable fill
+                (meta-set! ds "fill-top-ts" (if top (str (row-marker top)) "")))
             ids (with-busy-retry
                  busy-tries busy-retry-ms
                  #(permit-call with-page-permit
                                (fn [] (mapv (comp str row-id)
                                             (fxt/timed-q node ["SELECT _id FROM entities"] 120)))))
+            ids (if resuming?
+                  (let [present (into #{} (map :id)
+                                      (jdbc/execute! ds ["SELECT id FROM ent_node"] unqualified))]
+                    (filterv (complement present) ids))
+                  ids)
             chunks (partition-all chunk ids)
             _ (reset! !fill-progress {:ids (count ids) :chunks (count chunks)
+                                      :resuming? resuming?
                                       :done 0 :written 0 :started-at (str (Instant/now))})
             n (loop [[c & more] chunks n 0 i 0]
                 (cond
@@ -270,7 +295,18 @@
                   @!fill-stop? (throw (ex-info "entindex: fill stopped by stop-fill!"
                                                {:entindex/error :fill-stopped :written n}))
                   :else
-                  (let [docs (with-busy-retry
+                  (let [_ (loop []
+                            ;; Yield to interactive reads: start a chunk only
+                            ;; while MIN-FREE-PERMITS query permits are free.
+                            ;; The first live fill held one of four for ~65 s
+                            ;; of every 70 and 504s doubled (2026-09-30).
+                            (when (and (< (fxt/query-permits-available)
+                                          (long min-free-permits))
+                                       (not @!fill-stop?))
+                              (swap! !fill-progress update :yield-waits (fnil inc 0))
+                              (Thread/sleep 2000)
+                              (recur)))
+                        docs (with-busy-retry
                               busy-tries busy-retry-ms
                               #(permit-call with-page-permit
                                             (fn [] (fxt/hydrate-by-ids node :entities (vec c)))))]
@@ -292,7 +328,9 @@
         ;; Matches no failure count, so reads-usable? stays false until the
         ;; first catch-up! records a real one (see the docstring).
         (meta-set! ds "hook-failures-at-catch-up" -1)
-        (swap! !fill-progress assoc :finished-at (str (Instant/now)))
+        (write-locked* #(jdbc/execute! ds ["DELETE FROM ent_meta WHERE k IN
+                                            ('fill-top-ts','fill-top-id','fill-tx-id')"]))
+        (swap! !fill-progress assoc :finished-at (str (Instant/now)) :resumed? resuming?)
         {:filled n :tx-id tx-id :gate :closed-until-first-catch-up
          :elapsed-ms (- (System/currentTimeMillis) started)})
       (finally (reset! !fill-stop? false)))))

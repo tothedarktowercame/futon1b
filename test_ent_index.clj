@@ -112,6 +112,32 @@
                      (pos? (:busy-retries (:fill (ent/ent-stats)) 0)))))
       (ent/catch-up! node :force true)
 
+      ;; A stopped fill resumes from its saved checkpoint: a write made
+      ;; between the two runs is replayed by the first catch-up, and the
+      ;; resumed run fills only the ids the first one did not reach.
+      (clear-index!)
+      (let [n (atom 0)
+            stop-after-one (fn [f]
+                             ;; stop once the first hydrate chunk is done
+                             (let [r (f)]
+                               (when (= 4 (swap! n inc)) (ent/stop-fill!))
+                               r))
+            first-run (try (ent/fill! node :chunk 1 :pause-ms 0 :with-page-permit stop-after-one)
+                           (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+        (check! "stop-fill! stops a fill without a checkpoint"
+                (and (= :fill-stopped (:entindex/error first-run))
+                     (nil? (:ts (ent/checkpoint)))))
+        ;; unhooked change to a row the first run already wrote
+        (xt/execute-tx node [[:put-docs :entities (entity "ent:fill:1" :probe/fill "one, changed")]])
+        (let [res (ent/fill! node :chunk 1 :pause-ms 0)]
+          (check! "the resumed fill hydrates only the ids not yet written"
+                  (and (:resumed? (:fill (ent/ent-stats))) (= 1 (:filled res)))))
+        (ent/catch-up! node :force true)
+        (check! "the first catch-up after a resumed fill replays the in-between write"
+                (and (ent/reads-usable?)
+                     (= (first (fxt/hydrate-by-ids node :entities ["ent:fill:1"]))
+                        (stored-doc "ent:fill:1")))))
+
       ;; Direct writes bypass hooks; the two system-time legs must repair them.
       (xt/execute-tx node [[:put-docs :entities
                              (entity "ent:direct" :probe/direct "direct")]])

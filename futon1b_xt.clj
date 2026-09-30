@@ -24,6 +24,12 @@
   ;; brown-out. Fair acquisition keeps point reads and writes from starving.
   (Semaphore. query-width true))
 
+(defn query-permits-available
+  "Free XTDB query permits right now (of `query-width`). For background work
+  that should run only when interactive reads have room (entindex fill!)."
+  []
+  (.availablePermits ^Semaphore query-permits))
+
 (def ^:private query-permit-wait-ms
   "Maximum time a query may wait for one of the four XTDB query permits.
 
