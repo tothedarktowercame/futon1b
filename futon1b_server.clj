@@ -815,6 +815,11 @@
                                 :error :expensive-read-busy
                                 :retry-after-seconds 1})))))
 
+;; Background catch-ups start only while this many of futon1b-xt's four query
+;; permits are free, so maintenance scans yield to interactive reads and
+;; writes (2026-09-30: fts + hx catch-ups held two permits during a 504 storm).
+(def ^:private catch-up-min-free-permits 2)
+
 (defn- hx-catch-up-with-permit!
   "Hyperedge catch-up takes an expensive-read permit like other table scans:
    P0 measured that both of its system-time queries scan the whole
@@ -823,11 +828,16 @@
    15 min); a busy permit budget skips the run rather than queueing behind
    serving reads."
   []
-  (if (.tryAcquire expensive-read-permit expensive-read-wait-ms TimeUnit/MILLISECONDS)
+  (cond
+    (< (fxt/query-permits-available) catch-up-min-free-permits)
+    {:skipped :query-permits-busy}
+
+    (.tryAcquire expensive-read-permit expensive-read-wait-ms TimeUnit/MILLISECONDS)
     (try
       (hx/catch-up! @!node)
       (finally (.release expensive-read-permit)))
-    {:skipped :expensive-read-busy}))
+
+    :else {:skipped :expensive-read-busy}))
 
 (defn- ent-page-with-permit!
   "Run one bounded entity-index store page under one expensive-read permit.
@@ -839,7 +849,9 @@
                     {:entindex/error :expensive-read-busy}))))
 
 (defn- ent-catch-up-with-permit! []
-  (ent/catch-up! @!node :with-page-permit ent-page-with-permit!))
+  (if (< (fxt/query-permits-available) catch-up-min-free-permits)
+    {:skipped :query-permits-busy}
+    (ent/catch-up! @!node :with-page-permit ent-page-with-permit!)))
 
 (def ^:private tables
   [:hyperedges :entities :evidence :relations :type-catalog :docs :misc])
