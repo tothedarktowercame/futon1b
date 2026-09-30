@@ -1,6 +1,6 @@
 # Mission: M-evidence-landscape-index — a derived candidate-index sidecar for the Evidence Landscape, built to the shape of the eventual XTDB facility
 
-**Status:** IDENTIFY **accepted by Joe 2026-08-17**; MAP + DERIVE + ARGUE +
+**Status:** OPEN — IDENTIFY **accepted by Joe 2026-08-17**; MAP + DERIVE + ARGUE +
 VERIFY completed same day (sections below, per
 `futon4/holes/mission-lifecycle.md`). **Stopped at the INSTANTIATE
 boundary** — build to be orchestrated via Agency/Codex per the
@@ -730,3 +730,10 @@ the discovery):
 
 Each packet bells back with a summary + shas; review per the handoff
 protocol (read diff, re-run verify step, state what was checked).
+
+## Acceptance checklist (2026-09-30)
+
+- [ ] A named currently unaffordable evidence query has before/after live-store measurements showing that the indexed form is affordable under the same methodology.
+- [ ] An automated stale-read test makes the sidecar return a candidate that XTDB rejects and verifies that the truth re-check catches it.
+- [ ] The candidate-index response exposes a transaction basis and numeric staleness window.
+- [ ] The composed content × attribute sensor query retrieves a 2026-08-15 operator assertion and includes evidence that the same query was previously inexpressible or unaffordable.
