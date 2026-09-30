@@ -999,7 +999,9 @@
    "prop/timestamp" :prop/timestamp
    "prop/repo" :prop/repo
    "prop/source-file" :prop/source-file
-   "prop/mission" :prop/mission})
+   "prop/mission" :prop/mission
+   ;; the whole props map (mission-control's inventory reads only this)
+   "hx/props" :hx/props})
 
 (defn- hyperedge-window-field-source
   [field]

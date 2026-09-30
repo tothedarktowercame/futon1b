@@ -218,6 +218,13 @@
                        (pr-str fields) ")")
                   (and (some? (:hx-index r)) (= 6 (count (:hyperedges r))) (= 1 @calls)))))
 
+      ;; hx:e1:00 carries {:note "p2b"}; the others have no props at all.
+      (let [r (query node {:type "probe/edits" :limit 10 :fields ["hx/props"]})]
+        (check! "fields=hx/props returns the whole props map and nothing else"
+                (and (some? (:hx-index r))
+                     (= [{:hx/props {:note "p2b"}}]
+                        (filterv seq (:hyperedges r))))))
+
       ;; ---- P3: type-only reads from the index -------------------------------
       ;; Fixture census: probe/edits has 6 rows (hx:e1:00..04, hx:e2),
       ;; probe/commits 1, probe/other 1 (added in the hook-failure section —
