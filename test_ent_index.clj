@@ -90,7 +90,12 @@
         (check! "fill! uses bounded pages and sees both current entities"
                 (= 2 (:filled res)))
         (check! "fill! documents equal the store's current hydrated entities"
-                (= hydrated (mapv stored-doc ["ent:fill:1" "ent:fill:2"]))))
+                (= hydrated (mapv stored-doc ["ent:fill:1" "ent:fill:2"])))
+        (check! "fill! leaves the read gate closed" (false? (ent/reads-usable?)))
+        (check! "fill! refuses a second fill"
+                (try (ent/fill! node) false (catch clojure.lang.ExceptionInfo _ true)))
+        (ent/catch-up! node :force true)
+        (check! "the first catch-up after fill opens the gate" (ent/reads-usable?)))
 
       ;; Direct writes bypass hooks; the two system-time legs must repair them.
       (xt/execute-tx node [[:put-docs :entities

@@ -194,22 +194,25 @@
                                       WHERE _system_from = ? ORDER BY _id" ts])))}))))
 
 (defn fill!
-  "Fill an EMPTY entity index from bounded current-row pages. This is an
-  explicit operator action. Each page (and checkpoint query) is wrapped by
-  WITH-PAGE-PERMIT, which defaults to direct execution for offline tests."
+  "Fill a never-filled entity index from bounded current-row pages. This is
+  an explicit operator action. Each page (and checkpoint query) is wrapped by
+  WITH-PAGE-PERMIT, which defaults to direct execution for offline tests.
+
+  The index may already hold rows: the write hooks run from the moment the
+  namespace is loaded, before anyone fills. A page read before a later hook
+  write can overwrite that newer row, so the fill leaves the read gate CLOSED;
+  the first catch-up! replays every version after the pre-fill checkpoint and
+  is what opens it."
   [node & {:keys [page with-page-permit]
            :or {page 1000 with-page-permit @!with-page-permit}}]
   (when (> (long page) 1000)
     (throw (ex-info "entindex: fill page must be <= 1000" {:page page})))
   (let [ds (or (ds*) (throw (ex-info "entindex: no datasource" {})))
-        existing (:n (first (jdbc/execute! ds ["SELECT count(*) AS n FROM ent_node"]
-                                           unqualified)))]
-    (when (pos? (long existing))
-      (throw (ex-info "entindex: fill requires an empty index" {:rows existing})))
-    (let [;; Taken before the first store read: a hook that fails during the
-          ;; fill has not been repaired by it and must keep the gate closed.
-          failures-at-start (:hook-failures @!stats)
-          tx-id (latest-tx-id node with-page-permit)
+        filled-at (meta-get ds "checkpoint-ts")]
+    (when filled-at
+      (throw (ex-info "entindex: already filled; use catch-up! (or rebuild from empty)"
+                      {:checkpoint-ts filled-at})))
+    (let [tx-id (latest-tx-id node with-page-permit)
           top (newest-version node with-page-permit)
           n (loop [after "" n 0]
               (let [rows (current-page node after page with-page-permit)]
@@ -227,8 +230,10 @@
       (meta-set! ds "checkpoint-ts" (if top (str (row-marker top)) (str epoch)))
       (meta-set! ds "checkpoint-id" (if top (str (row-id top)) ""))
       (meta-set! ds "last-tx-id" (str tx-id))
-      (meta-set! ds "hook-failures-at-catch-up" failures-at-start)
-      {:filled n :tx-id tx-id})))
+      ;; Matches no failure count, so reads-usable? stays false until the
+      ;; first catch-up! records a real one (see the docstring).
+      (meta-set! ds "hook-failures-at-catch-up" -1)
+      {:filled n :tx-id tx-id :gate :closed-until-first-catch-up})))
 
 (defonce ^:private !catch-up-running? (atom false))
 (declare !scheduler)
