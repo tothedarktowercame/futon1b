@@ -190,6 +190,29 @@
 (defonce !fill-progress (atom nil))
 (defonce ^:private !fill-stop? (atom false))
 
+(defn- busy?
+  "A permit that could not be had: the server's expensive-read permit or
+  futon1b-xt's own query permit. Both mean try again later, not failure."
+  [t]
+  (let [d (ex-data t)]
+    (or (= :expensive-read-busy (:entindex/error d))
+        (= :permit-acquire (:timeout/phase d)))))
+
+(defn- with-busy-retry
+  "Call F; on a busy permit wait RETRY-MS and try again, up to TRIES times.
+  A long fill meets busy periods (it failed live on its second chunk,
+  2026-09-30 01:43Z); giving up would throw away every chunk done so far."
+  [tries retry-ms f]
+  (loop [n 1]
+    (let [r (try {:ok (f)}
+                 (catch clojure.lang.ExceptionInfo e
+                   (if (and (busy? e) (< n tries)) {:busy e} (throw e))))]
+      (if (contains? r :ok)
+        (:ok r)
+        (do (swap! !fill-progress update :busy-retries (fnil inc 0))
+            (Thread/sleep (long retry-ms))
+            (recur (inc n)))))))
+
 (defn stop-fill!
   "Ask a running fill! to stop after its current chunk. The index stays
   unfilled (no checkpoint), so fill! can be run again."
@@ -204,9 +227,9 @@
   CHUNK-sized `_id IN` reads, sleeping PAUSE-MS between chunks so other
   readers get a permit. Each read goes through WITH-PAGE-PERMIT (direct
   execution for offline tests). Measured live 2026-09-30 under load: the
-  56,499 ids in 14.8 s, and 500 ids hydrated in 38.8 s. An `IN` read costs
-  about the same at any N (TN-entities-speedups-2026-09-26 §1), so chunks
-  are large. P1's `SELECT * ... ORDER BY _id LIMIT 1000` pages were
+  56,499 ids in 14.8 s; 500 ids hydrated in 38.8 s and 2,000 in ~130 s, so
+  under load an `IN` read's cost does grow with N and chunks are 1,000 (a
+  permit held ~65 s). A busy permit is waited out (with-busy-retry). P1's `SELECT * ... ORDER BY _id LIMIT 1000` pages were
   cancelled at the 60 s deadline: the ordering sorts every body in the
   table for each page.
 
@@ -215,8 +238,9 @@
   write can overwrite that newer row, so the fill leaves the read gate CLOSED;
   the first catch-up! replays every version after the pre-fill checkpoint and
   is what opens it. Progress is in !fill-progress (and ent-stats)."
-  [node & {:keys [chunk pause-ms with-page-permit]
-           :or {chunk 2000 pause-ms 2000 with-page-permit @!with-page-permit}}]
+  [node & {:keys [chunk pause-ms busy-tries busy-retry-ms with-page-permit]
+           :or {chunk 1000 pause-ms 5000 busy-tries 30 busy-retry-ms 10000
+                with-page-permit @!with-page-permit}}]
   (when-not (<= 1 (long chunk) 2000)
     (throw (ex-info "entindex: fill chunk must be 1..2000" {:chunk chunk})))
   (let [ds (or (ds*) (throw (ex-info "entindex: no datasource" {})))
@@ -227,11 +251,15 @@
     (reset! !fill-stop? false)
     (try
       (let [started (System/currentTimeMillis)
-            tx-id (latest-tx-id node with-page-permit)
-            top (newest-version node with-page-permit)
-            ids (permit-call with-page-permit
-                             #(mapv (comp str row-id)
-                                    (fxt/timed-q node ["SELECT _id FROM entities"] 120)))
+            tx-id (with-busy-retry busy-tries busy-retry-ms
+                                   #(latest-tx-id node with-page-permit))
+            top (with-busy-retry busy-tries busy-retry-ms
+                                 #(newest-version node with-page-permit))
+            ids (with-busy-retry
+                 busy-tries busy-retry-ms
+                 #(permit-call with-page-permit
+                               (fn [] (mapv (comp str row-id)
+                                            (fxt/timed-q node ["SELECT _id FROM entities"] 120)))))
             chunks (partition-all chunk ids)
             _ (reset! !fill-progress {:ids (count ids) :chunks (count chunks)
                                       :done 0 :written 0 :started-at (str (Instant/now))})
@@ -241,8 +269,10 @@
                   @!fill-stop? (throw (ex-info "entindex: fill stopped by stop-fill!"
                                                {:entindex/error :fill-stopped :written n}))
                   :else
-                  (let [docs (permit-call with-page-permit
-                                          #(fxt/hydrate-by-ids node :entities (vec c)))]
+                  (let [docs (with-busy-retry
+                              busy-tries busy-retry-ms
+                              #(permit-call with-page-permit
+                                            (fn [] (fxt/hydrate-by-ids node :entities (vec c)))))]
                     (with-write-tx [tx ds]
                       (doseq [doc docs]
                         (jdbc/execute! tx ["INSERT INTO ent_node(id,type,doc) VALUES(?,?,?)

@@ -97,6 +97,21 @@
         (ent/catch-up! node :force true)
         (check! "the first catch-up after fill opens the gate" (ent/reads-usable?)))
 
+      ;; A fill that meets busy permits waits them out instead of failing.
+      (clear-index!)
+      (let [calls (atom 0)
+            flaky (fn [f]
+                    ;; every other store read finds the permits busy
+                    (if (odd? (swap! calls inc))
+                      (throw (ex-info "busy" {:timeout/phase :permit-acquire}))
+                      (f)))
+            res (ent/fill! node :chunk 1 :pause-ms 0 :busy-retry-ms 0
+                           :with-page-permit flaky)]
+        (check! "fill! retries busy permits and still fills every entity"
+                (and (= 2 (:filled res))
+                     (pos? (:busy-retries (:fill (ent/ent-stats)) 0)))))
+      (ent/catch-up! node :force true)
+
       ;; Direct writes bypass hooks; the two system-time legs must repair them.
       (xt/execute-tx node [[:put-docs :entities
                              (entity "ent:direct" :probe/direct "direct")]])
