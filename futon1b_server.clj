@@ -47,6 +47,7 @@
             [futon1b-text :as text]
             [futon1b-hxindex :as hx]
             [futon1b-scopeindex :as scope]
+            [futon1b-sidecars :as sidecars]
             [futon1b-write-log :as write-log]
             [futon1b-request-executor :as request-executor]
             [xtdb.api :as xt])
@@ -757,6 +758,9 @@
                          0)
      :stats @!expensive-read-stats
      :alias-warrants (graph/alias-warrant-snapshot)
+     ;; One line per declared derived index (futon1b-sidecars): a sidecar that
+     ;; has silently stopped serving shows here, not only as slowness.
+     :sidecars (sidecars/health-snapshot)
      :heap {:used-mb (quot (- (.totalMemory rt) (.freeMemory rt)) 1048576)
             :max-mb (quot (.maxMemory rt) 1048576)}
      ;; Metaspace tracks generated query classes (DynamicClassLoader count

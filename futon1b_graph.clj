@@ -1868,6 +1868,19 @@
       (initialize-memory-projection! node))
     (get @!memory-projection-indexes node)))
 
+(defn memory-projection-snapshot
+  "Built/current status of the memory projection for /health (futon1b-sidecars).
+  Reads the two atoms only: takes no lock and never builds."
+  []
+  (let [idx @!memory-projection-indexes
+        gens @!memory-projection-generations]
+    {:built? (boolean (seq idx))
+     :current? (boolean (and (seq idx)
+                             (every? (fn [[node m]]
+                                       (= (get gens node 0) (:source-generation m)))
+                                     idx)))
+     :generations (vec (vals gens))}))
+
 (defn- validate-memory-projection-request
   [{:keys [endpoints limit]}]
   (let [endpoints (vec (distinct endpoints))
