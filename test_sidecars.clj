@@ -81,8 +81,9 @@
               snap)
       (check! "no datasource: the SQLite sidecars report not serving"
               (and (false? (get-in snap [:evidence-text :serving?]))
-                   (false? (get-in snap [:hyperedges :serving?])))
-              (select-keys snap [:evidence-text :hyperedges]))))
+                   (false? (get-in snap [:hyperedges :serving?]))
+                   (false? (get-in snap [:entities :serving?])))
+              (select-keys snap [:evidence-text :hyperedges :entities]))))
 
   (println (if (zero? @failures) "ALL PASS" (str @failures " FAILED")))
   (shutdown-agents)

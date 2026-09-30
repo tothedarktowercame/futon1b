@@ -29,6 +29,7 @@
   /health takes no permit."
   (:require [futon1b-text :as text]
             [futon1b-hxindex :as hx]
+            [futon1b-entindex :as ent]
             [futon1b-scopeindex :as scope]
             [futon1b-graph :as graph]))
 
@@ -73,6 +74,23 @@
              "GET /api/alpha/census?type=…"]
     :fallback "XTDB type scan; census refuses with a typed 503"
     :stands-in-for "xtdb#3663 (declared index on hx$type, and per-element on hx$endpoints)"}
+
+   {:sidecar/id :entities
+    :ns 'futon1b-entindex
+    :kind :sqlite-current-document-index
+    :derived-from {:xtdb-table :entities}
+    :tables {"ent_node" :current-entity-documents
+             "ent_meta" :checkpoint}
+    :declares {:entity/type "ent_node.type"
+               :document "ent_node.doc (Transit)"}
+    :maintained-by {:write-hook ['futon1b-entindex/on-put! 'futon1b-entindex/on-delete!]
+                    :repair ['futon1b-entindex/catch-up! 'futon1b-entindex/fill!]
+                    :cadence "on put/delete; catch-up every FUTON1B_ENT_CATCHUP_MS (15 min) after explicit fill"}
+    :gate {:fn 'futon1b-entindex/reads-usable?
+           :means "reads enabled, an explicit fill established a checkpoint, no hook has failed since catch-up"}
+    :serves []
+    :fallback "none in P1; no route reads this index"
+    :stands-in-for "xtdb#3663"}
 
    {:sidecar/id :scopes
     :ns 'futon1b-scopeindex
@@ -152,6 +170,20 @@
          :checkpoint cp
          :hook-failures (:hook-failures @hx/!stats)
          :last-catch-up (:last-catch-up @hx/!stats)})
+
+      :entities
+      (let [usable (ent/reads-usable?)
+            cp (ent/checkpoint)]
+        {:serving? usable
+         :why (cond
+                (not @ent/!reads-enabled) :disabled-by-FUTON1B_ENT_READS
+                (nil? cp) :no-datasource
+                (nil? (:ts cp)) :never-filled
+                (not usable) :hook-failed-since-last-catch-up
+                :else :complete)
+         :checkpoint cp
+         :hook-failures (:hook-failures @ent/!stats)
+         :last-catch-up (:last-catch-up @ent/!stats)})
 
       :scopes
       {:serving? (some? @text/!ds)

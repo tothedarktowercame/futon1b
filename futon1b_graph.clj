@@ -18,6 +18,7 @@
             [migration.ingest :as ingest]
             [futon1b-xt :as fxt]
             [futon1b-hxindex :as hx]
+            [futon1b-entindex :as ent]
             [futon1b-request-executor :as request-executor]
             [xtdb.api :as xt]))
 
@@ -39,7 +40,15 @@
         put! #(ingest/put-doc-with-rescue! node table xdoc !shape-log)
         res (if (= :entities table) (with-entity-mutation put!) (put!))]
     (if (fxt/present? node table (:xt/id xdoc))
-      (if (keyword? res) res :ok)
+      (do
+        (when (= :entities table)
+          ;; A rescued write may have stringified nil-bearing/deep values.
+          ;; Cache the actual stored document, not the pre-rescue input.
+          (let [stored (if (= res :ok)
+                         xdoc
+                         (first (fxt/hydrate-by-ids node :entities [(:xt/id xdoc)])))]
+            (ent/await-hook! (ent/on-put! stored))))
+        (if (keyword? res) res :ok))
       (throw (gates/layered-error 0 :postcommit-missing-entities
                                   {:xt/id (:xt/id xdoc) :table table})))))
 
@@ -422,6 +431,9 @@
                   :when (= :hyperedges table)]
             (hx/on-delete! id)
             (refresh-memory-projection-component! node id))
+          (doseq [{:keys [table id]} documents
+                  :when (= :entities table)]
+            (ent/await-hook! (ent/on-delete! id)))
           {:ok true :count (count documents) :documents documents})))))
 
 (defn entity-by-external
@@ -533,6 +545,13 @@
                                          0 :postcommit-missing-entities
                                          {:xt/id (:xt/id d) :table :entities})))))))
                    docs)))]
+      (let [rescued-ids (set (keys rescue))
+            rescued-docs (into {}
+                               (map (juxt :xt/id identity))
+                               (fxt/hydrate-by-ids node :entities rescued-ids))]
+        (doseq [doc docs]
+          (ent/await-hook!
+           (ent/on-put! (get rescued-docs (:xt/id doc) doc)))))
       (register-types! node (mapv (fn [t] {:kind :entity :type-id t})
                                   (distinct (map :type built))))
       (cond-> {:profile "default"

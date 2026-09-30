@@ -46,6 +46,7 @@
             [futon1b-xt :as fxt]
             [futon1b-text :as text]
             [futon1b-hxindex :as hx]
+            [futon1b-entindex :as ent]
             [futon1b-scopeindex :as scope]
             [futon1b-sidecars :as sidecars]
             [futon1b-write-log :as write-log]
@@ -828,6 +829,18 @@
       (finally (.release expensive-read-permit)))
     {:skipped :expensive-read-busy}))
 
+(defn- ent-page-with-permit!
+  "Run one bounded entity-index store page under one expensive-read permit.
+  The permit is released before catch-up/fill asks for its next page."
+  [f]
+  (if (.tryAcquire expensive-read-permit expensive-read-wait-ms TimeUnit/MILLISECONDS)
+    (try (f) (finally (.release expensive-read-permit)))
+    (throw (ex-info "entity index page skipped: expensive reads busy"
+                    {:entindex/error :expensive-read-busy}))))
+
+(defn- ent-catch-up-with-permit! []
+  (ent/catch-up! @!node :with-page-permit ent-page-with-permit!))
+
 (def ^:private tables
   [:hyperedges :entities :evidence :relations :type-catalog :docs :misc])
 
@@ -1424,6 +1437,8 @@
   (try
     (let [{:keys [path last-at]} (text/init! {:store-dir store-dir})]
       (hx/init!)
+      (ent/init!)
+      (ent/set-page-permit! ent-page-with-permit!)
       ;; P6b: scope tables on the same sidecar. The DDL is cheap and
       ;; idempotent, so it stays on the startup path; run indexing does
       ;; not — see the future below.
@@ -1450,6 +1465,14 @@
                             (catch Throwable t
                               (println "[hxindex] boot catch-up failed:"
                                        (.getMessage t))))
+                       ;; No entity fill here: before an operator explicitly
+                       ;; calls ent/fill!, this reports :not-filled and reads
+                       ;; remain disabled.
+                       (try (println "[entindex] boot catch-up:"
+                                     (pr-str (ent-catch-up-with-permit!)))
+                            (catch Throwable t
+                              (println "[entindex] boot catch-up failed:"
+                                       (.getMessage t))))
                        ;; Only after the boot build: the repair loop is
                        ;; single-flighted against it anyway, but starting it
                        ;; here keeps the first run a genuine tail scan.
@@ -1464,6 +1487,13 @@
                                               :catch-up-fn hx-catch-up-with-permit!)))
                             (catch Throwable t
                               (println "[hxindex] periodic catch-up not started:"
+                                       (.getMessage t))))
+                       (try (println "[entindex] periodic catch-up:"
+                                     (pr-str (ent/start-periodic-catch-up!
+                                              @!node
+                                              :catch-up-fn ent-catch-up-with-permit!)))
+                            (catch Throwable t
+                              (println "[entindex] periodic catch-up not started:"
                                        (.getMessage t))))))
         (.setDaemon true)
         (.start)))

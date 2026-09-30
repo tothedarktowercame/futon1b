@@ -114,7 +114,7 @@
             (throw t))
           (:ok r))))))
 
-(defn- write-locked*
+(defn write-locked*
   "Run F holding the in-process hx write lock, with the busy retry OUTSIDE
    the lock (a failed attempt releases the monitor before sleeping, so it
    never starves the writer this JVM is legitimately waiting on)."

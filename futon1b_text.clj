@@ -388,9 +388,15 @@
   round is point reads rather than one full-table `IN` read."
   fxt/equality-hydrate-max-ids)
 
-(defn- encode-doc ^bytes [doc] (serde/write-transit doc :json))
+(defn encode-doc
+  "Transit-encode a complete store document for a SQLite sidecar body cache."
+  ^bytes [doc]
+  (serde/write-transit doc :json))
 
-(defn- decode-doc [^bytes b] (serde/read-transit b :json))
+(defn decode-doc
+  "Decode a complete store document written by encode-doc."
+  [^bytes b]
+  (serde/read-transit b :json))
 
 (defn- put-docs!
   "Upsert stored rows into ev_doc."
