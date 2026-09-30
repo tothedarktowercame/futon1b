@@ -221,6 +221,12 @@
   (reset! !fill-stop? true)
   {:ok true :stopping (some? @!fill-progress)})
 
+(defn fill-in-progress?
+  "True when an operator started a fill! that has not finished: its saved
+  pre-fill checkpoint is present. The server resumes such a fill at boot."
+  []
+  (boolean (when-let [ds (ds*)] (meta-get ds "fill-top-ts"))))
+
 (defn fill!
   "Fill a never-filled entity index. An explicit operator action.
 

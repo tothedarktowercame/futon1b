@@ -1485,6 +1485,18 @@
                             (catch Throwable t
                               (println "[entindex] boot catch-up failed:"
                                        (.getMessage t))))
+                       ;; A fill is started only by an operator. One that a
+                       ;; restart interrupted resumes here, from its saved
+                       ;; checkpoint, yielding to interactive reads; the
+                       ;; periodic catch-up then opens the read gate.
+                       (when (ent/fill-in-progress?)
+                         (future
+                           (try (println "[entindex] resumed fill:"
+                                         (pr-str (ent/fill! @!node :min-free-permits
+                                                            catch-up-min-free-permits)))
+                                (catch Throwable t
+                                  (println "[entindex] resumed fill failed:"
+                                           (.getMessage t))))))
                        ;; Only after the boot build: the repair loop is
                        ;; single-flighted against it anyway, but starting it
                        ;; here keeps the first run a genuine tail scan.

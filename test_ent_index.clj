@@ -127,11 +127,14 @@
         (check! "stop-fill! stops a fill without a checkpoint"
                 (and (= :fill-stopped (:entindex/error first-run))
                      (nil? (:ts (ent/checkpoint)))))
+        (check! "a stopped fill is reported in progress (the server resumes it at boot)"
+                (ent/fill-in-progress?))
         ;; unhooked change to a row the first run already wrote
         (xt/execute-tx node [[:put-docs :entities (entity "ent:fill:1" :probe/fill "one, changed")]])
         (let [res (ent/fill! node :chunk 1 :pause-ms 0)]
           (check! "the resumed fill hydrates only the ids not yet written"
-                  (and (:resumed? (:fill (ent/ent-stats))) (= 1 (:filled res)))))
+                  (and (:resumed? (:fill (ent/ent-stats))) (= 1 (:filled res))))
+          (check! "a finished fill is no longer in progress" (not (ent/fill-in-progress?))))
         (ent/catch-up! node :force true)
         (check! "the first catch-up after a resumed fill replays the in-between write"
                 (and (ent/reads-usable?)
