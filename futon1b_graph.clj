@@ -41,7 +41,13 @@
 
 (defn- with-entity-id-locks
   "Run F while holding every entity-id stripe in ascending numeric order.
-  Ordering prevents batch deadlock; unrelated stripes remain concurrent."
+  Ordering prevents batch deadlock; unrelated stripes remain concurrent.
+
+  Lock order: stripes are taken BEFORE the node monitor
+  (`with-memory-projection-mutation`), as retract-documents! does. Nothing
+  may write an entity while holding the node monitor. Checked 2026-09-30:
+  the node-locked sections in futon1b_server.clj write hyperedges,
+  evidence and act receipts only."
   [ids f]
   (if-not *entity-write-locking?*
     (f)
