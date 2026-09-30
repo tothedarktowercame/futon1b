@@ -319,6 +319,82 @@ hyperedges. The serving JVM uses `ExitOnOutOfMemoryError`, allowing systemd's
 `Restart=on-failure` to recover instead of retaining a socket-listening zombie,
 and production exposes an independent liveness acceptor on port 7072.
 
+### Slow typed reads: a scan is the same price at any limit — index it (2026-09-30)
+
+**The incident.** 504s ("query permit unavailable after 5000ms") went from 0
+to 191 per 15 min between 00:45 and 02:00Z. Every read and write needs one of
+`futon1b-xt`'s four query permits, and a few slow reads held all four. After
+the fixes below and a restart, there were 0 in the 45 min measured.
+
+| read | before | after |
+|---|---|---|
+| `GET /entities?type=mission&limit=1000` | 30–40 s under load | 0.04–0.05 s |
+| `GET /entities/latest?type=pattern/library&limit=5000` | 85–100 s | 0.24 s |
+| `GET /hyperedges?type=code/v05/mission-doc&limit=500` | 25.8 s, 1.06 MB | 8.0 s, 46 KB with `fields=` |
+
+**Why `limit` does not help.** XTDB 2.1.0 reads the whole table for any
+predicate that matches rows (`TN-entities-route-cost-2026-09-26.md`):
+`entities?type=mission&limit=1` cost the same ~20 s as `limit=1000`. Fetching
+by `_id IN (…)` is also a whole-table read at any N. Measured on the 1,052,032
+hyperedges, 389 ids: 6.2 s for one column, 18.0 s for `SELECT *`. By
+contrast `_id = ?` costs ~0.2 s per id, so it is cheaper only below ~40 ids.
+What costs is the number of scans per request, not the size of the answer.
+
+**How the cause was found (do this first next time):**
+1. `jstack` the serving JVM and list the threads inside
+   `futon1b_xt$run_guarded`. Those hold the four permits. On the night, two of
+   them were background catch-ups.
+2. Rank `[futon1b-request] end` lines in the journal by total `elapsed-ms` per
+   route and `type=`. That shows which shapes take the time, and which
+   callers keep failing and retrying (`outcome=client-disconnected`).
+3. Find the client: `ss -tnp | grep :7073` gives the pid, and that process's
+   log gives the component. On the night, it found a self-referential symlink
+   (`futon3a/futon3a -> futon3a`), which the futon3c fs-watcher followed into
+   75 scope re-ingests an hour. It also found three Agency callers reading
+   every mission-doc with client timeouts shorter than the read (5, 20 and
+   30 s). Each of those failed, retried every 30–40 s, and left futon1b
+   scanning for nobody.
+
+**What fixed it (commits `37d1b1e`..`feb010a`, `2a18615`):**
+- **A sidecar index for the slow family.** `futon1b_entindex.clj` keeps
+  `ent_node(id, type, doc)` in the shared SQLite file. Entity writes update it
+  through hooks, a catch-up repairs anything missed, and reads are served only
+  while `reads-usable?` holds. Typed and latest entity reads come from SQLite.
+  Serving bodies without re-reading XTDB is an amendment to C1; see
+  `CANDIDATE-INDEX-CONTRACT.md`.
+- **One scan per request, not two.** An indexed hyperedge type read now
+  re-checks the type and reads the bodies in the same `IN` read (`3d2202d`).
+- **Callers ask for the columns they use.** `fields=` (including
+  `hx/props` and `hx/props.<key>`), with a cache, a kept last-good result and
+  a backoff after failure. Per-key props projection loses rows whose props
+  are stored as an EDN string (162 of the 389 mission-docs).
+- **Maintenance yields.** The fts, hx and entity catch-ups, and the entity
+  fill, skip or wait while fewer than 2 query permits are free.
+
+**Adding an index for another slow query:**
+- Declare it in `futon1b_sidecars.clj`. `test_sidecars.clj` fails on any
+  SQLite table that is not declared, and `/health` shows every sidecar's
+  `:serving?` and `:why`. A sidecar that has stopped serving shows only as
+  slowness, so check `/health :sidecars` first.
+- Copy the entindex contract. Hooks are awaited under the same-id lock. The
+  checkpoint and the hook-failure count are read *before* a catch-up runs.
+  Both legs (`_system_from` upserts, `_system_to` deletes) finish before the
+  checkpoint is saved. `test_ent_index.clj` injects a failure at every page
+  of a catch-up to check this. hxindex had both bugs until `b2cd820`.
+- Fill with `fill!`, not a paged `SELECT … ORDER BY _id` (every page sorts
+  the whole table, and was cancelled at 60 s). Read the ids once on a narrow
+  column, then hydrate in chunks of about 250 while ≥ 2 permits are free.
+  The fill is resumable and the server resumes it at boot. The first catch-up
+  opens the gate. For 56,500 entities under load, the fill took about an hour
+  in total, and the first catch-up took 10.6 min to replay 13,317 changes.
+- Before adding a body cache to a table, weigh its write rate and size. A
+  general hyperedge body cache (1.05M rows, the busiest writes) was judged not
+  worth it. Narrow `fields=` plus caching in the caller was enough there.
+
+The restart script's pre-restart census counts every table. It took 24.2 s
+under load and aborted a safe restart at the old 20 s limit. The limit is now
+120 s (`FUTON1B_RESTART_CENSUS_TIMEOUT_S`).
+
 ### Heap OOM stops ingestion silently-ish; process survives (2026-07-11)
 
 After ~2h of serving-day load (`-Xmx1g`), the node hit
@@ -391,6 +467,9 @@ L1=409, L0=503. The three evidence required-field errors are plain
 | `futon1b_evidence.clj` | A1: evidence write/query/count/sessions/chain |
 | `futon1b_graph.clj` | A3/A4/A5: entities, relations, hyperedge reads, census, type registry |
 | `futon1b_xt.clj` | `safe-q` — fresh-store-tolerant query helper (see findings) |
+| `futon1b_sidecars.clj` | the registry of every derived index, and `:sidecars` in `/health` |
+| `futon1b_entindex.clj` | entity sidecar (`ent_node`): typed and latest entity reads |
+| `futon1b_hxindex.clj` | hyperedge sidecar (`hx_edge`, `hx_node`): type and endpoint candidates |
 | `zai_memory_1b.clj` | Zai memory seam (`memory-search`, `open-store`) |
 | `migration/` | export / transform / ingest (rescue ladder) / verify — the data leg |
 | `test_a1a2.clj`, `test_a3a4a5.clj` | HTTP smoke suites (26/26, 31/31) |
