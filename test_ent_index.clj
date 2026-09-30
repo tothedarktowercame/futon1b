@@ -85,9 +85,9 @@
       (xt/execute-tx node [[:put-docs :entities (entity "ent:fill:1" :probe/fill "one")]
                              [:put-docs :entities (entity "ent:fill:2" :probe/fill "two")]])
       (clear-index!)
-      (let [res (ent/fill! node :page 1)
+      (let [res (ent/fill! node :chunk 1 :pause-ms 0)
             hydrated (fxt/hydrate-by-ids node :entities ["ent:fill:1" "ent:fill:2"])]
-        (check! "fill! uses bounded pages and sees both current entities"
+        (check! "fill! hydrates in bounded chunks and sees both current entities"
                 (= 2 (:filled res)))
         (check! "fill! documents equal the store's current hydrated entities"
                 (= hydrated (mapv stored-doc ["ent:fill:1" "ent:fill:2"])))

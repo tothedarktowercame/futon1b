@@ -174,12 +174,6 @@
           (jdbc/execute! tx ["DELETE FROM ent_node WHERE id = ?" id]))))
   (count ids)))
 
-(defn- current-page [node after page with-page-permit]
-  (permit-call with-page-permit
-               #(fxt/timed-q node ["SELECT * FROM entities
-                                    WHERE _id > ? ORDER BY _id LIMIT ?"
-                                   (str after) (long page)])))
-
 (defn- newest-version
   "(system time, id) of the store's newest entity version, or nil when empty."
   [node with-page-permit]
@@ -193,47 +187,84 @@
                                node ["SELECT _id FROM entities FOR ALL SYSTEM_TIME
                                       WHERE _system_from = ? ORDER BY _id" ts])))}))))
 
+(defonce !fill-progress (atom nil))
+(defonce ^:private !fill-stop? (atom false))
+
+(defn stop-fill!
+  "Ask a running fill! to stop after its current chunk. The index stays
+  unfilled (no checkpoint), so fill! can be run again."
+  []
+  (reset! !fill-stop? true)
+  {:ok true :stopping (some? @!fill-progress)})
+
 (defn fill!
-  "Fill a never-filled entity index from bounded current-row pages. This is
-  an explicit operator action. Each page (and checkpoint query) is wrapped by
-  WITH-PAGE-PERMIT, which defaults to direct execution for offline tests.
+  "Fill a never-filled entity index. An explicit operator action.
+
+  Reads every current id once on narrow columns, then hydrates them in
+  CHUNK-sized `_id IN` reads, sleeping PAUSE-MS between chunks so other
+  readers get a permit. Each read goes through WITH-PAGE-PERMIT (direct
+  execution for offline tests). Measured live 2026-09-30 under load: the
+  56,499 ids in 14.8 s, and 500 ids hydrated in 38.8 s. An `IN` read costs
+  about the same at any N (TN-entities-speedups-2026-09-26 §1), so chunks
+  are large. P1's `SELECT * ... ORDER BY _id LIMIT 1000` pages were
+  cancelled at the 60 s deadline: the ordering sorts every body in the
+  table for each page.
 
   The index may already hold rows: the write hooks run from the moment the
-  namespace is loaded, before anyone fills. A page read before a later hook
+  namespace is loaded, before anyone fills. A chunk read before a later hook
   write can overwrite that newer row, so the fill leaves the read gate CLOSED;
   the first catch-up! replays every version after the pre-fill checkpoint and
-  is what opens it."
-  [node & {:keys [page with-page-permit]
-           :or {page 1000 with-page-permit @!with-page-permit}}]
-  (when (> (long page) 1000)
-    (throw (ex-info "entindex: fill page must be <= 1000" {:page page})))
+  is what opens it. Progress is in !fill-progress (and ent-stats)."
+  [node & {:keys [chunk pause-ms with-page-permit]
+           :or {chunk 2000 pause-ms 2000 with-page-permit @!with-page-permit}}]
+  (when-not (<= 1 (long chunk) 2000)
+    (throw (ex-info "entindex: fill chunk must be 1..2000" {:chunk chunk})))
   (let [ds (or (ds*) (throw (ex-info "entindex: no datasource" {})))
         filled-at (meta-get ds "checkpoint-ts")]
     (when filled-at
       (throw (ex-info "entindex: already filled; use catch-up! (or rebuild from empty)"
                       {:checkpoint-ts filled-at})))
-    (let [tx-id (latest-tx-id node with-page-permit)
-          top (newest-version node with-page-permit)
-          n (loop [after "" n 0]
-              (let [rows (current-page node after page with-page-permit)]
-                (if (empty? rows)
-                  n
-                  (do
+    (reset! !fill-stop? false)
+    (try
+      (let [started (System/currentTimeMillis)
+            tx-id (latest-tx-id node with-page-permit)
+            top (newest-version node with-page-permit)
+            ids (permit-call with-page-permit
+                             #(mapv (comp str row-id)
+                                    (fxt/timed-q node ["SELECT _id FROM entities"] 120)))
+            chunks (partition-all chunk ids)
+            _ (reset! !fill-progress {:ids (count ids) :chunks (count chunks)
+                                      :done 0 :written 0 :started-at (str (Instant/now))})
+            n (loop [[c & more] chunks n 0 i 0]
+                (cond
+                  (nil? c) n
+                  @!fill-stop? (throw (ex-info "entindex: fill stopped by stop-fill!"
+                                               {:entindex/error :fill-stopped :written n}))
+                  :else
+                  (let [docs (permit-call with-page-permit
+                                          #(fxt/hydrate-by-ids node :entities (vec c)))]
                     (with-write-tx [tx ds]
-                      (doseq [doc rows]
+                      (doseq [doc docs]
                         (jdbc/execute! tx ["INSERT INTO ent_node(id,type,doc) VALUES(?,?,?)
                                            ON CONFLICT(id) DO UPDATE SET
                                            type=excluded.type, doc=excluded.doc"
                                            (str (row-id doc)) (str (:entity/type doc))
                                            (text/encode-doc doc)])))
-                    (recur (str (row-id (last rows))) (+ n (count rows)))))))]
-      (meta-set! ds "checkpoint-ts" (if top (str (row-marker top)) (str epoch)))
-      (meta-set! ds "checkpoint-id" (if top (str (row-id top)) ""))
-      (meta-set! ds "last-tx-id" (str tx-id))
-      ;; Matches no failure count, so reads-usable? stays false until the
-      ;; first catch-up! records a real one (see the docstring).
-      (meta-set! ds "hook-failures-at-catch-up" -1)
-      {:filled n :tx-id tx-id :gate :closed-until-first-catch-up})))
+                    (swap! !fill-progress assoc :done (inc i) :written (+ n (count docs))
+                           :elapsed-ms (- (System/currentTimeMillis) started))
+                    (when (and (seq more) (pos? (long pause-ms)))
+                      (Thread/sleep (long pause-ms)))
+                    (recur more (+ n (count docs)) (inc i)))))]
+        (meta-set! ds "checkpoint-ts" (if top (str (row-marker top)) (str epoch)))
+        (meta-set! ds "checkpoint-id" (if top (str (row-id top)) ""))
+        (meta-set! ds "last-tx-id" (str tx-id))
+        ;; Matches no failure count, so reads-usable? stays false until the
+        ;; first catch-up! records a real one (see the docstring).
+        (meta-set! ds "hook-failures-at-catch-up" -1)
+        (swap! !fill-progress assoc :finished-at (str (Instant/now)))
+        {:filled n :tx-id tx-id :gate :closed-until-first-catch-up
+         :elapsed-ms (- (System/currentTimeMillis) started)})
+      (finally (reset! !fill-stop? false)))))
 
 (defonce ^:private !catch-up-running? (atom false))
 (declare !scheduler)
@@ -323,6 +354,7 @@
                                                   FROM ent_node GROUP BY type ORDER BY entities DESC"]
                                              unqualified))
            :checkpoint (checkpoint)
+           :fill @!fill-progress
            :periodic? (boolean @!scheduler)
            :catch-up-running? @!catch-up-running?)))
 
