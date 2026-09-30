@@ -36,7 +36,10 @@ URL=http://127.0.0.1:7073
 UNIT=futon1b-zone.service
 : > "$R"
 say(){ echo "$(date -u +%H:%M:%SZ) $*" >> "$R"; }
-census(){ curl -sf --max-time 20 "$URL/health?deep=true" 2>/dev/null; }
+# The census counts every table (1,052,032 hyperedges on 2026-09-30) and took
+# 24.2 s under load, so the old fixed 20 s aborted a restart that was safe.
+CENSUS_TIMEOUT_S="${FUTON1B_RESTART_CENSUS_TIMEOUT_S:-120}"
+census(){ curl -sf --max-time "$CENSUS_TIMEOUT_S" "$URL/health?deep=true" 2>/dev/null; }
 
 # A receipt read mid-run looks like a truncated, failed one: startup can take
 # minutes (memory-projection hydration alone ran 132s on 2026-09-24).  So the
