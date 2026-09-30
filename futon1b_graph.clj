@@ -62,7 +62,7 @@
                (reverse locks))))))
 
 
-(declare with-entity-mutation)
+(declare with-entity-mutation with-entity-docs-mutation)
 
 (defn put-verified!
   "Transform, put through the rescue ladder, verify by read-back.
@@ -72,7 +72,9 @@
   (let [xdoc (xf/transform-doc doc !shape-log {:log-stringify? true})
         write! (fn []
                  (let [put! #(ingest/put-doc-with-rescue! node table xdoc !shape-log)
-                       res (if (= :entities table) (with-entity-mutation put!) (put!))]
+                       res (if (= :entities table)
+                             (with-entity-docs-mutation [doc xdoc] put!)
+                             (put!))]
                    (if (fxt/present? node table (:xt/id xdoc))
                      (do
                        (when (= :entities table)
@@ -208,6 +210,17 @@
 ;; "table not found" and "not all variables in scope" to [] as well; on
 ;; :entities both mean no row has those columns, which is the same answer.
 ;;
+;; Narrowed 2026-09-30 (claude-1, for Joe): a put or batch write retires only
+;; the warrants for the names and external-ids of the docs it writes, through
+;; a per-key generation in the basis. Every warrant a write could make false
+;; is covered: an absence or positive warrant for a value the written doc now
+;; carries is retired; a positive warrant for a value the doc no longer
+;; carries lists an id whose hydrated doc fails the re-check below. With the
+;; global bump on every write, all 2598 warrants issued before the 09-30
+;; restart were retired before any reuse (:honoured 0, generation 196893),
+;; because the file watcher writes entities constantly. Retractions still
+;; retire everything (they do not read the deleted docs' names).
+;;
 ;; An absence warrant is returned in the entity route's 404 body, so a caller
 ;; can tell "scanned, not there" from a failure. A scan that errors throws and
 ;; issues nothing. A positive warrant only names ids; the docs are hydrated
@@ -233,13 +246,23 @@
 (defonce ^:private !alias-warrant-stats
   (atom {:issued 0 :honoured 0 :rechecked-out 0 :superseded 0}))
 
-(defn- current-alias-basis []
-  {:boot alias-boot-id :entity-generation @!entity-generation})
+(defonce ^:private !alias-key-generation (atom {}))
+
+(def ^:private max-alias-key-generations
+  "Distinct written names tracked; past this, everything is retired and the
+  map starts again (sound: the global generation moves too)."
+  100000)
+
+(defn- current-alias-basis
+  ([] {:boot alias-boot-id :entity-generation @!entity-generation})
+  ([k] (assoc (current-alias-basis)
+              :key-generation (get @!alias-key-generation k 0))))
 
 (defn invalidate-alias-warrants!
   "Retire every alias warrant: bump the generation and drop the entries."
   []
   (swap! !entity-generation inc)
+  (reset! !alias-key-generation {})
   (reset! !alias-warrants {:entries {} :insertion-order []})
   nil)
 
@@ -248,6 +271,33 @@
   [f]
   (invalidate-alias-warrants!)
   (try (f) (finally (invalidate-alias-warrants!))))
+
+(defn- alias-keys-of
+  "The warrant keys a doc's alias values could answer: its name for both
+  scans, its external-id for the external scan."
+  [docs]
+  (distinct
+   (for [d docs
+         [v ks] [[(:entity/name d) [false true]] [(:entity/external-id d) [true]]]
+         :when (some? v)
+         e? ks]
+     [v e?])))
+
+(defn- retire-alias-keys! [ks]
+  (if (> (count @!alias-key-generation) max-alias-key-generations)
+    (invalidate-alias-warrants!)
+    (do (swap! !alias-key-generation
+               (fn [m] (reduce #(update %1 %2 (fnil inc 0)) m ks)))
+        (swap! !alias-warrants update :entries #(apply dissoc % ks))))
+  nil)
+
+(defn with-entity-docs-mutation
+  "Run F, a put of DOCS to :entities, retiring before and after only the
+  warrants for the alias values those docs carry."
+  [docs f]
+  (let [ks (vec (alias-keys-of docs))]
+    (retire-alias-keys! ks)
+    (try (f) (finally (retire-alias-keys! ks)))))
 
 (defn alias-warrant-snapshot
   "Warrant count, current basis and counters for /health."
@@ -258,7 +308,7 @@
 
 (defn- current-warrant [k]
   (let [w (get-in @!alias-warrants [:entries k])]
-    (when (and w (= (:warrant/basis w) (current-alias-basis)))
+    (when (and w (= (:warrant/basis w) (current-alias-basis k)))
       w)))
 
 (defn- store-warrant! [k w]
@@ -311,7 +361,7 @@
       (do (swap! !alias-warrant-stats update :honoured inc)
           {:docs docs :warrant (assoc reused :warrant/reused? true)})
       (let [_ (when reused (swap! !alias-warrant-stats update :rechecked-out inc))
-            basis (current-alias-basis)
+            basis (current-alias-basis k)
             ids (scan-alias-ids node v external?)
             docs (filterv #(alias-match? v external? %) (hydrate ids))
             w {:warrant/claim (if (seq docs) :resolved :absent)
@@ -322,7 +372,7 @@
                :warrant/ids (mapv :xt/id docs)
                :warrant/basis basis
                :warrant/issued-at (str (java.time.Instant/now))}]
-        (if (and (= basis (current-alias-basis))
+        (if (and (= basis (current-alias-basis k))
                  (<= (count (str v)) max-warranted-subject-chars))
           (do (store-warrant! k w)
               (swap! !alias-warrant-stats update :issued inc))
@@ -576,7 +626,8 @@
             (map :xt/id docs)
             (fn []
               (let [rescue
-                    (with-entity-mutation
+                    (with-entity-docs-mutation
+                     docs
                      (fn []
                        (try (xt/execute-tx
                              node (mapv (fn [d] [:put-docs :entities d]) docs))

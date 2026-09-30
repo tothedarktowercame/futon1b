@@ -88,6 +88,33 @@
               (and (= 200 (:status w)) (= "Seven" (get-in r [:body :entity :name])))
               [w r]))
 
+    (println "— a write retires only its own names' warrants")
+    (let [_ (get-ent "pat/bystander")
+          w (req "POST" ENT {:name "pat/unrelated" :type "gadget"} ph)
+          r (get-ent "pat/bystander")]
+      (check! "unrelated entity write keeps a bystander's absence warrant"
+              (and (= 200 (:status w)) (= 404 (:status r))
+                   (true? (get-in r [:body :warrant :warrant/reused?])))
+              [w r]))
+    (let [_ (get-ent "pat/bystander")
+          w (req "POST" (str base "/api/alpha/entities/batch")
+                 {:entities [{:name "pat/unrelated-2" :type "gadget"}]} ph)
+          r (get-ent "pat/bystander")]
+      (check! "unrelated batch write keeps it too"
+              (and (= 200 (:status w))
+                   (true? (get-in r [:body :warrant :warrant/reused?])))
+              [w r]))
+    (let [_ (req "POST" ENT {:id "id-mover" :name "pat/before" :type "gadget"} ph)
+          r1 (get-ent "pat/before")
+          _ (get-ent "pat/after")
+          w (req "POST" ENT {:id "id-mover" :name "pat/after" :type "gadget"} ph)
+          r2 (get-ent "pat/before")
+          r3 (get-ent "pat/after")]
+      (check! "rename through the write path: old name absent, new name found"
+              (and (= 200 (:status r1)) (= 200 (:status w))
+                   (= 404 (:status r2)) (= 200 (:status r3)))
+              [r1 w r2 r3]))
+
     (println "— a retraction retires a resolved warrant")
     (let [_ (req "POST" ENT {:id "id-gone" :name "pat/gone" :type "gadget"} ph)
           r1 (get-ent "pat/gone")
@@ -186,6 +213,26 @@
       (check! "next lookup rescans rather than reusing it"
               (false? (get-in r2 [:body :warrant :warrant/reused?]))
               r2))
+
+    (println "— a scan that overlaps a write of ITS name is not kept")
+    (let [scan @#'graph/scan-alias-ids
+          superseded (:superseded (stats))
+          r1 (with-redefs [graph/scan-alias-ids
+                           (fn [n v e?]
+                             (let [ids (scan n v e?)]
+                               ;; the scanned name is written mid-scan
+                               (graph/put-verified! node :entities
+                                                    {:xt/id "id-raced2" :entity/id "id-raced2"
+                                                     :entity/name "pat/raced2"
+                                                     :entity/type :gadget})
+                               ids))]
+               (get-ent "pat/raced2"))
+          r2 (get-ent "pat/raced2")]
+      (check! "per-name overlap: stale absence answered once, not kept"
+              (and (= 404 (:status r1))
+                   (= (inc superseded) (:superseded (stats)))
+                   (= 200 (:status r2)))
+              [r1 r2 (stats)]))
 
     (println "— minted ids skip the alias scan")
     (let [r (get-ent (str (random-uuid)))]
