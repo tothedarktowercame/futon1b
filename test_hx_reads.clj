@@ -203,6 +203,21 @@
                               (hx-doc "hx:e1:01" :probe/edits ["E1" "SHARED"])]])
         (hx/catch-up! node))
 
+      ;; ---- P3: one XTDB read per candidate page ----------------------------
+      ;; The type re-check and the body read are a single `_id IN` read (each
+      ;; is a whole-table scan live). A type-only read whose candidates fit
+      ;; one page makes exactly one XTDB call, with or without `fields`.
+      (doseq [fields [nil ["hx/endpoints"]]]
+        (let [calls (atom 0)
+              counting (fn [n q] (swap! calls inc) (futon1b-xt/safe-q n q))
+              _ (graph/invalidate-hyperedge-query-cache!)
+              r (graph/hyperedges-query node (cond-> {:type "probe/edits" :limit 10}
+                                               fields (assoc :fields fields))
+                                        counting)]
+          (check! (str "P3: an indexed type-only read makes ONE XTDB read (fields "
+                       (pr-str fields) ")")
+                  (and (some? (:hx-index r)) (= 6 (count (:hyperedges r))) (= 1 @calls)))))
+
       ;; ---- P3: type-only reads from the index -------------------------------
       ;; Fixture census: probe/edits has 6 rows (hx:e1:00..04, hx:e2),
       ;; probe/commits 1, probe/other 1 (added in the hook-failure section —

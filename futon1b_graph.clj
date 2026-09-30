@@ -1219,10 +1219,10 @@
   "P3: serve a type-ONLY read (`type` + `limit`/`after`/`include-total`/
   `fields` — no end, repo, source-file, mission, latest or as-of) from the
   SQLite sidecar, re-checking every candidate against XTDB exactly as P2b
-  does for type+end. The narrow re-check projection is (id, type): it drops
-  ids deleted since the last catch-up and rows whose type changed
-  unhooked. Full documents (or the `fields` columns) are read only for the
-  rows that pass AND survive the window cut to `limit`.
+  does for type+end. The re-check drops ids deleted since the last catch-up
+  and rows whose type changed unhooked; it reads the type TOGETHER with the
+  full documents (or the `fields` columns) in one `_id IN` read per
+  candidate page, since each such read scans the whole table (2026-09-30).
 
   Ordering (xt/id ascending), the keyset cursor (`after` = the last xt/id
   of the previous window, strict >) and `next-cursor` (emitted whenever the
@@ -1235,24 +1235,27 @@
   added response key."
   [node {:keys [t n after include-total? fields]} query-fn]
   (let [match? (fn [row] (= t (normalize-type (:hx/type row))))
+        ;; The re-check and the body read are ONE `_id IN` read: each is a
+        ;; scan of the whole hyperedges table (1,050,467 rows on 2026-09-30:
+        ;; 6.2 s for the type column, 18.0 s for SELECT *, 8.3 s for
+        ;; type+endpoints+props, 389 mission-doc ids), so reading the type
+        ;; with the requested columns and filtering here saves a full scan.
+        cols (when (seq fields)
+               (vec (distinct (cons :hx/type (keep hyperedge-window-field-source fields)))))
         ;; Same pull-until-full loop as P2b: the re-check can drop stale
         ;; candidates, so a candidate page may yield fewer than n live rows.
-        ids (loop [after (str (or after "")) acc []]
-              (if (>= (count acc) n)
-                (vec (take n acc))
-                (let [cands (hx/type-candidates
-                             {:type t :after after :fetch n})]
-                  (if (empty? cands)
-                    acc
-                    (let [live (->> (fetch-hyperedge-cols-by-ids
-                                     node [:hx/type] cands query-fn)
-                                    (filter match?)
-                                    (map :xt/id))]
-                      (recur (last cands) (into acc live)))))))
-        docs (fetch-hyperedge-cols-by-ids
-              node (when (seq fields)
-                     (vec (keep hyperedge-window-field-source fields)))
-              ids query-fn)
+        docs (loop [after (str (or after "")) acc []]
+               (if (>= (count acc) n)
+                 (vec (take n acc))
+                 (let [cands (hx/type-candidates
+                              {:type t :after after :fetch n})]
+                   (if (empty? cands)
+                     acc
+                     (let [live (filter match?
+                                        (fetch-hyperedge-cols-by-ids
+                                         node cols cands query-fn))]
+                       (recur (last cands) (into acc live)))))))
+        ids (mapv :xt/id docs)
         out (mapv #(if (seq fields)
                      (project-hyperedge-fields % fields)
                      (dissoc % :xt/id))
