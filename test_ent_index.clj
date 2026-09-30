@@ -128,5 +128,38 @@
                 (and (= doc (stored-doc "ent:failed-hook"))
                      (ent/reads-usable?))))
 
+      ;; The gate's promise: whenever reads-usable? is true, the index equals
+      ;; the store. Break it the way production can: an entity write whose
+      ;; hook fails lands while a catch-up is running. The injection happens
+      ;; inside the k-th store page the catch-up takes, for every k, so it
+      ;; lands before, between and after the legs. Bad case: read the next
+      ;; checkpoint and the hook-failure count at the END of the run (P1 as
+      ;; first committed) and the late k fail here.
+      (let [index-matches-store?
+            (fn []
+              (let [store (into {} (map (juxt (comp str :xt/id) identity))
+                                (xt/q node "SELECT * FROM entities"))
+                    index (into {} (map (juxt :id (comp text/decode-doc :doc)))
+                                (jdbc/execute! (ds) ["SELECT id, doc FROM ent_node"]
+                                               unqualified))]
+                (= store index)))]
+        (doseq [k (range 1 13)]
+          (let [calls (atom 0)
+                id (str "ent:race:" k)
+                inject! (fn []
+                          (xt/execute-tx node [[:put-docs :entities
+                                                (entity id :probe/race (str "race " k))]])
+                          ;; what a failed on-put! hook records
+                          (swap! ent/!stats update :hook-failures inc))
+                wrapper (fn [f]
+                          (when (= k (swap! calls inc)) (inject!))
+                          (f))]
+            (ent/catch-up! node :force true :with-page-permit wrapper)
+            (check! (format "k=%2d: gate open only if the index equals the store" k)
+                    (or (not (ent/reads-usable?)) (index-matches-store?)))
+            (ent/catch-up! node :force true)
+            (check! (format "k=%2d: the next catch-up repairs it and reopens the gate" k)
+                    (and (ent/reads-usable?) (index-matches-store?))))))
+
       (println "ENT INDEX: ALL PASS"))
     (shutdown-agents)))

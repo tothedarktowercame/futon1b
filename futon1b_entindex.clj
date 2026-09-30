@@ -83,9 +83,11 @@
 (defn index-doc! [ds doc]
   (let [id (str (:xt/id doc))
         t (str (:entity/type doc))]
-    (when (or (str/blank? id) (str/blank? t))
-      (throw (ex-info "entindex: entity requires xt/id and entity/type"
-                      {:doc doc})))
+    ;; A typeless entity is stored under type "" here exactly as repair-ids!
+    ;; and fill! store it; throwing would count a hook failure and close the
+    ;; gate until the next catch-up for a write that is not an error.
+    (when (str/blank? id)
+      (throw (ex-info "entindex: entity requires xt/id" {:doc doc})))
     (write-locked*
      #(jdbc/execute! ds ["INSERT INTO ent_node(id,type,doc) VALUES(?,?,?)
                           ON CONFLICT(id) DO UPDATE SET
@@ -178,6 +180,19 @@
                                     WHERE _id > ? ORDER BY _id LIMIT ?"
                                    (str after) (long page)])))
 
+(defn- newest-version
+  "(system time, id) of the store's newest entity version, or nil when empty."
+  [node with-page-permit]
+  (permit-call
+   with-page-permit
+   #(let [ts (:m (first (fxt/timed-q node ["SELECT MAX(_system_from) AS m
+                                           FROM entities FOR ALL SYSTEM_TIME"])))]
+      (when ts
+        {:marker ts
+         :xt/id (row-id (last (fxt/timed-q
+                               node ["SELECT _id FROM entities FOR ALL SYSTEM_TIME
+                                      WHERE _system_from = ? ORDER BY _id" ts])))}))))
+
 (defn fill!
   "Fill an EMPTY entity index from bounded current-row pages. This is an
   explicit operator action. Each page (and checkpoint query) is wrapped by
@@ -191,16 +206,11 @@
                                            unqualified)))]
     (when (pos? (long existing))
       (throw (ex-info "entindex: fill requires an empty index" {:rows existing})))
-    (let [tx-id (latest-tx-id node with-page-permit)
-          top (permit-call
-               with-page-permit
-               #(let [ts (:m (first (fxt/timed-q node ["SELECT MAX(_system_from) AS m
-                                                         FROM entities FOR ALL SYSTEM_TIME"])))]
-                  (when ts
-                    {:marker ts
-                     :xt/id (row-id (last (fxt/timed-q
-                                           node ["SELECT _id FROM entities FOR ALL SYSTEM_TIME
-                                                  WHERE _system_from = ? ORDER BY _id" ts])))})))
+    (let [;; Taken before the first store read: a hook that fails during the
+          ;; fill has not been repaired by it and must keep the gate closed.
+          failures-at-start (:hook-failures @!stats)
+          tx-id (latest-tx-id node with-page-permit)
+          top (newest-version node with-page-permit)
           n (loop [after "" n 0]
               (let [rows (current-page node after page with-page-permit)]
                 (if (empty? rows)
@@ -217,7 +227,7 @@
       (meta-set! ds "checkpoint-ts" (if top (str (row-marker top)) (str epoch)))
       (meta-set! ds "checkpoint-id" (if top (str (row-id top)) ""))
       (meta-set! ds "last-tx-id" (str tx-id))
-      (meta-set! ds "hook-failures-at-catch-up" (:hook-failures @!stats))
+      (meta-set! ds "hook-failures-at-catch-up" failures-at-start)
       {:filled n :tx-id tx-id})))
 
 (defonce ^:private !catch-up-running? (atom false))
@@ -236,12 +246,20 @@
             started (System/currentTimeMillis)]
         (if-not (meta-get ds "checkpoint-ts")
           {:skipped :not-filled}
-          (let [tx-id (latest-tx-id node with-page-permit)
+          (let [failures-at-start (:hook-failures @!stats)
+                tx-id (latest-tx-id node with-page-permit)
                 prior (some-> (meta-get ds "last-tx-id") Long/parseLong)]
             (if (and (not force) (some? prior) (= prior tx-id))
               {:skipped :no-new-tx :tx-id tx-id}
               (let [checkpoint [(meta-get ds "checkpoint-ts")
                                 (or (meta-get ds "checkpoint-id") "")]
+                    ;; The next checkpoint is read BEFORE the legs run. Every
+                    ;; version at or before it is seen by the legs below;
+                    ;; anything committed later has a later system time and
+                    ;; is seen by the next run. Read after the legs (as P1
+                    ;; first did), a version committed in between landed
+                    ;; behind the checkpoint unrepaired.
+                    newest (newest-version node with-page-permit)
                     leg (fn [col]
                           (loop [after checkpoint n 0]
                             (let [rows (changed-page node col after page with-page-permit)]
@@ -253,24 +271,17 @@
                                           (str (row-id last-row))]
                                          (+ n (count rows))))))))
                     upserts (leg "_system_from")
-                    tombstones (if tombstones? (leg "_system_to") 0)
                     ;; Both legs begin at the old checkpoint. Advance only
                     ;; after both complete, so a failed tombstone leg cannot
                     ;; hide deletes behind an upsert watermark.
-                    newest (permit-call
-                            with-page-permit
-                            #(let [ts (:m (first (fxt/timed-q node ["SELECT MAX(_system_from) AS m
-                                                                    FROM entities FOR ALL SYSTEM_TIME"])))]
-                               (when ts
-                                 {:marker ts
-                                  :xt/id (row-id (last (fxt/timed-q
-                                                        node ["SELECT _id FROM entities FOR ALL SYSTEM_TIME
-                                                               WHERE _system_from = ? ORDER BY _id" ts])))})))]
+                    tombstones (if tombstones? (leg "_system_to") 0)]
                 (when newest
                   (meta-set! ds "checkpoint-ts" (str (row-marker newest)))
                   (meta-set! ds "checkpoint-id" (str (row-id newest))))
                 (meta-set! ds "last-tx-id" tx-id)
-                (meta-set! ds "hook-failures-at-catch-up" (:hook-failures @!stats))
+                ;; Failures counted before this run began; one that happened
+                ;; during it is not known to be repaired and keeps the gate shut.
+                (meta-set! ds "hook-failures-at-catch-up" failures-at-start)
                 (let [res {:changed (+ upserts tombstones)
                            :upsert-leg upserts :tombstone-leg tombstones
                            :tx-id tx-id :elapsed-ms (- (System/currentTimeMillis) started)}]
