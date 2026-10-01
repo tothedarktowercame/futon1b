@@ -1,0 +1,1 @@
+{:lint-as {futon1b-scopeindex/with-write-tx clojure.core/with-open}}
