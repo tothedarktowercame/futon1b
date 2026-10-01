@@ -214,6 +214,34 @@ URL-decoded here).
   `before` + `include-ephemeral` (the futon3c EvidenceBackend protocol grew
   them 2026-07-10) — flagged as a deliberate contract extension.
 
+#### Futon1b temporal evidence extension (P6, 2026-09-27)
+
+`GET /api/alpha/evidence` and `/api/alpha/evidence/count` accept:
+
+- `system-as-of=T`: select evidence as known to XTDB at system time T.
+- `valid-as-of=T`: select evidence valid at XTDB valid time T.
+- Both may be supplied; each constrains its own axis. An omitted axis keeps
+  XTDB's current-time default. With neither, existing behaviour is unchanged.
+- Values must be ISO-8601 instants with a UTC offset (e.g.
+  `2026-09-24T17:00:00Z`). Invalid or empty values return **400**, with
+  `:error :reason :invalid-temporal-instant` and `:context` naming the
+  parameter, value and an explanatory message. They are never ignored.
+
+The public evidence writer calls `put-doc-with-rescue!` without `valid-from`,
+so XTDB valid time starts at insertion/system time. `:evidence/at` is a
+separate caller-supplied event timestamp: backdating it does **not** backdate
+XTDB validity. `since`/`before` still compare that event-time string; they do
+not substitute for either as-of parameter. Data inserted with explicit
+valid-from through other XTDB ingestion paths is read on its actual valid axis.
+
+Selection, pagination and full-body hydration use the same supplied temporal
+basis. Retain both as-of parameters when following `next-cursor`. Temporal tag
+queries use the authoritative XTDB scan because the tag sidecar stores only
+current membership; current queries continue using the sidecar. Existing page,
+scan and deadline bounds still apply. These parameters are supported on the
+list and count routes only; point, chain, sessions and text-search reads are
+not temporal APIs.
+
 #### Futon1b bounded-page extension (2026-07-22)
 
 Futon1b deliberately does not preserve futon1a's unsafe unbounded realization
@@ -399,6 +427,32 @@ because the tail is taken wholesale.
 - **200**: the hyperedge doc minus `:xt/id` (top-level map, no envelope),
   only if the doc exists **and** has `:hx/id`; otherwise **404** `{:error
   "not found" :hx/id <id>}`.
+
+### Minted act IDs (P6b, opt-in on POST /api/alpha/hyperedge)
+
+`:hx/mint-id true` allocates a fresh opaque `act:<random-uuid>` ID at write
+time and returns `{:ok true :hx/id ... :minted? true}`. Two identical acts
+remain distinct. Absent or false preserves the existing derived/explicit-ID
+semantics. The option must be boolean; minting cannot also specify `:hx/id`
+(or `:id`) or request retraction. The pure document builder and compound
+memory/assert writer reject minting options: use the hyperedge write route.
+
+Optional `:hx/idempotency-key` must be a nonblank string with minting enabled.
+Keys are global within the store: callers should namespace delivery keys.
+The act and a receipt in `:hyperedge-act-keys` commit in one XTDB transaction;
+receipt read/check/write is serialized on the existing owning node object.
+No process-local key registry is authoritative. Same key and normalized
+request (including explicit valid time) returns the original ID with
+`:no-op? true`, without another transaction. Reusing a key for a different
+request returns **409** `:idempotency-conflict`. A new key mints a new act.
+Validation failures are **400**. A failed transaction or failed read-back is
+an error, never a successful mint; act and receipt are not rescued separately.
+
+To retract, send the returned `:hx/id` with the original type/endpoints and
+`:hx/op "retract"`, omitting minting/idempotency options. Existing
+`:hx/valid-time` and valid/system as-of reads apply independently to each act.
+Receipts survive retraction, so retrying the original keyed write acknowledges
+its original ID without resurrecting it. New acts require a new delivery key.
 
 ### GET /api/alpha/hyperedges?type=…&end=…&limit=…&as-of=…
 `app.clj:387-403`. Requires `type` **or** `end`, else **400** `{:error "type
@@ -636,11 +690,24 @@ The authoritative Futon1b substrate additionally exposes three semantic
 operations needed by consumers that formerly dereferenced Futon1a's embedded
 XTDB node. These routes expose graph meanings rather than XTDB query forms:
 
-- `GET /api/alpha/entities?type=…&limit=…&after=…` returns raw typed entity
-  documents in stable `xt/id` order. `:count` is the true total for the type,
-  not the returned window size; a full bounded window includes `:next-cursor`
-  for the following request. Legacy top-level domain fields and newer
-  `:entity/props` fields remain interpretable.
+- `GET /api/alpha/entities?type=…&limit=…&after=…&include-total=…&ordered=…` returns raw
+  typed entity documents in stable `xt/id` order. `:count` is the true total
+  for the type, not the returned window size; a full bounded window includes
+  `:next-cursor` for the following request. Legacy top-level domain fields and
+  newer `:entity/props` fields remain interpretable.
+  `include-total=false` skips the total, which is a second full scan of the
+  type (`TN-entities-speedups-2026-09-26.md`); `:count` is then the typed
+  absence `{:absent :not-requested}` — a caller must not read it as `0`. The
+  default is `true`, unlike `/api/alpha/hyperedges`, where the total has always
+  been opt-in (§4): the two routes share the parameter's name and spelling, not
+  its default, because this route has always returned a total.
+  `ordered=false` drops the window's ordering, which is the other full scan
+  (same note §2). The page is then an arbitrary but bounded slice of the type
+  and carries **no** `:next-cursor`, because the ordering is what a cursor
+  resumes; asking for `after` together with `ordered=false` is refused
+  `400 {:error {:layer 4 :reason :unordered-page-has-no-cursor}}` rather than
+  served, since paging an unordered read both skips and repeats rows. Default
+  `true`, spelled like `include-total`.
 - `GET /api/alpha/relations?type=…|types=a,b&from=…&to=…&limit=…&hydrate=true`
   returns matching relations. `hydrate=true` adds the referenced entity
   documents once, avoiding N+1 endpoint lookups. Filters are conjunctive;
@@ -791,3 +858,39 @@ when scope=latest; required otherwise). Re-ingests all docs through
    500); all other numeric params swallow parse errors.
 8. Hyperedge scan queries carry a 15s XTDB `:timeout`; census must stay a
    bound-type count-pushdown (a full census scan times out at ~470k docs).
+
+### Write-time origin (M-象-2000 P6o-1)
+
+Evidence writes optionally accept `origin` / `evidence/origin`; absent preserves
+legacy behavior. The map is preserved on reads. Required keys: `kind` (operator,
+agent, harness, unknown), nonblank `actor`, `writer`, `attributed-author` (must
+match author), `authorization` (unknown or a nonblank grant reference),
+`recorded-at` (ISO instant), and `basis` (write-time). Optional nonblank string
+keys: `source-id`, `surface`. EDN keywords and JSON enum strings are accepted.
+Unknown keys, invalid values, missing required keys, or explicit null produce
+HTTP 400 with `:error/code :invalid-origin`. The author is never rewritten.
+Origin records producer knowledge, not proof of identity or an authorization
+grant; missing authority remains unknown. Retrospective attribution is separate.
+
+### Execution harness (M-象-2000 P3-3a)
+
+Evidence POST optionally accepts `harness` / `evidence/harness` (namespaced wins),
+a sibling of origin. Absence stays absent on point and LIST readback; no default
+is inferred. The closed map accepts `kind`, `basis`, `execution-id`, `reason`,
+and `source-ref` only. Kind is `war-machine`, `zai`, `none`, or `unknown`; basis
+is `producer-context`. Enum strings normalize to keywords on EDN reads.
+Execution-id is required for war-machine; reason is required for unknown. Any
+present execution-id, reason or source-ref must be a nonblank string. Zai is
+reserved and refused with reason `zai-harness-not-deployed`. Origin and author
+are unchanged; this stamp establishes no grant.
+
+Invalid input returns HTTP 400, `error/code: invalid-harness`, with `reason` one of
+`invalid-harness-map`, `unexpected-harness-key`, `unknown-harness-kind`,
+`invalid-harness-basis`, `zai-harness-not-deployed`, `missing-execution-id`,
+`missing-harness-reason`, or `invalid-harness-string`.
+
+`harness-kind` LIST filtering is not implemented in this packet. The field is
+preserved in full returned records. There is no harness candidate index; adding
+a nested-map post-filter would expand the common scan projection (see
+`futon1b_evidence.clj` filter-cols cost note) and needs a separate bounded-query
+cost check. Do not rely on an unsupported query parameter to narrow results.

@@ -404,3 +404,10 @@ environment stated, confounds listed, scripts named.
 - 2026-08-05 — mission authored (Fable session) from the Henderson call
   debrief. Corpus facts verified same day (manifest schema/counts; superpod
   manifest). Nothing dispatched; P1 is the car.
+
+## Acceptance checklist (2026-09-30)
+
+- [ ] The D1 harness runs one manifest-shaped public corpus at three or more scales without code changes, and its named query set agrees with the exhaustive-scan and re-check oracle.
+- [ ] The D2 report contains scale curves for every query-ladder rung, states measurement confounds, and reports heap/off-heap ingest behavior plus post-burst recovery.
+- [ ] D3 ingests real arXiv version histories as bitemporal updates and reports ever-held divergence against the cited futon-corpus measurements.
+- [ ] The D4 benchmark note states corpus, method, and confounds and records Joe's review before any external posting.

@@ -17,6 +17,8 @@
             [migration.transform :as xf]
             [migration.ingest :as ingest]
             [futon1b-xt :as fxt]
+            [futon1b-hxindex :as hx]
+            [futon1b-entindex :as ent]
             [futon1b-request-executor :as request-executor]
             [xtdb.api :as xt]))
 
@@ -25,6 +27,39 @@
 ;; ---------------------------------------------------------------------------
 
 (defonce !shape-log (xf/make-shape-log))
+
+(defonce ^:private entity-write-stripes
+  (vec (repeatedly 256 #(Object.))))
+
+(def ^:dynamic *entity-write-locking?*
+  "Rebindable only for the same-id ordering bad-case test. Production writes
+  always hold the stripe from the XTDB mutation through the awaited hook."
+  true)
+
+(defn- entity-stripe [id]
+  (Math/floorMod (hash (str id)) (count entity-write-stripes)))
+
+(defn- with-entity-id-locks
+  "Run F while holding every entity-id stripe in ascending numeric order.
+  Ordering prevents batch deadlock; unrelated stripes remain concurrent.
+
+  Lock order: stripes are taken BEFORE the node monitor
+  (`with-memory-projection-mutation`), as retract-documents! does. Nothing
+  may write an entity while holding the node monitor. Checked 2026-09-30:
+  the node-locked sections in futon1b_server.clj write hyperedges,
+  evidence and act receipts only."
+  [ids f]
+  (if-not *entity-write-locking?*
+    (f)
+    (let [locks (->> ids
+                     (map entity-stripe)
+                     distinct
+                     sort
+                     (mapv entity-write-stripes))]
+      ((reduce (fn [inner lock]
+                 #(locking lock (inner)))
+               f
+               (reverse locks))))))
 
 
 (declare with-entity-mutation)
@@ -35,12 +70,26 @@
   the L0-shaped error (503) if the doc is absent after all stages."
   [node table doc]
   (let [xdoc (xf/transform-doc doc !shape-log {:log-stringify? true})
-        put! #(ingest/put-doc-with-rescue! node table xdoc !shape-log)
-        res (if (= :entities table) (with-entity-mutation put!) (put!))]
-    (if (fxt/present? node table (:xt/id xdoc))
-      (if (keyword? res) res :ok)
-      (throw (gates/layered-error 0 :postcommit-missing-entities
-                                  {:xt/id (:xt/id xdoc) :table table})))))
+        write! (fn []
+                 (let [put! #(ingest/put-doc-with-rescue! node table xdoc !shape-log)
+                       res (if (= :entities table) (with-entity-mutation put!) (put!))]
+                   (if (fxt/present? node table (:xt/id xdoc))
+                     (do
+                       (when (= :entities table)
+                         ;; A rescued write may have stringified nil-bearing/deep values.
+                         ;; Cache the actual stored document, not the pre-rescue input.
+                         (let [stored (if (= res :ok)
+                                        xdoc
+                                        (first (fxt/hydrate-by-ids
+                                                node :entities [(:xt/id xdoc)])))]
+                           (ent/await-hook! (ent/on-put! stored))))
+                       (if (keyword? res) res :ok))
+                     (throw (gates/layered-error
+                             0 :postcommit-missing-entities
+                             {:xt/id (:xt/id xdoc) :table table})))))]
+    (if (= :entities table)
+      (with-entity-id-locks [(:xt/id xdoc)] write!)
+      (write!))))
 
 ;; ---------------------------------------------------------------------------
 ;; Type registry (A5) — futon1a.model.type-registry ported.
@@ -396,31 +445,38 @@
                         (update acc :types conj t)
                         (assoc acc :unresolved? true))))
                   {:types #{} :unresolved? false}
-                  documents)]
-      (with-memory-projection-mutation
-        node
+                  documents)
+          entity-ids (keep #(when (= :entities (:table %)) (:id %)) documents)]
+      (with-entity-id-locks
+        entity-ids
         (fn []
-          (let [delete! #(xt/execute-tx node
-                                        (mapv (fn [{:keys [table id]}]
-                                                [:delete-docs table id])
-                                              documents))]
-            (if (some #(= :entities (:table %)) documents)
-              (with-entity-mutation delete!)
-              (delete!)))
-          (let [remaining (filterv (fn [{:keys [table id]}]
-                                     (fxt/present? node table id))
-                                   documents)]
-            (when (seq remaining)
-              (throw (gates/layered-error 0 :postcommit-retraction-failed
-                                          {:remaining remaining}))))
-          (if (:unresolved? retracted-hyperedge-types)
-            (invalidate-hyperedge-query-cache!)
-            (doseq [t (:types retracted-hyperedge-types)]
-              (invalidate-hyperedge-query-cache! t)))
-          (doseq [{:keys [table id]} documents
-                  :when (= :hyperedges table)]
-            (refresh-memory-projection-component! node id))
-          {:ok true :count (count documents) :documents documents})))))
+          (with-memory-projection-mutation
+            node
+            (fn []
+             (let [delete! #(xt/execute-tx node
+                                           (mapv (fn [{:keys [table id]}]
+                                                   [:delete-docs table id])
+                                                 documents))]
+               (if (seq entity-ids)
+                 (with-entity-mutation delete!)
+                 (delete!)))
+             (let [remaining (filterv (fn [{:keys [table id]}]
+                                        (fxt/present? node table id))
+                                      documents)]
+               (when (seq remaining)
+                 (throw (gates/layered-error 0 :postcommit-retraction-failed
+                                             {:remaining remaining}))))
+             (if (:unresolved? retracted-hyperedge-types)
+               (invalidate-hyperedge-query-cache!)
+               (doseq [t (:types retracted-hyperedge-types)]
+                 (invalidate-hyperedge-query-cache! t)))
+             (doseq [{:keys [table id]} documents
+                     :when (= :hyperedges table)]
+               (hx/on-delete! id)
+               (refresh-memory-projection-component! node id))
+             (doseq [id entity-ids]
+               (ent/await-hook! (ent/on-delete! id)))
+              {:ok true :count (count documents) :documents documents})))))))
 
 (defn entity-by-external
   "GET /api/alpha/entity?source=…&external-id=… (contract §5): both params
@@ -516,21 +572,35 @@
           docs (mapv #(xf/transform-doc (:doc %) !shape-log {:log-stringify? true})
                      built)
           rescue
-          (with-entity-mutation
-           (fn []
-             (try (xt/execute-tx node (mapv (fn [d] [:put-docs :entities d]) docs))
-                  (catch Exception _ nil))
-             (into {}
-                   (keep (fn [d]
-                           (when-not (fxt/present? node :entities (:xt/id d))
-                             (let [res (ingest/put-doc-with-rescue!
-                                        node :entities d !shape-log)]
-                               (if (fxt/present? node :entities (:xt/id d))
-                                 [(:xt/id d) (if (keyword? res) res :ok)]
-                                 (throw (gates/layered-error
-                                         0 :postcommit-missing-entities
-                                         {:xt/id (:xt/id d) :table :entities})))))))
-                   docs)))]
+          (with-entity-id-locks
+            (map :xt/id docs)
+            (fn []
+              (let [rescue
+                    (with-entity-mutation
+                     (fn []
+                       (try (xt/execute-tx
+                             node (mapv (fn [d] [:put-docs :entities d]) docs))
+                            (catch Exception _ nil))
+                       (into {}
+                             (keep (fn [d]
+                                     (when-not (fxt/present? node :entities (:xt/id d))
+                                       (let [res (ingest/put-doc-with-rescue!
+                                                  node :entities d !shape-log)]
+                                         (if (fxt/present? node :entities (:xt/id d))
+                                           [(:xt/id d) (if (keyword? res) res :ok)]
+                                           (throw (gates/layered-error
+                                                   0 :postcommit-missing-entities
+                                                   {:xt/id (:xt/id d)
+                                                    :table :entities})))))))
+                             docs)))
+                    rescued-ids (set (keys rescue))
+                    rescued-docs (into {}
+                                       (map (juxt :xt/id identity))
+                                       (fxt/hydrate-by-ids node :entities rescued-ids))]
+                (doseq [doc docs]
+                  (ent/await-hook!
+                   (ent/on-put! (get rescued-docs (:xt/id doc) doc))))
+                rescue)))]
       (register-types! node (mapv (fn [t] {:kind :entity :type-id t})
                                   (distinct (map :type built))))
       (cond-> {:profile "default"
@@ -549,21 +619,27 @@
   nothing and Zone served `{:entities []}` with HTTP 200 — 1,372 rows present,
   0 returned, no error a consumer could see. Sigil presence is now an
   ATTRIBUTE (`:sigiled? true`) and the envelope carries `:sigil-join` so an
-  empty library and a broken join are distinguishable."
+  empty library and a broken join are distinguishable. When the entity-index
+  gate holds, entity bodies come from ent_node; the pattern/library relation
+  query remains on XTDB."
   ([node opts]
    (entities-latest node opts fxt/safe-q))
   ([node {:keys [type limit]} query-fn]
    (let [t (normalize-type type)
          n (long (max 1 (or limit 1)))
+         indexed? (ent/reads-usable?)
          ;; ids first, hydrate by `_id IN` (see fxt/hydrate-by-ids): the
          ;; whole-type `[*]` pull was ~12 s for 1,351 pattern/library rows.
-         all (fxt/hydrate-by-ids node :entities
-                                 (mapv :xt/id
-                                       (query-fn node (fxt/pq '[p-type]
-                                                              '(-> (from :entities [xt/id entity/type])
-                                                                   (where (= entity/type p-type)))
-                                                              t)))
-                                 query-fn)
+         all (if indexed?
+               (ent/type-page {:type t})
+               (fxt/hydrate-by-ids
+                node :entities
+                (mapv :xt/id
+                      (query-fn node (fxt/pq '[p-type]
+                                             '(-> (from :entities [xt/id entity/type])
+                                                  (where (= entity/type p-type)))
+                                             t)))
+                query-fn))
          library? (= t :pattern/library)
          sigil-src-ids (when library?
                          (->> (query-fn node '(-> (from :relations [relation/type relation/src])
@@ -584,19 +660,75 @@
      (cond-> {:profile "default"
               :type (if t (subs (str t) 1) (str type))
               :entities docs}
+       indexed? (assoc :ent-index {:checkpoint (ent/checkpoint)})
        library? (assoc :sigil-join {:patterns (count all)
                                     :relation-srcs (count sigil-src-ids)
                                     :matched matched})))))
+
+(defn entities-query-refusal
+  "The one admissibility rule for an entities read, or nil. Called twice on
+  purpose: by the route BEFORE it takes an expensive-read permit (a 400 must
+  not count as an admitted-then-errored read in the holder stats) and by
+  `entities-query` itself, so an in-process caller cannot construct the same
+  combination the route refuses.
+
+  `after` resumes the stable xt/id ordering; :ordered? false drops that
+  ordering, so the page is an arbitrary slice of the type and the id a caller
+  would resume from means nothing (measured: three unordered windows returned
+  the same rows, and that set was not the first N by id --
+  TN-entities-speedups-2026-09-26.md §2). Paging an unordered read both skips
+  and repeats rows, so the combination is refused rather than served."
+  [{:keys [after ordered?] :or {ordered? true}}]
+  (when (and after (not ordered?))
+    (gates/layered-error
+     4 :unordered-page-has-no-cursor
+     {:after after
+      :hint "drop `after`, or ask for the ordered page (omit `ordered=false`)"})))
+
+(defn- entities-query-indexed
+  [{:keys [type limit after include-total?]
+    :or {include-total? true}}]
+  (let [t (normalize-type type)
+        limited? (and (int? limit) (pos? limit))
+        docs (ent/type-page {:type t :after after :limit limit})
+        next-cursor (when (and limited? (= limit (count docs)))
+                      (some-> docs peek :xt/id str))]
+    (cond-> {:entities (mapv #(dissoc % :xt/id) docs)
+             :count (if include-total?
+                      (ent/type-count t)
+                      {:absent :not-requested})
+             :ent-index {:checkpoint (ent/checkpoint)}}
+      next-cursor (assoc :next-cursor next-cursor))))
 
 (defn entities-query
   "Backend-neutral typed entity read. Returns raw entity documents so callers
   can inspect domain fields written before the HTTP cutover as well as the
   equivalent fields carried in :entity/props by post-cutover writes. :count is
-  the true type total; :next-cursor resumes the stable xt/id ordering."
+  the true type total; :next-cursor resumes the stable xt/id ordering.
+
+  :include-total? defaults to true. When false the count statement is not
+  issued at all and :count is the typed absence {:absent :not-requested} --
+  never nil and never 0, so a caller cannot read \"not asked for\" as \"none\".
+  The count is a second full scan of the type (~5.2 s for 331 mission rows,
+  TN-entities-speedups-2026-09-26.md), and no caller outside this repo's own
+  tests reads it.
+
+  :ordered? defaults to true. On the XTDB fallback, false drops `order-by` and
+  the response carries no :next-cursor. The entity index is ordered by
+  (type,id) at no extra cost, so its false case may return that stable order
+  and a cursor. An unordered read with `after` remains refused: see
+  `entities-query-refusal`. When reads-usable? holds, bodies and optional total
+  come from ent_node and the response carries :ent-index with its checkpoint."
   ([node opts]
    (entities-query node opts fxt/safe-q))
-  ([node {:keys [type limit after]} query-fn]
-   (let [t (normalize-type type)
+  ([node {:keys [type limit after include-total? ordered?]
+          :or {include-total? true ordered? true}
+          :as opts} query-fn]
+   (when-let [refusal (entities-query-refusal opts)]
+     (throw refusal))
+   (if (ent/reads-usable?)
+     (entities-query-indexed opts)
+     (let [t (normalize-type type)
          limited? (and (int? limit) (pos? limit))
          ;; Values ride as parameters (see fxt/pq); the form varies only by
          ;; which clauses are present, so the compiled plan is reused.
@@ -608,8 +740,8 @@
                 limited? (conj limit))
          clauses (cond-> ['(= entity/type p-type)]
                    after (conj '(> xt/id p-after)))
-         query-tail (cond-> [(cons 'where clauses)
-                             '(order-by {:val xt/id :dir :asc})]
+         query-tail (cond-> [(cons 'where clauses)]
+                      ordered? (conj '(order-by {:val xt/id :dir :asc}))
                       limited? (conj '(limit p-limit)))
          ;; Ordered id window on narrow columns, then hydrate by `_id IN` —
          ;; `[*]` under a type predicate is ~13 s here (see fxt/hydrate-by-ids).
@@ -619,20 +751,23 @@
                                            (cons '-> (cons '(from :entities [xt/id entity/type]) query-tail))
                                            args)))
          docs (fxt/hydrate-by-ids node :entities window-ids query-fn)
-         total (count (query-fn node
-                                (fxt/pq '[p-type]
-                                        '(-> (from :entities [xt/id entity/type])
-                                             (where (= entity/type p-type)))
-                                        t)))
+         total (when include-total?
+                 (count (query-fn node
+                                  (fxt/pq '[p-type]
+                                          '(-> (from :entities [xt/id entity/type])
+                                               (where (= entity/type p-type)))
+                                          t))))
          window (vec docs)
          ;; The cursor advances over the SERVER window (ids), not the hydrated
          ;; docs, so a dropped row cannot end a walk early.
-         next-cursor (when (and (int? limit) (pos? limit)
+         ;; Only an ordered window has a resumption point (§2 of the note):
+         ;; the last id of an arbitrary slice says nothing about what remains.
+         next-cursor (when (and ordered? (int? limit) (pos? limit)
                                 (= limit (count window-ids)))
                        (peek window-ids))]
      (cond-> {:entities (mapv #(dissoc % :xt/id) window)
-              :count total}
-       next-cursor (assoc :next-cursor next-cursor)))))
+              :count (if include-total? total {:absent :not-requested})}
+       next-cursor (assoc :next-cursor next-cursor))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Relations (A3) — §6. Stable rel| ids, both key spellings.
@@ -980,26 +1115,268 @@
                       (mapv deref))))
        (keep identity)))
 
+(def ^:private indexed-read-chunk-size
+  "Ids per `_id IN (?, …)` statement on the P2b indexed read path. Measured
+  2026-09-26 on the live store (575 code/v05/edits candidates at one
+  endpoint): the per-statement fixed cost dominates at every size, so one
+  large statement always wins — the narrow re-check projection
+  (_id, hx$type, hx$endpoints) ran 575-in-one in 1.8 s vs 2.0 s at chunks
+  of 1000, 4.0 s at 500 and 10.4 s at 100; `SELECT *` for a 100-id window
+  ran 3.6 s in one statement vs 13.8 s at chunks of 25. pgjdbc caps bind
+  parameters at 32767, so 1000 is far inside the wire limit."
+  1000)
+
+(defn- sql-column
+  "SQL column name for a hyperedge attribute keyword (:hx/type → \"hx$type\",
+  :xt/id → \"_id\")."
+  [kw]
+  (if (= :xt/id kw)
+    "_id"
+    (str (namespace kw) "$" (name kw))))
+
+(defn- fetch-hyperedge-cols-by-ids
+  "COLS (attribute keywords; :xt/id is always selected) for IDS from
+  :hyperedges, via chunked SQL `_id IN (?, …)`, in the order of IDS;
+  missing ids are dropped. COLS nil/empty selects full documents
+  (`SELECT *`). A column no row has ever had is simply absent from the
+  result maps (verified live 2026-09-26: unknown columns do not error), so
+  fields naming one project to nothing, exactly as the XTQL scan path."
+  [node cols ids query-fn]
+  (let [ids (vec ids)
+        select (if (seq cols)
+                 (str "SELECT "
+                      (str/join ", " (mapv sql-column (distinct (cons :xt/id cols))))
+                      " FROM hyperedges WHERE _id IN (")
+                 "SELECT * FROM hyperedges WHERE _id IN (")
+        rows (mapcat (fn [chunk]
+                       (query-fn node
+                                 (into [(str select
+                                             (str/join ", " (repeat (count chunk) "?"))
+                                             ")")]
+                                       chunk)))
+                     (partition-all indexed-read-chunk-size ids))
+        by-id (into {} (map (fn [doc] [(:xt/id doc) doc])) rows)]
+    (into [] (keep by-id) ids)))
+
+(defn- hyperedges-indexed-type-end
+  "P2 (DESIGN-hyperedge-scope-sidecar-2026-09-26 §7): serve a type+end read
+  from the SQLite sidecar and RE-CHECK every candidate against XTDB.
+  P2b: the re-check reads only the narrow projection (id, type, endpoints)
+  — measured 2026-09-26 on the live store at 1.8 s for 575 candidates vs
+  9.6 s for hydrate-by-ids' `SELECT *` — and full documents are read only
+  for the rows that pass AND survive the window cut to `limit`. With
+  `fields`, the full read selects only the columns those fields need
+  (hyperedge-window-field-source) and projects exactly as the scan path.
+  The re-check drops ids deleted since the last catch-up and rows whose
+  type or endpoints changed unhooked, so a stale candidate is never
+  returned. What the re-check cannot see — a fresh hyperedge missing from
+  the index after a hook failure — is gated upstream by hx/reads-usable?
+  (falls back to the scan).
+
+  Ordering (str id ascending), windowing (first N) and the response shape
+  ({:hyperedges … :count N}, NO cursor — the scan path's end branch emits
+  none) are the existing path's; :hx-index is the only added key, present
+  only when the index served. `after` is deliberately not applied: the
+  existing end branch ignores it (cursor machinery lives in the type
+  branch), and byte-for-byte parity is the contract."
+  [node {:keys [targets t n fields]} query-fn]
+  (let [target-strs (set (map str targets))
+        match? (fn [row]
+                 (and (= t (normalize-type (:hx/type row)))
+                      (some target-strs (map str (:hx/endpoints row)))))
+        ;; Candidate pages of n, keyset on hx_id: the re-check can drop stale
+        ;; candidates, so a page may yield fewer than n live rows; keep
+        ;; pulling until the window fills or the index is exhausted, or the
+        ;; scan path would return MORE rows than the index on any lag.
+        ids (loop [after "" acc []]
+              (if (>= (count acc) n)
+                (vec (take n acc))
+                (let [cands (hx/type-end-candidates
+                             {:type t :endpoints targets :after after :fetch n})]
+                  (if (empty? cands)
+                    acc
+                    (let [live (->> (fetch-hyperedge-cols-by-ids
+                                     node [:hx/type :hx/endpoints] cands query-fn)
+                                    (filter match?)
+                                    (map :xt/id))]
+                      (recur (last cands) (into acc live)))))))
+        ;; Full documents only for the returned window, projected to the
+        ;; requested fields' source columns when `fields` was supplied.
+        docs (fetch-hyperedge-cols-by-ids
+              node (when (seq fields)
+                     (vec (keep hyperedge-window-field-source fields)))
+              ids query-fn)
+        out (mapv #(if (seq fields)
+                     (project-hyperedge-fields % fields)
+                     (dissoc % :xt/id))
+                  docs)]
+    {:hyperedges out
+     :count (count out)
+     :hx-index {:checkpoint (hx/checkpoint)
+                :hook-failures (:hook-failures @hx/!stats)}}))
+
+(defn- hyperedges-indexed-type
+  "P3: serve a type-ONLY read (`type` + `limit`/`after`/`include-total`/
+  `fields` — no end, repo, source-file, mission, latest or as-of) from the
+  SQLite sidecar, re-checking every candidate against XTDB exactly as P2b
+  does for type+end. The narrow re-check projection is (id, type): it drops
+  ids deleted since the last catch-up and rows whose type changed
+  unhooked. Full documents (or the `fields` columns) are read only for the
+  rows that pass AND survive the window cut to `limit`.
+
+  Ordering (xt/id ascending), the keyset cursor (`after` = the last xt/id
+  of the previous window, strict >) and `next-cursor` (emitted whenever the
+  window came back full, even on an exact final page) are byte-for-byte the
+  type branch's, so a cursor minted by either path resumes correctly on the
+  other. `include-total` is the sidecar's hx_node count for the
+  type — exact only up to the checkpoint plus hook repairs, (zero-endpoint
+  hyperedges included, P3c); :count and
+  :count-exact? keep the existing path's semantics. :hx-index is the only
+  added response key."
+  [node {:keys [t n after include-total? fields]} query-fn]
+  (let [match? (fn [row] (= t (normalize-type (:hx/type row))))
+        ;; Same pull-until-full loop as P2b: the re-check can drop stale
+        ;; candidates, so a candidate page may yield fewer than n live rows.
+        ids (loop [after (str (or after "")) acc []]
+              (if (>= (count acc) n)
+                (vec (take n acc))
+                (let [cands (hx/type-candidates
+                             {:type t :after after :fetch n})]
+                  (if (empty? cands)
+                    acc
+                    (let [live (->> (fetch-hyperedge-cols-by-ids
+                                     node [:hx/type] cands query-fn)
+                                    (filter match?)
+                                    (map :xt/id))]
+                      (recur (last cands) (into acc live)))))))
+        docs (fetch-hyperedge-cols-by-ids
+              node (when (seq fields)
+                     (vec (keep hyperedge-window-field-source fields)))
+              ids query-fn)
+        out (mapv #(if (seq fields)
+                     (project-hyperedge-fields % fields)
+                     (dissoc % :xt/id))
+                  docs)
+        ;; The type branch emits a cursor whenever the server window is
+        ;; full; `ids` IS the server window here (post re-check, pre cut —
+        ;; identical by construction).
+        next-cursor (when (= n (count ids)) (peek ids))]
+    (cond-> {:hyperedges out
+             :count (if include-total?
+                      (hx/type-count t)
+                      (count out))
+             :count-exact? (boolean include-total?)
+             :hx-index {:checkpoint (hx/checkpoint)
+                        :hook-failures (:hook-failures @hx/!stats)}}
+      next-cursor (assoc :next-cursor next-cursor))))
+
+(defn- hyperedges-indexed-type-end-prefix
+  "P3d (DESIGN-hyperedge-scope-sidecar-2026-09-26 §7 item 3, Q3): serve a
+  type + endpoint-PREFIX read from the SQLite sidecar. There is NO scan
+  fallback for this shape (today it is paging + client post-filter); the
+  caller refuses with a typed 503 when hx/reads-usable? is false rather
+  than scanning the type.
+
+  Candidates come from a [prefix, prefix-successor) range scan of hx_edge,
+  keyset-paged on hx_id exactly as P3. Every candidate is RE-CHECKED against
+  XTDB with the narrow projection (id, type, endpoints) — a live row must
+  keep the type AND have some endpoint equal to or beginning with the
+  prefix — and full documents (or the `fields` columns) are read only for
+  the rows that pass AND survive the window cut. Ordering (xt/id
+  ascending), keyset cursor and next-cursor semantics are P3's, so a cursor
+  minted here resumes correctly on a later call. `include-total` is the
+  sidecar's count(DISTINCT hx_id) over the range — exact only up to the
+  checkpoint plus hook repairs; :count and :count-exact? keep the P3
+  semantics. :hx-index is the only added response key."
+  [node {:keys [t prefix n after include-total? fields]} query-fn]
+  (let [match? (fn [row]
+                 (and (= t (normalize-type (:hx/type row)))
+                      (some #(str/starts-with? (str %) prefix)
+                            (:hx/endpoints row))))
+        ;; Same pull-until-full loop as P2b/P3: the re-check can drop stale
+        ;; candidates, so a candidate page may yield fewer than n live rows.
+        ids (loop [after (str (or after "")) acc []]
+              (if (>= (count acc) n)
+                (vec (take n acc))
+                (let [cands (hx/type-end-prefix-candidates
+                             {:type t :prefix prefix :after after :fetch n})]
+                  (if (empty? cands)
+                    acc
+                    (let [live (->> (fetch-hyperedge-cols-by-ids
+                                     node [:hx/type :hx/endpoints] cands query-fn)
+                                    (filter match?)
+                                    (map :xt/id))]
+                      (recur (last cands) (into acc live)))))))
+        docs (fetch-hyperedge-cols-by-ids
+              node (when (seq fields)
+                     (vec (keep hyperedge-window-field-source fields)))
+              ids query-fn)
+        out (mapv #(if (seq fields)
+                     (project-hyperedge-fields % fields)
+                     (dissoc % :xt/id))
+                  docs)
+        next-cursor (when (= n (count ids)) (peek ids))]
+    (cond-> {:hyperedges out
+             :count (if include-total?
+                      (hx/type-end-prefix-count t prefix)
+                      (count out))
+             :count-exact? (boolean include-total?)
+             :hx-index {:checkpoint (hx/checkpoint)
+                        :hook-failures (:hook-failures @hx/!stats)}}
+      next-cursor (assoc :next-cursor next-cursor))))
+
 (defn- hyperedges-query-uncached
   "GET /api/alpha/hyperedges?type=… and/or end=… (+limit/latest/after,
   +repo/source-file/mission for type-only queries). When end is present, type
   is an optional pushed-down filter rather than a competing branch. :count is
   the returned window count by default. Explicit include-total opts type-only
   queries into the true type total when unfiltered (contract §4)."
-  [node {:keys [type end limit repo source-file mission after latest? include-total? fields]
+  [node {:keys [type end end-prefix limit repo source-file mission after latest? include-total? fields]
          :or {include-total? false}
          :as opts}
    query-fn]
   (let [temporal (select-keys opts [:valid-as-of :system-as-of])]
   (cond
+    end-prefix
+    ;; P3d: type + endpoint prefix, served ONLY from the sidecar (no scan
+    ;; path exists for this shape — today it is paging + client post-filter).
+    (let [prefix (str end-prefix)
+          t (some-> type normalize-type)]
+      (when-not t
+        (throw (gates/layered-error
+                4 :missing-required
+                {:required ["type"] :hint "end-prefix requires type"})))
+      (when (str/blank? prefix)
+        (throw (gates/layered-error
+                4 :invalid-end-prefix
+                {:hint "end-prefix must be a non-empty string; refusing to scan the type"})))
+      (when (or (:valid-as-of temporal) (:system-as-of temporal))
+        (throw (gates/layered-error
+                4 :invalid-end-prefix
+                {:hint "end-prefix reads do not support as-of; drop valid-as-of/system-as-of"})))
+      (if (hx/reads-usable?)
+        (hyperedges-indexed-type-end-prefix
+         node {:t t :prefix prefix :n (long (or limit 100)) :after after
+               :include-total? include-total? :fields fields} query-fn)
+        (throw (gates/layered-error
+                0 :hx-index-unusable
+                {:hint "end-prefix reads are served only from the hyperedge sidecar; no scan fallback"
+                 :checkpoint (hx/checkpoint)
+                 :hook-failures (:hook-failures @hx/!stats)}))))
+
     end
     (let [end-id (if (uuid-shaped? end)
                    (or (some-> (fetch-entity node end) :entity/name) end)
                    end)
           targets (distinct [end end-id])
           n (long (or limit 100))
-          t (some-> type normalize-type)
-          projected (->> targets
+          t (some-> type normalize-type)]
+      (if (and t
+               (not (or (:valid-as-of temporal) (:system-as-of temporal)))
+               (hx/reads-usable?))
+        (hyperedges-indexed-type-end
+         node {:targets targets :t t :n n :fields fields} query-fn)
+        (let [projected (->> targets
                          (mapcat
                           (fn [target]
                             (let [clauses (cond-> ['(= ep p-target)]
@@ -1028,12 +1405,26 @@
                        (project-hyperedge-fields % fields)
                        (dissoc % :xt/id))
                     docs)]
-      {:hyperedges out :count (count out)})
+          {:hyperedges out :count (count out)})))
 
     type
     (let [t (normalize-type type)
-          limited? (and (not latest?) (int? limit) (pos? limit))
-          ;; Values ride as parameters (fxt/pq) so the compiled plan is keyed
+          limited? (and (not latest?) (int? limit) (pos? limit))]
+      (if (and limited?
+               (not (or repo source-file mission))
+               (not (or (:valid-as-of temporal) (:system-as-of temporal)))
+               (hx/reads-usable?)
+               ;; P3c: type-only candidates come from hx_node; a pre-P3c
+               ;; sidecar stays on the scan path until its first catch-up
+               ;; backfills the table.
+               (hx/node-index-ready?))
+        ;; P3: type-only bounded read from the sidecar; the cursor and
+        ;; include-total semantics are the scan path's (see
+        ;; hyperedges-indexed-type's docstring).
+        (hyperedges-indexed-type
+         node {:t t :n (long limit) :after after
+               :include-total? include-total? :fields fields} query-fn)
+        (let [;; Values ride as parameters (fxt/pq) so the compiled plan is keyed
           ;; on which filters are present, not on their values.
           specs (cond-> [['p-type '(= hx/type p-type) t]]
                   ;; denormalized :prop/* columns (H4) let repo/source-file
@@ -1120,7 +1511,7 @@
                         (count out)
                         total)
                :count-exact? (boolean include-total?)}
-        next-cursor (assoc :next-cursor next-cursor))))))
+        next-cursor (assoc :next-cursor next-cursor))))))))
 
 (def ^:private max-hyperedge-query-cache-entries
   "Entries retained before FIFO eviction. Sized against the WORST case, not the
@@ -1149,31 +1540,37 @@
   (get-in @!hyperedge-query-cache [:entries cache-key]))
 
 (defn- cache-put!
-  [cache-key result]
+  [cache-key result generation]
   (swap! !hyperedge-query-cache
-         (fn [{:keys [entries insertion-order]}]
-           (let [new-key? (not (contains? entries cache-key))
-                 order (cond-> insertion-order new-key? (conj cache-key))
-                 entries (assoc entries cache-key result)
-                 overflow (max 0 (- (count order)
-                                    max-hyperedge-query-cache-entries))
-                 evicted (take overflow order)]
-             {:entries (apply dissoc entries evicted)
-              :insertion-order (vec (drop overflow order))}))))
+         (fn [{:keys [entries insertion-order] :as state}]
+           ;; A query begun before invalidation may finish afterwards. It may
+           ;; return its snapshot to that caller, but must not cache it for a
+           ;; subsequent read after the write has completed.
+           (if (not= generation (:generation state))
+             state
+             (let [new-key? (not (contains? entries cache-key))
+                   order (cond-> insertion-order new-key? (conj cache-key))
+                   entries (assoc entries cache-key result)
+                   overflow (max 0 (- (count order) max-hyperedge-query-cache-entries))
+                   evicted (take overflow order)]
+               (assoc state :entries (apply dissoc entries evicted)
+                      :insertion-order (vec (drop overflow order))))))))
 
 (defn invalidate-hyperedge-query-cache!
   "Invalidate materialized bounded query windows after a hyperedge mutation.
   With a type, retain windows for every other normalized hyperedge type. The
   zero-arity form remains a full safety/test flush."
   ([]
-   (reset! !hyperedge-query-cache {:entries {} :insertion-order []})
+   (swap! !hyperedge-query-cache
+          #(assoc % :entries {} :insertion-order [] :generation (inc (or (:generation %) 0))))
    nil)
   ([type]
    (let [t (normalize-type type)]
      (swap! !hyperedge-query-cache
-            (fn [{:keys [entries insertion-order]}]
+            (fn [{:keys [entries insertion-order generation]}]
               (let [keep-key? (fn [[_ opts]] (not= t (:type opts)))]
-                {:entries (into {} (filter (comp keep-key? key)) entries)
+                {:generation (inc (or generation 0))
+                 :entries (into {} (filter (comp keep-key? key)) entries)
                  :insertion-order (filterv keep-key? insertion-order)}))))
    nil))
 
@@ -1194,8 +1591,9 @@
        (hyperedges-query-uncached node opts query-fn)
        (if-let [cached (cache-entry cache-key)]
          cached
-         (let [result (hyperedges-query-uncached node opts query-fn)]
-           (cache-put! cache-key result)
+         (let [generation (:generation @!hyperedge-query-cache)
+               result (hyperedges-query-uncached node opts query-fn)]
+           (cache-put! cache-key result generation)
            result))))))
 
 (def ^:private max-memory-projection-endpoints 20)
@@ -1440,7 +1838,11 @@
                       node (mapv :xt/id selected+) {})
                 components (mapv hydrated-row->component rows)
                 observed-watermark (node-watermark node)
-                moved? (not= source-watermark observed-watermark)]
+                ;; Only a memory mutation invalidates the build. The global
+                ;; watermark moves on every evidence append, so gating on it
+                ;; livelocked: 80-250 s per hydrate, never quiet, 5 attempts.
+                moved? (not= source-generation
+                             (memory-projection-generation node))]
             (println "[memory-projection]"
                      (pr-str {:operation-id operation-id :stage :hydrated
                               :attempt attempt :source-moved? moved?
@@ -1451,8 +1853,8 @@
                       0 :memory-projection-source-moved-after-quiescence
                       {:build-attempts attempt
                        :max-build-attempts max-memory-projection-build-attempts
-                       :source-watermark source-watermark
-                       :observed-watermark observed-watermark})))
+                       :source-generation source-generation
+                       :observed-generation (memory-projection-generation node)})))
             (if moved?
               (recur (inc attempt))
               (let [prior-revision
@@ -1470,12 +1872,23 @@
                  :build-ms (elapsed-ms started)})))))))))
 
 (defn refresh-memory-projection-component!
-  "Point-refresh one current memory/assert component after its verified put."
+  "Point-refresh one current memory/assert component after its verified put.
+
+  The global XTDB watermark is NOT a coherence signal here: every evidence
+  append moves it, so on a live store it moves inside almost every point read.
+  Falling back to a full rebuild on that (as this did until 2026-09-29) held
+  the node lock for up to 18 minutes per memory write and exhausted the
+  request workers. Every memory/assert writer calls this after its own
+  transaction under `with-memory-projection-mutation`, so a crossing memory
+  mutation re-reads its own component; the one read here is current for
+  `edge-id`."
   [node edge-id]
-  (when (contains? @!memory-projection-indexes node)
+  (if-not (contains? @!memory-projection-indexes node)
+    ;; No index yet (first build in flight): flag the generation so that build
+    ;; is not certified without this mutation.
+    (advance-memory-projection-generation! node)
     (locking !memory-projection-indexes
-      (let [source-watermark (node-watermark node)
-            row (first (hydrate-memory-components node [edge-id] {}))
+      (let [row (first (hydrate-memory-components node [edge-id] {}))
             component (when (= :memory/assert (:hx/type row))
                         (hydrated-row->component row))
             observed-watermark (node-watermark node)
@@ -1487,20 +1900,15 @@
         (when projection-relevant?
           (let [source-generation
                 (advance-memory-projection-generation! node)]
-            (if (= source-watermark observed-watermark)
-              (swap! !memory-projection-indexes
-                     update node
-                     (fn [{:keys [revision components-by-id]}]
-                       (build-memory-projection-index
-                        (inc revision)
-                        (cond-> (dissoc components-by-id edge-id)
-                          component (assoc edge-id component))
-                        observed-watermark
-                        source-generation)))
-              ;; Another transaction crossed the point-refresh window. Rebuild
-              ;; the whole bounded projection rather than certifying a mixed
-              ;; snapshot.
-              (initialize-memory-projection! node)))))))
+            (swap! !memory-projection-indexes
+                   update node
+                   (fn [{:keys [revision components-by-id]}]
+                     (build-memory-projection-index
+                      (inc revision)
+                      (cond-> (dissoc components-by-id edge-id)
+                        component (assoc edge-id component))
+                      observed-watermark
+                      source-generation))))))))
   nil)
 
 (defn refresh-memory-projection-component-from-docs!
@@ -1552,6 +1960,19 @@
                          [node :source-generation]))
       (initialize-memory-projection! node))
     (get @!memory-projection-indexes node)))
+
+(defn memory-projection-snapshot
+  "Built/current status of the memory projection for /health (futon1b-sidecars).
+  Reads the two atoms only: takes no lock and never builds."
+  []
+  (let [idx @!memory-projection-indexes
+        gens @!memory-projection-generations]
+    {:built? (boolean (seq idx))
+     :current? (boolean (and (seq idx)
+                             (every? (fn [[node m]]
+                                       (= (get gens node 0) (:source-generation m)))
+                                     idx)))
+     :generations (vec (vals gens))}))
 
 (defn- validate-memory-projection-request
   [{:keys [endpoints limit]}]
@@ -1714,14 +2135,25 @@
 ;; Census (A5) — §7. Bound-type count, no doc materialization.
 ;; ---------------------------------------------------------------------------
 
-(defn census [node {:keys [type entity-type]}]
+(defn census
+  "P3c: the :type census answers from the sidecar's hx_node table (one row
+   per hyperedge, zero-endpoint hyperedges included) when the index is
+   usable and backfilled, else the full typed scan. Same response shape
+   plus :hx-index when the sidecar served (as in P2/P3). Exact up to the
+   checkpoint plus hook repairs, like every sidecar read."
+  [node {:keys [type entity-type]}]
   (cond
     type
-    {:type type :kind :hyperedge
-     :count (count (fxt/safe-q node (fxt/pq '[p-type]
-                                            '(-> (from :hyperedges [xt/id hx/type])
-                                                 (where (= hx/type p-type)))
-                                            (normalize-type type))))}
+    (if (and (hx/reads-usable?) (hx/node-index-ready?))
+      {:type type :kind :hyperedge
+       :count (hx/type-count (normalize-type type))
+       :hx-index {:checkpoint (hx/checkpoint)
+                  :hook-failures (:hook-failures @hx/!stats)}}
+      {:type type :kind :hyperedge
+       :count (count (fxt/safe-q node (fxt/pq '[p-type]
+                                              '(-> (from :hyperedges [xt/id hx/type])
+                                                   (where (= hx/type p-type)))
+                                              (normalize-type type))))})
     entity-type
     {:type entity-type :kind :entity
      :count (count (fxt/safe-q node (fxt/pq '[p-type]

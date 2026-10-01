@@ -121,4 +121,12 @@
   time — do not open while another JVM holds it)."
   [store-dir]
   (xtn/start-node {:log     [:local {:path (str store-dir "/log")}]
-                   :storage [:local {:path (str store-dir "/storage")}]}))
+                   :storage [:local {:path (str store-dir "/storage")}]
+                   ;; XTDB 2.1 ships its garbage collector disabled, so trie
+                   ;; files superseded by compaction were never deleted: 77 GB
+                   ;; of storage held 54 GB of them on 2026-09-28. Tested on a
+                   ;; copy of this store: one pass took it to 23.6 GB with
+                   ;; every current, as-of and all-versions count unchanged.
+                   ;; Defaults: garbage older than 24 h, last 10 blocks kept,
+                   ;; a pass about every 10 minutes.
+                   :garbage-collector {:enabled? true}}))

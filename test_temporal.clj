@@ -199,6 +199,49 @@
              (get-in result
                      [:temporal-basis :projection-generation]))))))
 
+(deftest moving-watermark-does-not-rebuild-projection
+  ;; 2026-09-29 outage: evidence appends moved the global watermark inside
+  ;; every point refresh, and each memory write fell back to a full rebuild
+  ;; (80-250 s x 5 attempts) under the node lock.
+  (let [endpoint "pattern/projection-watermark-moves"
+        memory-id "e-projection-watermark-moves"
+        edge-id "hx-projection-watermark-moves"
+        ticks (atom 0)]
+    (graph/memory-projection-components *node* {:endpoints [endpoint] :limit 3})
+    (is (= :ok
+           (graph/put-verified!
+            *node* :evidence
+            {:xt/id memory-id
+             :evidence/id memory-id
+             :evidence/type :memory
+             :evidence/claim-type :observation
+             :evidence/author "projection-watermark-test"
+             :evidence/session-id "projection-watermark-session"
+             :evidence/at "2026-09-29T00:00:00Z"
+             :evidence/body {:hook "Watermark moves hook"}
+             :evidence/tags [:memory]})))
+    (with-redefs-fn
+      {#'graph/node-watermark (fn [_] {:tick (swap! ticks inc)})
+       #'graph/initialize-memory-projection!
+       (fn [_] (throw (ex-info "unexpected projection rebuild" {})))}
+      (fn []
+        (is (:ok
+             (server/upsert-hyperedge!
+              *node*
+              {:hx/id edge-id
+               :hx/type :memory/assert
+               :hx/endpoints [memory-id endpoint]
+               :hx/props {:domain :mathematics
+                          :state :current
+                          :attachment-status :reviewed
+                          :roles {:entry memory-id
+                                  :patterns [endpoint]}}})))
+        (is (= [memory-id]
+               (mapv #(get-in % [:entry :evidence/id])
+                     (get-in (graph/memory-projection-components
+                              *node* {:endpoints [endpoint] :limit 3})
+                             [:groups 0 :components]))))))))
+
 (deftest historical-projection-bypasses-current-index
   (with-redefs [graph/initialize-memory-projection!
                 (fn [_]
@@ -418,6 +461,184 @@
       (is (= expected (:entities result)))
       (is (= 3 (:count result)))
       (is (= "entity-limit-b" (:next-cursor result))))))
+
+(deftest entity-total-is-opt-out-and-its-absence-is-typed
+  ;; The count is a second full scan of the type; no caller outside this file
+  ;; reads it (TN-entities-speedups-2026-09-26.md §3). The flag makes it
+  ;; skippable without letting "not asked for" read as "none".
+  (let [returned [{:xt/id "total-flag-a"
+                   :entity/id "total-flag-a"
+                   :entity/name "A"
+                   :entity/type :total-flag-test}
+                  {:xt/id "total-flag-b"
+                   :entity/id "total-flag-b"
+                   :entity/name "B"
+                   :entity/type :total-flag-test}]
+        expected (mapv #(dissoc % :xt/id) returned)
+        capturing (fn [seen]
+                    (fn [_node form]
+                      (swap! seen conj form)
+                      returned))
+        ;; The count statement is the parameterised read with no `order-by`
+        ;; and no `p-limit`; the window carries both, the hydrate is SQL.
+        count-form? (fn [form]
+                      (and (not (string? (first form)))
+                           (let [[_fn params body] (first form)]
+                             (and (= '[p-type] params)
+                                  (not-any? #(and (seq? %) (= 'order-by (first %)))
+                                            body)))))]
+    (testing "absent :include-total? runs the count, as every caller sees today"
+      (let [seen (atom [])
+            result (graph/entities-query ::capturing-node
+                                         {:type :total-flag-test :limit 2}
+                                         (capturing seen))]
+        (is (= {:entities expected :count 2 :next-cursor "total-flag-b"} result))
+        ;; Count the COUNT statements, not the statements: how many the
+        ;; hydrate takes is `fxt/hydrate-by-ids`' business and changes with
+        ;; its id threshold.
+        (is (= 1 (count (filter count-form? @seen))))
+        (is (seq @seen))))
+    (testing ":include-total? false issues no count statement"
+      (let [seen (atom [])
+            result (graph/entities-query ::capturing-node
+                                         {:type :total-flag-test :limit 2
+                                          :include-total? false}
+                                         (capturing seen))]
+        (is (empty? (filter count-form? @seen)))
+        (is (seq @seen))
+        (is (= {:absent :not-requested} (:count result)))
+        (is (= expected (:entities result)))
+        (is (= "total-flag-b" (:next-cursor result)))))
+    (testing "the absence is typed, so it cannot be read as a value"
+      (let [result (graph/entities-query ::capturing-node
+                                         {:type :total-flag-test :limit 2
+                                          :include-total? false}
+                                         (capturing (atom [])))]
+        (is (some? (:count result)))
+        (is (not (number? (:count result))))
+        (is (contains? result :count))))))
+
+(deftest unordered-entity-window-drops-the-cursor
+  ;; `order-by` is the whole cost of the window (5.7 s against 0.13 s at
+  ;; limit 1, TN-entities-speedups-2026-09-26.md §2) and it is also what
+  ;; :next-cursor resumes, so dropping one drops the other.
+  (let [returned [{:xt/id "unordered-a"
+                   :entity/id "unordered-a"
+                   :entity/name "A"
+                   :entity/type :unordered-flag-test}
+                  {:xt/id "unordered-b"
+                   :entity/id "unordered-b"
+                   :entity/name "B"
+                   :entity/type :unordered-flag-test}]
+        capturing (fn [seen]
+                    (fn [_node form]
+                      (swap! seen conj form)
+                      returned))
+        window-body (fn [seen]
+                      (let [[fn-form] (first @seen)
+                            [_fn _params body] fn-form]
+                        body))
+        ordered-by? (fn [body]
+                      (boolean (some #(and (seq? %) (= 'order-by (first %))) body)))]
+    (testing "the ordered window is today's: order-by, then limit"
+      (let [seen (atom [])]
+        (graph/entities-query ::capturing-node
+                              {:type :unordered-flag-test :limit 2}
+                              (capturing seen))
+        (is (ordered-by? (window-body seen)))
+        (is (= '(limit p-limit) (last (window-body seen))))))
+    (testing ":ordered? false issues no order-by and keeps the limit"
+      (let [seen (atom [])
+            result (graph/entities-query ::capturing-node
+                                         {:type :unordered-flag-test :limit 2
+                                          :ordered? false}
+                                         (capturing seen))]
+        (is (not (ordered-by? (window-body seen))))
+        (is (= '(limit p-limit) (last (window-body seen))))
+        (is (not (contains? result :next-cursor)))))
+    (testing "`after` on an unordered read is refused before any statement runs"
+      (is (nil? (graph/entities-query-refusal {:after "some-id"})))
+      (is (nil? (graph/entities-query-refusal {:ordered? false})))
+      (let [refusal (graph/entities-query-refusal {:after "some-id" :ordered? false})]
+        (is (= {:layer 4 :reason :unordered-page-has-no-cursor}
+               (select-keys (:error (ex-data refusal)) [:layer :reason]))))
+      (let [seen (atom [])
+            thrown (try (graph/entities-query ::capturing-node
+                                              {:type :unordered-flag-test :limit 2
+                                               :after "some-id" :ordered? false}
+                                              (capturing seen))
+                        (catch clojure.lang.ExceptionInfo e e))]
+        (is (= :unordered-page-has-no-cursor
+               (get-in (ex-data thrown) [:error :reason])))
+        (is (empty? @seen)))))
+  (let [docs (mapv (fn [i] {:id (format "unordered-row-%02d" i)
+                            :name (format "Unordered %02d" i)
+                            :type "unordered/window"})
+                   (range 6))]
+    (graph/write-entities-batch! *node* {:entities docs})
+    (testing "above the type's size the unordered read returns the same rows"
+      (let [ordered (graph/entities-query *node* {:type :unordered/window :limit 50})
+            unordered (graph/entities-query *node* {:type :unordered/window :limit 50
+                                                    :ordered? false})]
+        (is (= 6 (count (:entities unordered))))
+        (is (= (set (map :entity/id (:entities ordered)))
+               (set (map :entity/id (:entities unordered)))))))
+    (testing "a full window carries a cursor only when it is ordered"
+      (let [ordered (graph/entities-query *node* {:type :unordered/window :limit 6})
+            unordered (graph/entities-query *node* {:type :unordered/window :limit 6
+                                                    :ordered? false})]
+        (is (= "unordered-row-05" (:next-cursor ordered)))
+        (is (not (contains? unordered :next-cursor)))))))
+
+(deftest hydrate-by-ids-splits-at-the-measured-crossover
+  ;; `_id IN` is a table scan at every size and `_id = ?` uses the id index
+  ;; (TN-entities-speedups-2026-09-26.md §1), so small hydrations go by
+  ;; equality. Both branches must keep the caller's id order and drop misses.
+  (let [doc (fn [id] {:xt/id id :entity/id id :entity/name (str "doc-" id)})
+        ;; Rows come back REVERSED, so a result in id order can only come from
+        ;; the caller's ids, not from the order the store answered in.
+        capturing (fn [seen present]
+                    (fn [_node stmt]
+                      (swap! seen conj stmt)
+                      (vec (reverse (keep present (rest stmt))))))
+        present-all (fn [ids] (into {} (map (juxt identity doc)) ids))]
+    (testing "at or below the threshold: one equality statement per id"
+      (let [ids (mapv #(str "eq-" %) (range 3))
+            seen (atom [])
+            out (fxt/hydrate-by-ids ::node :entities ids
+                                    (capturing seen (present-all ids)))]
+        (is (= 3 (count @seen)))
+        (is (every? #(re-find #"WHERE _id = \?$" (first %)) @seen))
+        (is (every? #(= 2 (count %)) @seen))
+        (is (= ids (mapv :xt/id out)))))
+    (testing "exactly at the threshold is still equality"
+      (let [ids (mapv #(format "eq-%03d" %) (range fxt/equality-hydrate-max-ids))
+            seen (atom [])]
+        (fxt/hydrate-by-ids ::node :entities ids (capturing seen (present-all ids)))
+        (is (= fxt/equality-hydrate-max-ids (count @seen)))
+        (is (every? #(re-find #"WHERE _id = \?$" (first %)) @seen))))
+    (testing "above the threshold: one chunked IN statement, id order kept"
+      (let [ids (mapv #(format "in-%03d" %) (range (inc fxt/equality-hydrate-max-ids)))
+            seen (atom [])
+            out (fxt/hydrate-by-ids ::node :entities ids
+                                    (capturing seen (present-all ids)))]
+        (is (= 1 (count @seen)))
+        (is (re-find #"WHERE _id IN \(" (first (first @seen))))
+        (is (= (count ids) (count (re-seq #"\?" (first (first @seen))))))
+        (is (= ids (mapv :xt/id out)))))
+    (testing "missing ids are dropped, in both branches"
+      (let [ids (mapv #(format "miss-%03d" %) (range 4))
+            here (present-all [(first ids) (last ids)])
+            out (fxt/hydrate-by-ids ::node :entities ids (capturing (atom []) here))]
+        (is (= [(first ids) (last ids)] (mapv :xt/id out))))
+      (let [ids (mapv #(format "miss-%03d" %) (range (inc fxt/equality-hydrate-max-ids)))
+            here (present-all [(first ids) (last ids)])
+            out (fxt/hydrate-by-ids ::node :entities ids (capturing (atom []) here))]
+        (is (= [(first ids) (last ids)] (mapv :xt/id out)))))
+    (testing "no ids, no statement"
+      (let [seen (atom [])]
+        (is (= [] (fxt/hydrate-by-ids ::node :entities [] (capturing seen {}))))
+        (is (empty? @seen))))))
 
 (deftest entity-batch-deduplicates-repeated-names
   (let [entity {:name "batch-local-duplicate" :type "batch/local-duplicate"}

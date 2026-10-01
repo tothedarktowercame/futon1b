@@ -34,6 +34,28 @@ row- or page-granular.
 made to assert something the store rejects, and the re-check demonstrably
 drops it (mission acceptance bar, item 2).
 
+### C1 amendment — current entity bodies
+
+The `ent_node` current-entity sidecar may return its stored document body
+without re-reading that body from XTDB, but only while
+`futon1b-entindex/reads-usable?` holds. That gate means an explicit fill has
+established a checkpoint, catch-up has completed since the fill began, and no
+entity write hook has failed since that catch-up began. Every `:entities`
+write made by this process goes through `futon1b-graph/put-verified!`,
+`write-entities-batch!`, or `retract-documents!`; each path holds the entity
+id's write stripe around the XTDB write, verified read-back, and awaited
+sidecar hook. Thus a successful response has updated `ent_node`, and two
+writes of the same id cannot leave their hooks in the reverse of store order.
+This is the same single-writer premise documented for alias warrants in
+`futon1b_graph.clj`'s “Alias warrants” comment (the comment beginning near
+line 170): a direct `xt/execute-tx` outside these paths is outside the
+contract and must be followed by `futon1b-entindex/catch-up!` before the gate
+may be trusted.
+
+This amendment applies only to current entity bodies served from `ent_node`.
+Evidence and hyperedge indexes remain candidate sources: their answers keep
+the C1 store re-check above.
+
 ## C2 — Explicit, queryable basis
 
 The index carries a machine-readable **basis**: *"this reflects the store as

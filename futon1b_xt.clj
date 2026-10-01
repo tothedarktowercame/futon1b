@@ -207,33 +207,55 @@
   keeps each statement small and lets the permit budget interleave readers."
   500)
 
+(def equality-hydrate-max-ids
+  "At or below this many ids, hydrate with one `SELECT * … WHERE _id = ?` per
+  id; above it, chunked `_id IN (?, …)`.
+
+  Measured 2026-09-26 in the serving JVM through the :6769 Drawbridge
+  (TN-entities-speedups-2026-09-26.md §1, store migration-store-21, entities
+  54,498 rows): `_id IN` does NOT use the id index and costs a table scan at
+  EVERY size — 8.8 s for one id, 6.6 s for ten, 7.4 s for a hundred — while
+  `_id = ?` does use it, at 0.17 s for one and ~0.2 s per id thereafter. The
+  two cross where N × 0.2 s reaches the ~8 s scan, near 40 ids."
+  40)
+
 (defn hydrate-by-ids
-  "Full documents (`SELECT *`) for IDS from TABLE, in the order of IDS, via
-  chunked SQL `_id IN (?, …)` through QUERY-FN (default `timed-q`). Missing ids
-  are dropped.
+  "Full documents (`SELECT *`) for IDS from TABLE, in the order of IDS, through
+  QUERY-FN (default `timed-q`). Missing ids are dropped.
 
   Why this exists (2026-08-23, /entities ~13 s/call): a wide projection driven
   by a non-key predicate — `(-> (from :entities [*]) (where (= entity/type t)))`
   — reads every row's nested `entity/props` across the whole 49k-row table,
-  12.7 s for a 1,351-row type even without order-by, 15 s with one. The same
-  rows by `_id IN (1351 ids)` take ~1 s because the IID index selects the rows
-  before the wide columns are materialised. So typed reads select an ordered
-  window of `[xt/id entity/type]` (~0.7 s) and hydrate here. 50 point lookups
-  cost 4.4 s, so per-id hydration is not the answer either; IN is."
+  12.7 s for a 1,351-row type even without order-by, 15 s with one. So typed
+  reads select a narrow id window and hydrate here.
+
+  How it does that has changed. The 2026-08-23 note recorded `_id IN (1351
+  ids)` at ~1 s and per-id lookups at 4.4 s for 50, and concluded IN. Measured
+  again on 2026-09-26 against the current store, neither number holds: `IN` is
+  a full table scan at every size (~7–9 s whether the list is 1 id or 100) and
+  per-id equality is ~0.2 s per id. So below `equality-hydrate-max-ids` this
+  hydrates by equality (at or below the threshold) and above it by IN, and
+  the old measurement is kept above only because it is what the window
+  narrowing still rests on."
   ([node table ids] (hydrate-by-ids node table ids timed-q))
   ([node table ids query-fn]
    (let [ids (vec ids)
          table-name (name table)
-         by-id (into {}
-                     (comp (mapcat (fn [chunk]
-                                     (query-fn node
-                                               (into [(str "SELECT * FROM " table-name
-                                                           " WHERE _id IN ("
-                                                           (str/join ", " (repeat (count chunk) "?"))
-                                                           ")")]
-                                                     chunk))))
-                           (map (fn [doc] [(:xt/id doc) doc])))
-                     (partition-all hydrate-chunk-size ids))]
+         rows (if (<= (count ids) equality-hydrate-max-ids)
+                (mapcat (fn [id]
+                          (query-fn node
+                                    [(str "SELECT * FROM " table-name " WHERE _id = ?")
+                                     id]))
+                        ids)
+                (mapcat (fn [chunk]
+                          (query-fn node
+                                    (into [(str "SELECT * FROM " table-name
+                                                " WHERE _id IN ("
+                                                (str/join ", " (repeat (count chunk) "?"))
+                                                ")")]
+                                          chunk)))
+                        (partition-all hydrate-chunk-size ids)))
+         by-id (into {} (map (fn [doc] [(:xt/id doc) doc])) rows)]
      (into [] (keep by-id) ids))))
 
 (defn present? [node table id]

@@ -24,11 +24,13 @@
             [clojure.edn :as edn]
             [clojure.string :as str]
             [futon1b-xt :as fxt]
-            [xtdb.api :as xt])
+            [xtdb.api :as xt]
+            [xtdb.serde :as serde])
   (:import [java.time Instant]
            [java.time.temporal ChronoUnit]
-           [java.util.concurrent Executors ScheduledExecutorService
-            ThreadFactory TimeUnit]))
+           [java.util.concurrent Executors LinkedBlockingQueue
+            ScheduledExecutorService ThreadFactory TimeUnit]
+           [java.util.concurrent.atomic AtomicLong]))
 
 (def ^:private unqualified {:builder-fn rs/as-unqualified-maps})
 
@@ -121,6 +123,19 @@
    "CREATE INDEX IF NOT EXISTS ev_attr_auth_at  ON ev_attr(author, at);"
    "CREATE INDEX IF NOT EXISTS ev_attr_subject  ON ev_attr(subject_type, subject_id);"
    "CREATE INDEX IF NOT EXISTS ev_attr_pattern  ON ev_attr(pattern_id);"
+   ;; Index-served evidence reads (futon1b-evidence index-window): newest
+   ;; first within a session, and newest first overall.
+   "CREATE INDEX IF NOT EXISTS ev_attr_session_at ON ev_attr(session, at);"
+   "CREATE INDEX IF NOT EXISTS ev_attr_at ON ev_attr(at, id);"
+;; ev_fts rows by evidence id. FTS5 cannot index its `id` column, so
+   ;; `DELETE FROM ev_fts WHERE id = ?` scanned the whole table (0.6 s and
+   ;; up at 332k rows, 2026-09-28) inside the write lock, for every indexed
+   ;; doc. See ensure-fts-map!.
+   "CREATE TABLE IF NOT EXISTS ev_fts_map (id TEXT NOT NULL, fts_rowid INTEGER NOT NULL,
+      PRIMARY KEY (id, fts_rowid)) WITHOUT ROWID;"
+   ;; The stored evidence row as XTDB returns it (SELECT *), transit-encoded.
+   ;; See the doc cache section.
+   "CREATE TABLE IF NOT EXISTS ev_doc (id TEXT PRIMARY KEY, doc BLOB NOT NULL);"
    "CREATE TABLE IF NOT EXISTS ev_tags (
   id TEXT, tag TEXT, PRIMARY KEY (tag, id)) WITHOUT ROWID;"
    "CREATE INDEX IF NOT EXISTS ev_tags_id ON ev_tags(id);"
@@ -135,6 +150,16 @@
   (jdbc/execute! ds ["INSERT INTO fts_meta(k,v) VALUES(?,?)
                       ON CONFLICT(k) DO UPDATE SET v=excluded.v" k (str v)]))
 
+(defn ensure-fts-map!
+  "Fill ev_fts_map from ev_fts once (one scan), recorded in fts_meta. Until
+  it is filled, index-batch! deletes from ev_fts by scanning, as before."
+  [ds]
+  (when-not (= "complete" (meta-get ds "fts-map"))
+    (jdbc/with-transaction [tx ds]
+      (jdbc/execute! tx ["INSERT OR IGNORE INTO ev_fts_map(id, fts_rowid)
+                          SELECT id, rowid FROM ev_fts"])
+      (meta-set! tx "fts-map" "complete"))))
+
 (defn init!
   "Open (or create) the sidecar db beside the store. Idempotent."
   [{:keys [store-dir path]}]
@@ -144,9 +169,54 @@
         ds (jdbc/get-datasource {:dbtype "sqlite" :dbname file
                                  :busy_timeout 10000})]
     (doseq [stmt ddl] (jdbc/execute! ds [stmt]))
+    (ensure-fts-map! ds)
     (reset! !ds ds)
     (swap! !stats assoc :last-at (meta-get ds "last-at"))
     {:ok true :path file :last-at (meta-get ds "last-at")}))
+
+;; ---------------------------------------------------------------------------
+;; One writer at a time on the sidecar file.
+;;
+;; futon1b-hxindex and this namespace write the same SQLite file, and SQLite
+;; has one write lock. Each used to hold its own in-process lock, so an hx
+;; write (synchronous on the hyperedge path since c9c7fe6, ~5k/hour) and an
+;; evidence index write waited on each other only through busy_timeout, and
+;; the evidence side gave up: 983 SQLITE_BUSY failures in a day (2026-09-25).
+;; Both now serialize on sidecar-write-lock; the busy retry is left for
+;; writers outside this JVM.
+;; ---------------------------------------------------------------------------
+
+(defonce sidecar-write-lock (Object.))
+
+(defn busy-error?
+  "True for SQLITE_BUSY (5) and its extended codes (e.g. BUSY_SNAPSHOT 517);
+   matched on the message too because driver/version differences decide
+   whether the extended code reaches SQLException.getErrorCode."
+  [t]
+  (and (instance? java.sql.SQLException t)
+       (let [e ^java.sql.SQLException t
+             code (.getErrorCode e)
+             msg (str (.getMessage e))]
+         (or (= 5 code) (= 517 code)
+             (str/includes? msg "SQLITE_BUSY")
+             (str/includes? msg "database is locked")))))
+
+(defn- with-sidecar-write*
+  "Run F holding sidecar-write-lock. SQLITE_BUSY is retried with doubling
+   backoff, ATTEMPTS times in all, or until F succeeds when ATTEMPTS is nil.
+   The sleep happens outside the lock. Any other error is thrown."
+  [attempts f]
+  (loop [n 1 sleep-ms 250]
+    (let [r (try {:ok (locking sidecar-write-lock (f))}
+                 (catch Throwable t {:err t}))]
+      (if-let [t (:err r)]
+        (if (and (busy-error? t) (or (nil? attempts) (< n (long attempts))))
+          (do (Thread/sleep sleep-ms)
+              (recur (inc n) (min 8000 (* 2 sleep-ms))))
+          (throw t))
+        (:ok r)))))
+
+(def ^:private catch-up-busy-attempts 6)
 
 ;; ---------------------------------------------------------------------------
 ;; Text extraction + indexing.
@@ -167,7 +237,11 @@
     (doseq [d docs]
       (let [id (str (:xt/id d))
             subject (:evidence/subject d)]
-        (jdbc/execute! tx ["DELETE FROM ev_fts WHERE id = ?" id])
+        (if (= "complete" (meta-get tx "fts-map"))
+          (do (jdbc/execute! tx ["DELETE FROM ev_fts WHERE rowid IN
+                                    (SELECT fts_rowid FROM ev_fts_map WHERE id = ?)" id])
+              (jdbc/execute! tx ["DELETE FROM ev_fts_map WHERE id = ?" id]))
+          (jdbc/execute! tx ["DELETE FROM ev_fts WHERE id = ?" id]))
         (jdbc/execute! tx ["DELETE FROM ev_attr WHERE id = ?" id])
         (jdbc/execute! tx ["DELETE FROM ev_tags WHERE id = ?" id])
         (jdbc/execute! tx ["INSERT INTO ev_fts(id, author, at, session, body)
@@ -177,6 +251,7 @@
                            (str (:evidence/at d))
                            (some-> (:evidence/session-id d) str)
                            (body-text d)])
+        (jdbc/execute! tx ["INSERT INTO ev_fts_map(id, fts_rowid) VALUES (?, last_insert_rowid())" id])
         (jdbc/execute! tx ["INSERT INTO ev_attr(
                               id, type, claim_type, author, at, session,
                               subject_type, subject_id, pattern_id,
@@ -268,48 +343,332 @@
               ;; claims differ: the checkpoint's ("everything <= (at,id) is
               ;; indexed") is true after every page; the basis's ("reflects
               ;; the store as of these coordinates") only on a full drain.
-              (do (jdbc/with-transaction [tx ds]
-                    (meta-set! tx "basis-tx" (pr-str basis-tx))
-                    (meta-set! tx "basis-tx-ids" (pr-str basis-tx-ids))
-                    (meta-set! tx "basis-captured-at" basis-captured-at))
+              (do (with-sidecar-write*
+                    catch-up-busy-attempts
+                    #(jdbc/with-transaction [tx ds]
+                       (meta-set! tx "basis-tx" (pr-str basis-tx))
+                       (meta-set! tx "basis-tx-ids" (pr-str basis-tx-ids))
+                       (meta-set! tx "basis-captured-at" basis-captured-at)))
                   (swap! !stats assoc :indexed total)
                   {:indexed total :last-at (meta-get ds "last-at")})
-              (let [n (index-batch! ds docs)
+              (let [n (with-sidecar-write* catch-up-busy-attempts
+                        #(index-batch! ds docs))
                     lst (last docs)
                     hi [(str (:evidence/at lst)) (str (:xt/id lst))]]
-                (meta-set! ds "last-at" (first hi))
-                (meta-set! ds "last-id" (second hi))
+                (with-sidecar-write* catch-up-busy-attempts
+                  #(do (meta-set! ds "last-at" (first hi))
+                       (meta-set! ds "last-id" (second hi))))
                 (swap! !stats assoc :last-at (first hi))
                 (recur hi (+ total n)))))))
       (finally (reset! !catch-up-running? false)))))
 
+;; ---------------------------------------------------------------------------
+;; Doc cache: the stored row, so index-served reads need not touch XTDB.
+;;
+;; Reading `evidence$body` is what makes evidence reads cost what they do: XTDB
+;; keeps it as one union of every body shape ever written (a 3,595-char type,
+;; 2026-09-27), so a point read with the body costs 80-160 ms against ~20 ms
+;; without, and 590 docs by `_id IN` cost 8.8 s. ev_doc holds each row exactly
+;; as `SELECT * FROM evidence` returns it (transit round-trips it exactly), read
+;; back from the store after commit by its own thread, so a slow read-back
+;; never holds up ev_attr. Evidence is append-only (a duplicate id is a 409),
+;; so a cached row does not go stale. A missing row is only a cache miss: the
+;; caller reads it from the store.
+;; ---------------------------------------------------------------------------
+
+(defonce ^:private !node
+  ;; The store node, for read-backs. Set by reconcile!.
+  (atom nil))
+
+(defonce ^:private doc-queue (LinkedBlockingQueue.))
+(defonce ^:private !doc-filler (atom nil))
+
+(def ^:private doc-fill-batch
+  "Read-backs per round: at or below fxt/equality-hydrate-max-ids, so each
+  round is point reads rather than one full-table `IN` read."
+  fxt/equality-hydrate-max-ids)
+
+(defn encode-doc
+  "Transit-encode a complete store document for a SQLite sidecar body cache."
+  ^bytes [doc]
+  (serde/write-transit doc :json))
+
+(defn decode-doc
+  "Decode a complete store document written by encode-doc."
+  [^bytes b]
+  (serde/read-transit b :json))
+
+(defn- put-docs!
+  "Upsert stored rows into ev_doc."
+  [ds docs]
+  (when (seq docs)
+    (with-sidecar-write*
+      nil
+      #(jdbc/with-transaction [tx ds]
+         (doseq [d docs]
+           (jdbc/execute! tx ["INSERT INTO ev_doc(id, doc) VALUES (?,?)
+                               ON CONFLICT(id) DO UPDATE SET doc=excluded.doc"
+                              (str (:xt/id d)) (encode-doc d)]))))))
+
+(defn- doc-filler-loop []
+  (try
+    (loop []
+      (let [batch (java.util.ArrayList.)]
+        (.add batch (.take doc-queue))
+        (.drainTo doc-queue batch (dec doc-fill-batch))
+        (try
+          (when-let [node @!node]
+            (put-docs! @!ds (fxt/hydrate-by-ids node :evidence (vec batch))))
+          (catch InterruptedException e (throw e))
+          (catch Throwable t
+            ;; A miss, not a loss: reads fall back to the store for these ids.
+            (println (str "[fts] doc cache read-back failed for " (.size batch)
+                          " id(s): " (.getSimpleName (class t)) ": " (.getMessage t)))
+            (flush)))
+        (recur)))
+    (catch InterruptedException _ nil)))
+
+(defn- queue-doc-fill! [id]
+  (locking !doc-filler
+    (when-not (some-> ^Thread @!doc-filler .isAlive)
+      (reset! !doc-filler (doto (Thread. ^Runnable doc-filler-loop "fts-doc-filler")
+                            (.setDaemon true)
+                            (.start)))))
+  (.put doc-queue (str id)))
+
+(defn cached-docs
+  "id -> stored row for the IDS ev_doc holds; absent ids are cache misses."
+  [ids]
+  (let [ds @!ds]
+    (if (and ds (seq ids))
+      (into {}
+            (mapcat (fn [chunk]
+                      (map (fn [r] [(:id r) (decode-doc (:doc r))])
+                           (jdbc/execute! ds (into [(str "SELECT id, doc FROM ev_doc WHERE id IN ("
+                                                         (str/join "," (repeat (count chunk) "?"))
+                                                         ")")]
+                                                   chunk)
+                                          unqualified))))
+            (partition-all 500 (map str ids)))
+      {})))
+
+(defn backfill-docs!
+  "Fill ev_doc for every store row it lacks, in one streaming store read,
+  flushing every 500 rows. Safe to repeat.
+
+  DO NOT RUN THIS AGAINST THE LIVE STORE. XTDB builds the whole result before
+  the stream yields a row: on 2026-09-28 00:07 it drove the serving heap to
+  4,092 of 4,096 MB, held a query permit for seven minutes, and every Agency
+  turn failed with \"futon1b read did not obtain evidence\" until the query
+  was cancelled through xtdb.pgwire. It is fine on test-sized stores; the live
+  backfill needs bounded windows."
+  [node]
+  (let [ds @!ds
+        have (into #{} (map :id) (jdbc/execute! ds ["SELECT id FROM ev_doc"] unqualified))
+        flush! (fn [buf] (put-docs! ds buf) [])
+        [buf n] (fxt/timed-reduce-q
+                 node ["SELECT * FROM evidence"]
+                 (fn [[buf n] row]
+                   (if (contains? have (str (:xt/id row)))
+                     [buf n]
+                     (let [buf (conj buf row)]
+                       (if (>= (count buf) 500)
+                         [(flush! buf) (inc n)]
+                         [buf (inc n)]))))
+                 [[] 0]
+                 1800)]
+    (flush! buf)
+    {:filled n :already (count have)}))
+
+;; ---------------------------------------------------------------------------
+;; Live appends: one queue, one writer (2026-09-27).
+;;
+;; on-append! used to index each doc in its own future and give up after one
+;; busy_timeout. A doc lost that way was repaired only if its :at was above
+;; the catch-up checkpoint, so reads could never rely on the index alone and
+;; every tag read also scanned the store's last 15 minutes directly (~2 s:
+;; XTDB reads the whole evidence table for any predicate). Now every append is
+;; queued for a single writer thread that retries SQLITE_BUSY until it
+;; succeeds. An append that fails for any other reason is kept in !failed-ids
+;; and retried by the periodic tick. `complete?` says when reads may use the
+;; index alone.
+;; ---------------------------------------------------------------------------
+
+(defonce ^:private append-queue (LinkedBlockingQueue.))
+(defonce ^:private enqueued-seq (AtomicLong. 0))
+(defonce ^:private indexed-seq (AtomicLong. 0))
+(defonce ^:private !writer (atom nil))
+
+(defonce ^:private !failed-ids
+  ;; id -> {:at :error} for appends the writer could not index; while any
+  ;; remain, `complete?` is false.
+  (atom {}))
+
+(defonce ^:private !reconciled-at
+  ;; Set by reconcile!: from then on every store doc is indexed, queued, or
+  ;; in !failed-ids. nil after a boot or reload until reconcile! runs.
+  (atom nil))
+
+(def ^:private append-batch-max 200)
+
+(defn- record-failure! [xdoc ^Throwable t]
+  ;; Attributable, not just counted. A bare counter tells you THAT n
+  ;; documents fell out of the index and never WHICH.
+  (let [id (str (:xt/id xdoc))
+        at (str (:evidence/at xdoc))
+        msg (str (.getSimpleName (class t)) ": " (.getMessage t))]
+    (swap! !failed-ids assoc id {:at at :error msg})
+    (swap! !stats (fn [s]
+                    (-> s
+                        (update :errors inc)
+                        (assoc :last-error {:id id :at at :error msg}))))
+    (println (str "[fts] index failed id=" id " at=" at " — " msg
+                  " (held in failed-ids; the periodic tick retries it)"))
+    (flush)))
+
+(defn- index-appends!
+  "Index one drained batch, retrying SQLITE_BUSY without limit. Any other
+   failure is isolated to the docs that cause it."
+  [docs]
+  (let [ds @!ds]
+    (try
+      (with-sidecar-write* nil #(index-batch! ds docs))
+      (catch InterruptedException e (throw e))
+      (catch Throwable t
+        (if (= 1 (count docs))
+          (record-failure! (first docs) t)
+          (doseq [d docs]
+            (try (with-sidecar-write* nil #(index-batch! ds [d]))
+                 (catch InterruptedException e (throw e))
+                 (catch Throwable t (record-failure! d t)))))))))
+
+(defn- writer-loop []
+  (try
+    (loop []
+      (let [batch (java.util.ArrayList.)]
+        (.add batch (.take append-queue))
+        (.drainTo append-queue batch (dec append-batch-max))
+        (try
+          (index-appends! (mapv second batch))
+          (doseq [[_ d] batch] (queue-doc-fill! (:xt/id d)))
+          (catch InterruptedException e (throw e))
+          (catch Throwable t
+            (doseq [[_ d] batch] (record-failure! d t))))
+        (.set indexed-seq (long (first (.get batch (dec (.size batch))))))
+        (recur)))
+    (catch InterruptedException _ nil)))
+
+(defn- ensure-writer! []
+  (locking !writer
+    (when-not (some-> ^Thread @!writer .isAlive)
+      (reset! !writer (doto (Thread. ^Runnable writer-loop "fts-append-writer")
+                        (.setDaemon true)
+                        (.start))))))
+
 (defn on-append!
-  "Write-path hook: index one freshly-written doc. Fire-and-forget —
-   an index failure must never affect the verified put. Deliberately does
-   NOT advance the (at, id) checkpoint: catch-up! owns it — a live append
-   moving the checkpoint past territory an interrupted build never scanned
-   would turn a restart into silent skips. The cost is bounded re-indexing
-   (upsert dedupes) on the next catch-up."
+  "Write-path hook: queue one freshly-written doc for the sidecar writer.
+   Never blocks or fails the verified put. Deliberately does NOT advance the
+   (at, id) checkpoint: catch-up! owns it — a live append moving the
+   checkpoint past territory an interrupted build never scanned would turn a
+   restart into silent skips."
   [xdoc]
+  (when @!ds
+    (ensure-writer!)
+    ;; Sequence numbers must enter the queue in order: the writer publishes
+    ;; the last one of each batch as indexed-seq.
+    (locking append-queue
+      (.put append-queue [(.incrementAndGet enqueued-seq) xdoc]))))
+
+(def ^:private complete-wait-ms 2000)
+
+(defn complete?
+  "True when the sidecar holds every evidence doc acknowledged before this
+   call: the writer has indexed every append queued so far (waiting up to
+   WAIT-MS for it), nothing is held in !failed-ids, and reconcile! has run.
+   Reads that get false keep scanning the store."
+  ([] (complete? complete-wait-ms))
+  ([wait-ms]
+   (boolean
+    (and @!ds
+         @!reconciled-at
+         (let [target (.get enqueued-seq)
+               deadline (+ (System/currentTimeMillis) (long wait-ms))]
+           (loop []
+             (cond
+               (>= (.get indexed-seq) target) true
+               (> (System/currentTimeMillis) deadline) false
+               :else (do (Thread/sleep 5) (recur)))))
+         ;; After the wait: a failure in the awaited batch lands here first.
+         (empty? @!failed-ids)))))
+
+(defn retry-failed!
+  "Re-index the docs held in !failed-ids from the store. A doc the store no
+   longer holds needs no index row and is released too."
+  [node]
+  (let [ids (vec (keys @!failed-ids))]
+    (doseq [chunk (partition-all 500 ids)]
+      (let [docs (fxt/hydrate-by-ids node :evidence chunk)]
+        (when (seq docs)
+          (with-sidecar-write* catch-up-busy-attempts #(index-batch! @!ds docs)))
+        (swap! !failed-ids #(apply dissoc % chunk))))
+    {:retried (count ids)}))
+
+(defn reconcile!
+  "Index every store evidence doc the sidecar lacks, then mark it complete.
+   catch-up! only scans above its checkpoint, so an append lost below it was
+   never repaired; comparing the two id sets is what makes `complete?` true.
+   Docs committed after the store read arrive through on-append!."
+  [node]
+  (reset! !node node)
+  (let [ds @!ds
+        store-ids (into [] (map #(str (:xt/id %)))
+                        (fxt/timed-q node ["SELECT _id FROM evidence"] 300))
+        index-ids (into #{} (map :id)
+                        (jdbc/execute! ds ["SELECT id FROM ev_attr"] unqualified))
+        missing (vec (remove index-ids store-ids))]
+    (doseq [chunk (partition-all 500 missing)]
+      (let [docs (fxt/hydrate-by-ids node :evidence chunk)]
+        (with-sidecar-write* catch-up-busy-attempts #(index-batch! ds docs))))
+    (retry-failed! node)
+    (reset! !reconciled-at (str (Instant/now)))
+    {:store (count store-ids) :missing (count missing)
+     :reconciled-at @!reconciled-at}))
+
+(declare attr-clauses index-enum-values)
+
+(defn attr-candidates
+  "Candidate {:id :at} rows for an evidence list read, with every filter of Q
+   the index holds applied in SQL (attr-clauses, plus include-ephemeral=false),
+   strictly below CURSOR [at id] when given, newest first, at most LIMIT
+   (nil = all).
+
+   Candidates only (contract C1): the caller re-checks each against the store.
+   Complete only while `complete?` holds. nil when no sidecar is attached."
+  [q cursor limit]
   (when-let [ds @!ds]
-    (future
-      (try
-        (index-batch! ds [xdoc])
-        (catch Throwable t
-          ;; Attributable, not just counted. A bare counter tells you THAT
-          ;; n documents fell out of the index and never WHICH — so the gap
-          ;; is undiagnosable and, since :ready stays true, invisible.
-          (let [id (str (:xt/id xdoc))
-                at (str (:evidence/at xdoc))
-                msg (str (.getSimpleName (class t)) ": " (.getMessage t))]
-            (swap! !stats (fn [s]
-                            (-> s
-                                (update :errors inc)
-                                (assoc :last-error {:id id :at at :error msg}))))
-            (println (str "[fts] index failed id=" id " at=" at " — " msg
-                          " (recoverable: checkpoint not advanced; the next"
-                          " catch-up re-indexes it)"))
-            (flush)))))))
+    (let [[first-tag & more-tags] (:tags q)
+          {:keys [clauses params]} (attr-clauses (assoc q :tags more-tags))
+          [c-at c-id] cursor
+          clauses (cond-> clauses
+                    (false? (:include-ephemeral q)) (conj "a.ephemeral = 0")
+                    cursor (conj "(a.at < ? OR (a.at = ? AND a.id < ?))"))
+          params (cond-> params
+                   cursor (into [(str c-at) (str c-at) (str c-id)]))
+          ;; The first tag is a join, not an EXISTS, so SQLite may drive the
+          ;; read from ev_tags' (tag, id) key when the tag is the rarer filter.
+          ;; DISTINCT: a tag stored in both of its enum spellings joins twice.
+          sql (str "SELECT DISTINCT a.id, a.at FROM ev_attr a"
+                   (when first-tag
+                     " JOIN ev_tags t0 ON t0.id = a.id AND t0.tag IN (?,?)")
+                   (when (seq clauses)
+                     (str " WHERE " (str/join " AND " clauses)))
+                   " ORDER BY a.at DESC, a.id DESC"
+                   (when limit " LIMIT ?"))]
+      (jdbc/execute! ds (cond-> (-> [sql]
+                                    (into (when first-tag (index-enum-values first-tag)))
+                                    (into params))
+                          limit (conj limit))
+                     unqualified))))
 
 (defonce ^:private !scheduler (atom nil))
 
@@ -338,6 +697,10 @@
        ^Runnable
        (fn []
          (try
+           (when (seq @!failed-ids)
+             (println (str "[fts] periodic retry of failed appends: "
+                           (pr-str (retry-failed! node))))
+             (flush))
            (let [{:keys [indexed skipped]} (catch-up! node :page page)]
              ;; Quiet in the steady state — log only real repair work, so a
              ;; line here always means something had fallen out of the index.
@@ -779,4 +1142,8 @@
             :projection projection
             :residual residual
             :periodic? (some? @!scheduler)
+            :appends {:enqueued (.get enqueued-seq) :indexed (.get indexed-seq)
+                      :failed (count @!failed-ids)
+                      :reconciled-at @!reconciled-at
+                      :doc-fill-queued (.size doc-queue)}
             :catch-up-running? @!catch-up-running?))))

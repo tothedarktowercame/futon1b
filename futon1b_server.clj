@@ -26,6 +26,9 @@
 ;;        GET /api/alpha/evidence?… — API-CONTRACT.md §3 (A1, operational
 ;;        switchover). Writes gated by penholder (futon1b-gates, A2).
 ;;
+;;   :6769 (loopback) /repl /eval /admin/eval — Drawbridge + eval inside this
+;;        JVM (futon1b_drawbridge.clj); token in ./.admintoken; started by
+;;        -main only.
 ;; Run: cd /home/joe/code/futon1b && \
 ;;      clojure -M:node -m futon1b-server --store-dir migration-store --port 7073
 ;;      (lucy: --port 7074 — nginx owns :7073 there)
@@ -42,6 +45,10 @@
             [zai-memory-1b :as zm]
             [futon1b-xt :as fxt]
             [futon1b-text :as text]
+            [futon1b-hxindex :as hx]
+            [futon1b-entindex :as ent]
+            [futon1b-scopeindex :as scope]
+            [futon1b-sidecars :as sidecars]
             [futon1b-write-log :as write-log]
             [futon1b-request-executor :as request-executor]
             [xtdb.api :as xt])
@@ -59,6 +66,8 @@
 
 ;; ---------------------------------------------------------------------------
 ;; Hyperedge write path.
+;; Await each sidecar hook before success, then invalidate cached windows.
+;; Hook failures remain recorded by hxindex, whose read gate falls back to XTDB.
 ;; ---------------------------------------------------------------------------
 
 (defn stable-hyperedge-id
@@ -89,8 +98,11 @@
       {:endpoint endpoint :end {:entity-id endpoint}})))
 
 (defn build-hyperedge-doc
-  "Watcher payload → futon1b doc (pre-transform)."
+  "Watcher payload → futon1b doc (pre-transform). Minting is a write operation."
   [payload]
+  (when (or (true? (:hx/mint-id payload)) (contains? payload :hx/idempotency-key))
+    (throw (gates/layered-error 4 :act-options-require-hyperedge-write
+                                {:message "Use POST /api/alpha/hyperedge for minted acts"})))
   (let [hx-type (normalize-type (or (:hx/type payload) (:type payload)))
         normalized-ends (mapv normalize-hyperedge-end
                               (or (:hx/endpoints payload) (:endpoints payload)))
@@ -119,7 +131,7 @@
 (defn- present? [node id]
   (fxt/present? node :hyperedges id))
 
-(defn upsert-hyperedge!
+(defn- upsert-derived-hyperedge!
   "Transform + no-op guard + VERIFIED put. Returns response map."
   [node payload]
   (let [retract? (= "retract" (some-> (or (:hx/op payload) (:op payload))
@@ -136,6 +148,7 @@
                                             valid-from
                                             (assoc :valid-from valid-from))
                                           id]])
+                    (when-let [indexed (hx/on-delete! id)] @indexed)
                     (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
                     (when (= :memory/assert (:hx/type doc))
                       (graph/refresh-memory-projection-component! node id))
@@ -164,12 +177,17 @@
                       (when stored
                         (into {} (filter (comp some? val)) stored))]
                   (if (and (nil? valid-from) (= doc-cmp stored-cmp))
-                    {:ok true :hx/id id :no-op? true}
+                    (do
+                      ;; A concurrent identical put may still be indexing.
+                      (when-let [indexed (hx/on-put! doc)] @indexed)
+                      (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
+                      {:ok true :hx/id id :no-op? true})
                     (let [res
                           (ingest/put-doc-with-rescue!
                            node :hyperedges doc graph/!shape-log valid-from)]
                       (if (present? node id)
                         (do
+                          (when-let [indexed (hx/on-put! doc)] @indexed)
                           (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
                           (when (= :memory/assert (:hx/type doc))
                             (graph/refresh-memory-projection-component! node id))
@@ -181,6 +199,171 @@
       (if (= :memory/assert (:hx/type doc))
         (graph/with-memory-projection-mutation node mutate!)
         (mutate!)))))
+
+;; Batch hyperedge write (2026-09-28). The multi-watcher's commit-ingest
+;; posts a code/v05/var and a code/v05/edits hyperedge per changed var per
+;; commit, each its own request, XTDB transaction and hx index wait: ~10/s
+;; while it caught up on a 45-minute backlog. Those writes carry a
+;; valid-time, for which upsert-derived-hyperedge! does no no-op read, so a
+;; batch of them is one transaction and one index update. Anything else
+;; (retract, mint, no valid-time, :memory/assert) takes the single-write path
+;; item by item, unchanged.
+(def ^:private hyperedge-batch-max 500)
+
+(defn- batchable-hyperedge? [payload]
+  (and (not (contains? payload :hx/mint-id))
+       (not (contains? payload :hx/idempotency-key))
+       (not= "retract" (some-> (or (:hx/op payload) (:op payload)) name str/lower-case))
+       (some? (or (:hx/valid-time payload) (:valid-time payload)))))
+
+(declare upsert-hyperedge!)
+
+(defn write-hyperedges-batch!
+  "Write PAYLOADS (single-route hyperedge payloads) and return one result per
+  payload, in order, each as the single route would return it. Batchable
+  puts share one XTDB transaction and one hx index update; if that
+  transaction fails, each is retried alone through the single-write path
+  (and its rescue ladder)."
+  [node payloads]
+  (when (> (count payloads) hyperedge-batch-max)
+    (throw (gates/layered-error 4 :batch-too-large
+                                {:max hyperedge-batch-max :count (count payloads)})))
+  (let [write-one (fn [p]
+                 (try (upsert-hyperedge! node p)
+                      (catch Exception e
+                        {:ok false :error (.getMessage e)})))
+        prepared (mapv (fn [p]
+                         (if (batchable-hyperedge? p)
+                           (try
+                             (let [doc (xf/transform-doc (build-hyperedge-doc p)
+                                                         graph/!shape-log {:log-stringify? true})]
+                               (if (= :memory/assert (:hx/type doc))
+                                 {:single p}
+                                 {:doc doc
+                                  :valid-from (parse-instant (or (:hx/valid-time p) (:valid-time p)))
+                                  :payload p}))
+                             (catch Exception e
+                               {:result {:ok false :error (.getMessage e)}}))
+                           {:single p}))
+                       payloads)
+        batch (filterv :doc prepared)
+        committed? (when (seq batch)
+                     (try
+                       (xt/execute-tx node (mapv (fn [{:keys [doc valid-from]}]
+                                                   [:put-docs {:into :hyperedges :valid-from valid-from}
+                                                    doc])
+                                                 batch))
+                       true
+                       (catch Exception e
+                         (println (str "[hyperedges-batch] transaction failed for "
+                                       (count batch) " doc(s), retrying singly: "
+                                       (.getMessage e)))
+                         (flush)
+                         false)))]
+    (when committed?
+      (when-let [ds @text/!ds]
+        (hx/index-docs! ds (mapv :doc batch)))
+      (doseq [t (distinct (map (comp :hx/type :doc) batch))]
+        (graph/invalidate-hyperedge-query-cache! t)))
+    (mapv (fn [{:keys [doc payload single result]}]
+            (cond
+              result result
+              single (write-one single)
+              committed? {:ok true :hx/id (:xt/id doc)}
+              :else (write-one payload)))
+          prepared)))
+
+(defn- act-receipt [node key]
+  (first (fxt/safe-q node (fxt/pq '[p-key]
+                                 '(-> (from :hyperedge-act-keys [*])
+                                      (where (= xt/id p-key))) key))))
+
+(defn- act-history [node id]
+  ;; Verify even future-valid acts. Retraction does not erase their history.
+  (fxt/safe-q node (fxt/pq '[p-id]
+                          '(-> (from :hyperedges {:bind [*] :for-valid-time :all-time})
+                               (where (= xt/id p-id))) id)))
+
+(defn- drop-nil-values
+  "XTDB does not store a nil-valued key, so the document read back lacks it.
+   Drop such keys before the write, so the exact read-back compares like with
+   like instead of failing an act that has committed."
+  [x]
+  (cond
+    (map? x) (into (empty x) (keep (fn [[k v]] (when-not (nil? v) [k (drop-nil-values v)]))) x)
+    (vector? x) (mapv drop-nil-values x)
+    :else x))
+
+(defn- write-minted-act!
+  [node payload]
+  (let [key (:hx/idempotency-key payload)
+        valid-from (some-> (or (:hx/valid-time payload) (:valid-time payload)) parse-instant)
+        base (-> (dissoc payload :hx/mint-id :hx/idempotency-key)
+                 build-hyperedge-doc
+                 (xf/transform-doc graph/!shape-log {:log-stringify? true})
+                 (dissoc :xt/id :hx/id)
+                 drop-nil-values)
+        request {:doc base :valid-from (some-> valid-from str)}
+        mutate!
+        (fn []
+          ;; One owning JVM per store. Lock the existing node object, not a
+          ;; reload-local registry; the durable receipt is the authority. All
+          ;; writers of this receipt table pass through this critical section.
+          (locking node
+            (if-let [receipt (when key (act-receipt node key))]
+              (do
+                (when-not (= request (edn/read-string (:act/request receipt)))
+                  (throw (gates/layered-error
+                          1 :idempotency-conflict
+                          {:key key :hx/id (:act/id receipt)
+                           :message "idempotency key already names a different act request"})))
+                {:ok true :hx/id (:act/id receipt) :no-op? true})
+              (let [id (str "act:" (random-uuid))
+                    doc (assoc base :xt/id id :hx/id id)
+                    receipt (when key {:xt/id key :act/id id :act/request (pr-str request)})
+                    ops (cond-> [[:put-docs (cond-> {:into :hyperedges}
+                                             valid-from (assoc :valid-from valid-from)) doc]]
+                          receipt (conj [:put-docs :hyperedge-act-keys receipt]))]
+                ;; A receipt without its act would lose the effect on retry.
+                ;; Commit both atomically; never rescue them in separate puts.
+                (xt/execute-tx node ops)
+                (when-not (and (some #(= doc (select-keys % (keys doc))) (act-history node id))
+                               (or (nil? key) (= receipt (act-receipt node key))))
+                  ;; The transaction may have committed anyway; a cached empty
+                  ;; listing of this type must not outlive it.
+                  (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
+                  (throw (gates/layered-error
+                          0 :postcommit-missing-act
+                          {:hx/id id :message "act/receipt transaction failed read-back verification"})))
+                (when-let [indexed (hx/on-put! doc)] @indexed)
+                (graph/invalidate-hyperedge-query-cache! (:hx/type doc))
+                (when (= :memory/assert (:hx/type doc))
+                  (graph/refresh-memory-projection-component! node id))
+                {:ok true :hx/id id :minted? true}))))]
+    (if (= :memory/assert (:hx/type base))
+      (graph/with-memory-projection-mutation node mutate!)
+      (mutate!))))
+
+(defn upsert-hyperedge!
+  "Opt-in act minting; otherwise preserve the existing derived/explicit ID path.
+  Idempotency keys are global to this store, durable, and survive retraction."
+  [node payload]
+  (let [mint (:hx/mint-id payload)
+        key (:hx/idempotency-key payload)]
+    (when (and (contains? payload :hx/mint-id) (not (boolean? mint)))
+      (throw (gates/layered-error 4 :invalid-mint-id {:expected :boolean})))
+    (when (and (contains? payload :hx/idempotency-key)
+               (not (and (true? mint) (string? key) (not (str/blank? key)))))
+      (throw (gates/layered-error 4 :invalid-idempotency-key
+                                {:message "a nonblank string key requires hx/mint-id true"})))
+    (if (true? mint)
+      (do
+        (when (or (:hx/id payload) (:id payload)
+                  (= "retract" (some-> (or (:hx/op payload) (:op payload)) name str/lower-case)))
+          (throw (gates/layered-error 4 :invalid-act-mint
+                                    {:message "minting cannot supply an id or retract; retract the returned hx/id without mint-id"})))
+        (write-minted-act! node payload))
+      (upsert-derived-hyperedge! node payload))))
 
 (defn write-memory-assert!
   "Validate an evidence entry and its :memory/assert hyperedge before writing,
@@ -258,6 +441,7 @@
                         0 :postcommit-missing-memory-assert
                         {:missing missing})))
               (text/on-append! doc)
+              (when-let [indexed (hx/on-put! hyperedge-doc)] @indexed)
               (graph/invalidate-hyperedge-query-cache! (:hx/type hyperedge-doc))
               (graph/refresh-memory-projection-component-from-docs!
                node hyperedge-doc doc)
@@ -575,6 +759,9 @@
                          0)
      :stats @!expensive-read-stats
      :alias-warrants (graph/alias-warrant-snapshot)
+     ;; One line per declared derived index (futon1b-sidecars): a sidecar that
+     ;; has silently stopped serving shows here, not only as slowness.
+     :sidecars (sidecars/health-snapshot)
      :heap {:used-mb (quot (- (.totalMemory rt) (.freeMemory rt)) 1048576)
             :max-mb (quot (.maxMemory rt) 1048576)}
      ;; Metaspace tracks generated query classes (DynamicClassLoader count
@@ -627,6 +814,32 @@
       (respond! ex 503 (pr-str {:ok false
                                 :error :expensive-read-busy
                                 :retry-after-seconds 1})))))
+
+(defn- hx-catch-up-with-permit!
+  "Hyperedge catch-up takes an expensive-read permit like other table scans:
+   P0 measured that both of its system-time queries scan the whole
+   hyperedges table, so it must not pile onto the two census-class permits
+   unbudgeted. Runs at boot and then every FUTON1B_HX_CATCHUP_MS (default
+   15 min); a busy permit budget skips the run rather than queueing behind
+   serving reads."
+  []
+  (if (.tryAcquire expensive-read-permit expensive-read-wait-ms TimeUnit/MILLISECONDS)
+    (try
+      (hx/catch-up! @!node)
+      (finally (.release expensive-read-permit)))
+    {:skipped :expensive-read-busy}))
+
+(defn- ent-page-with-permit!
+  "Run one bounded entity-index store page under one expensive-read permit.
+  The permit is released before catch-up/fill asks for its next page."
+  [f]
+  (if (.tryAcquire expensive-read-permit expensive-read-wait-ms TimeUnit/MILLISECONDS)
+    (try (f) (finally (.release expensive-read-permit)))
+    (throw (ex-info "entity index page skipped: expensive reads busy"
+                    {:entindex/error :expensive-read-busy}))))
+
+(defn- ent-catch-up-with-permit! []
+  (ent/catch-up! @!node :with-page-permit ent-page-with-permit!))
 
 (def ^:private tables
   [:hyperedges :entities :evidence :relations :type-catalog :docs :misc])
@@ -772,12 +985,22 @@
 (defn- entities-route [^HttpExchange ex]
   (let [p (query-params ex)]
     (if (p "type")
-      (with-expensive-read!
-        ex #(respond! ex 200 (graph/entities-query
-                              @!node {:type (p "type")
-                                      :limit (parse-limit p)
-                                      :after (p "after")}
-                              fxt/timed-q)))
+      ;; Both flags are spelled `X=false` and both default to true: unlike
+      ;; /hyperedges, where the total is opt-in, this route has always returned
+      ;; a total and a stable ordering, so only an explicit `false` drops one
+      ;; and no existing caller changes. Each `false` removes one full type scan
+      ;; (TN-entities-speedups-2026-09-26.md).
+      (let [opts {:type (p "type")
+                  :limit (parse-limit p)
+                  :after (p "after")
+                  :include-total? (not= "false" (p "include-total"))
+                  :ordered? (not= "false" (p "ordered"))}]
+        ;; Validate the window before taking a permit: a 400 must not count as
+        ;; an admitted-then-errored read in the holder stats.
+        (when-let [refusal (graph/entities-query-refusal opts)]
+          (throw refusal))
+        (with-expensive-read!
+          ex #(respond! ex 200 (graph/entities-query @!node opts fxt/timed-q))))
       (respond! ex 400 (pr-str {:error "entities requires ?type=<entity-type>"})))))
 
 (defn- entities-batch-route [^HttpExchange ex]
@@ -794,6 +1017,17 @@
           _ (penholder! ex payload)
           res (graph/write-relation! @!node payload)]
       (respond! ex 200 (pr-str res)))
+    (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
+
+(defn- hyperedges-batch-route [^HttpExchange ex]
+  (if (= "POST" (.getRequestMethod ex))
+    (let [payload (parse-payload ex)
+          _ (penholder! ex payload)
+          items (:hyperedges payload)]
+      (if-not (sequential? items)
+        (respond! ex 400 (pr-str {:ok false :error "body needs :hyperedges, a list of hyperedge payloads"}))
+        (let [results (write-hyperedges-batch! @!node (vec items))]
+          (respond! ex 200 (pr-str {:ok (every? :ok results) :results results})))))
     (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
 
 (defn- relations-batch-route [^HttpExchange ex]
@@ -856,13 +1090,14 @@
 
 (defn- hyperedges-route [^HttpExchange ex]
   (let [p (query-params ex)]
-    (if (or (p "type") (p "end"))
+    (if (or (p "type") (p "end") (p "end-prefix"))
       ;; Validate the window before taking a permit: a 400 must not count as
       ;; an admitted-then-errored read in the holder stats.
       (let [limit (parse-hyperedge-limit p)]
         (with-expensive-read!
          ex #(respond! ex 200 (graph/hyperedges-query
                                @!node {:type (p "type") :end (p "end")
+                                      :end-prefix (p "end-prefix")
                                       :limit limit
                                       :after (p "after")
                                       :repo (p "repo")
@@ -891,6 +1126,94 @@
                                               :entity-type (p "entity-type")}))))
       (respond! ex 400
                 (pr-str {:error "census requires ?type=<hx-type> or ?entity-type=<type>"})))))
+
+;; ---------------------------------------------------------------------------
+;; P6b: scope sidecar routes (futon1b-scopeindex). The ns owns the schema and
+;; the Q6/Q7/Q8 read fns; here is only the HTTP seam.
+;; ---------------------------------------------------------------------------
+
+(def ^:private scope-lines-re #"^(\d+)-(\d+)$")
+
+(defn- parse-scope-lines
+  "Parse ?lines=a-b into [a b] longs; nil when malformed or a > b. Q7's
+   overlap is CLOSED-interval (futon1b-scopeindex ns docstring)."
+  [raw]
+  (when-let [[_ a b] (re-matches scope-lines-re (str raw))]
+    (let [a (Long/parseLong a) b (Long/parseLong b)]
+      (when (<= a b) [a b]))))
+
+(defn- scopes-route
+  "GET /api/alpha/scopes — P6b scope sidecar reads (futon1b-scopeindex).
+   Exactly one selector:
+     ?paper=P            → Q6 scopes-of-paper
+     ?paper=P&lines=a-b  → Q7 scopes-overlapping (closed interval)
+     ?kind=K             → Q8 scopes-of-kind
+   Optional ?run=R restricts the read to one run. 400 on missing,
+   conflicting or malformed params (same shapes as census-route); typed
+   503 :scope-sidecar-unavailable when the sidecar is not attached (no
+   store-dir at startup, or text init failed — the XTDB routes still
+   serve then, so this is a refusal, not a 500)."
+  [^HttpExchange ex]
+  (if-not (= "GET" (.getRequestMethod ex))
+    (respond! ex 405 (pr-str {:ok false :error "GET only"}))
+    (let [ds @text/!ds]
+      (if-not ds
+        (respond! ex 503 (pr-str {:ok false
+                                  :error :scope-sidecar-unavailable
+                                  :hint "sidecar attaches only when the server has a store-dir"}))
+        (let [p (query-params ex)
+              paper (not-empty (p "paper"))
+              kind (not-empty (p "kind"))
+              run (not-empty (p "run"))
+              lines-raw (p "lines")
+              opts (cond-> {} run (assoc :run run))]
+          (cond
+            (= (some? paper) (some? kind))
+            (respond! ex 400
+                      (pr-str {:error "scopes requires exactly one of ?paper=P or ?kind=K"}))
+
+            (and kind (some? lines-raw))
+            (respond! ex 400 (pr-str {:error "?lines= applies only with ?paper="}))
+
+            (and paper (some? lines-raw))
+            (if-let [[a b] (parse-scope-lines lines-raw)]
+              (let [rows (scope/scopes-overlapping ds paper a b opts)]
+                (respond! ex 200 (pr-str {:ok true :scopes rows :count (count rows)})))
+              (respond! ex 400 (pr-str {:error "malformed ?lines= (expected a-b with a <= b)"
+                                        :provided lines-raw})))
+
+            paper
+            (let [rows (scope/scopes-of-paper ds paper opts)]
+              (respond! ex 200 (pr-str {:ok true :scopes rows :count (count rows)})))
+
+            :else
+            (let [rows (scope/scopes-of-kind ds kind opts)]
+              (respond! ex 200 (pr-str {:ok true :scopes rows :count (count rows)})))))))))
+
+(defn- scope-index-runs-from-env!
+  "P6b: index the run dirs listed in FUTON1B_SCOPE_RUNS (colon-separated;
+   unset or empty = none). Called in a background future at startup: a
+   slow or missing run directory must not delay serving, and one failing
+   run must not stop the others (or the server) — same contract as the
+   [fts] catch-up thread. Returns the number of runs successfully
+   indexed, so tests can assert the empty-env case indexes nothing."
+  []
+  (let [runs (->> (str/split (or (System/getenv "FUTON1B_SCOPE_RUNS") "") #":")
+                  (map str/trim)
+                  (remove str/blank?))]
+    (reduce (fn [n run-dir]
+              (try
+                (let [{:keys [run rows elapsed-ms skipped]}
+                      (scope/index-run! run-dir)]
+                  (println (format "[scopeindex] run %s rows %s ms %s%s"
+                                   run rows elapsed-ms
+                                   (if skipped " (watermark unchanged)" "")))
+                  (inc n))
+                (catch Throwable t
+                  (println (format "[scopeindex] run %s failed: %s"
+                                   run-dir (.getMessage t)))
+                  n)))
+            0 runs)))
 
 (defn- write-log-route
   "GET /api/alpha/write-log?limit=N&kind=put-failed|shape — read-only view of
@@ -996,7 +1319,9 @@
       (respond! ex 405 (pr-str {:ok false :error "GET (search) or POST (catch-up)"}))
 
       (= "true" (p "stats"))
-      (respond! ex 200 (pr-str (assoc (text/stats @!node) :ok true)))
+      (respond! ex 200 (pr-str (assoc (text/stats @!node)
+                                      :ok true
+                                      :hx (hx/hx-stats))))
 
       (not (str/blank? (str (p "df"))))
       (let [terms (->> (str/split (p "df") #",")
@@ -1069,6 +1394,7 @@
   ;; scheduled past shutdown means a catch-up against a closed node every
   ;; interval, forever.
   (text/stop-periodic-catch-up!)
+  (hx/stop-periodic-catch-up!)
   (when-let [{:keys [executor companions]} (get @!server-executors server)]
     (swap! !server-executors dissoc server)
     (.shutdownNow ^java.util.concurrent.ExecutorService executor)
@@ -1110,11 +1436,43 @@
     (println "[fts] no store-dir: sidecar not attached")
   (try
     (let [{:keys [path last-at]} (text/init! {:store-dir store-dir})]
+      (hx/init!)
+      (ent/init!)
+      (ent/set-page-permit! ent-page-with-permit!)
+      ;; P6b: scope tables on the same sidecar. The DDL is cheap and
+      ;; idempotent, so it stays on the startup path; run indexing does
+      ;; not — see the future below.
+      (scope/init!)
       (println (format "[fts] sidecar at %s (last-at %s)" path (or last-at "none — full build")))
+      ;; P6b: index FUTON1B_SCOPE_RUNS off the startup path (background
+      ;; future): a slow/absent run dir must not delay serving, and a
+      ;; failing run must not stop the server (scope-index-runs-from-env!
+      ;; catches per run). No startup-periodic re-index in this packet —
+      ;; re-indexing is an operator action until claude-12 says otherwise.
+      (future (scope-index-runs-from-env!))
       (doto (Thread. (fn []
                        (try (println "[fts] catch-up:" (pr-str (text/catch-up! @!node)))
                             (catch Throwable t
                               (println "[fts] catch-up failed:" (.getMessage t))))
+                       ;; Until this completes, evidence reads keep scanning
+                       ;; the store (text/complete? is false).
+                       (try (println "[fts] reconcile:" (pr-str (text/reconcile! @!node)))
+                            (catch Throwable t
+                              (println "[fts] reconcile failed:" (.getMessage t))))
+
+                       (try (println "[hxindex] boot catch-up:"
+                                     (pr-str (hx-catch-up-with-permit!)))
+                            (catch Throwable t
+                              (println "[hxindex] boot catch-up failed:"
+                                       (.getMessage t))))
+                       ;; No entity fill here: before an operator explicitly
+                       ;; calls ent/fill!, this reports :not-filled and reads
+                       ;; remain disabled.
+                       (try (println "[entindex] boot catch-up:"
+                                     (pr-str (ent-catch-up-with-permit!)))
+                            (catch Throwable t
+                              (println "[entindex] boot catch-up failed:"
+                                       (.getMessage t))))
                        ;; Only after the boot build: the repair loop is
                        ;; single-flighted against it anyway, but starting it
                        ;; here keeps the first run a genuine tail scan.
@@ -1122,6 +1480,20 @@
                                      (pr-str (text/start-periodic-catch-up! @!node)))
                             (catch Throwable t
                               (println "[fts] periodic catch-up not started:"
+                                       (.getMessage t))))
+                       (try (println "[hxindex] periodic catch-up:"
+                                     (pr-str (hx/start-periodic-catch-up!
+                                              @!node
+                                              :catch-up-fn hx-catch-up-with-permit!)))
+                            (catch Throwable t
+                              (println "[hxindex] periodic catch-up not started:"
+                                       (.getMessage t))))
+                       (try (println "[entindex] periodic catch-up:"
+                                     (pr-str (ent/start-periodic-catch-up!
+                                              @!node
+                                              :catch-up-fn ent-catch-up-with-permit!)))
+                            (catch Throwable t
+                              (println "[entindex] periodic catch-up not started:"
                                        (.getMessage t))))))
         (.setDaemon true)
         (.start)))
@@ -1154,8 +1526,15 @@
     (.createContext server "/api/alpha/relations" (handler relations-route))
     ;; longer prefix wins (see NB above): batch must out-rank /relations
     (.createContext server "/api/alpha/relations/batch" (handler relations-batch-route))
+    (.createContext server "/api/alpha/hyperedges/batch" (handler hyperedges-batch-route))
     (.createContext server "/api/alpha/graph/inhabited" (handler graph-inhabited-route))
     (.createContext server "/api/alpha/census" (handler census-route))
+    ;; Registered through the VAR, not the fn value: createContext captures
+    ;; its handler argument, and routes captured by value keep calling the
+    ;; old closure until a restart (TN-entities-speedups-2026-09-26.md:
+    ;; "start-server! registers each route by VALUE, not by var"). Passing
+    ;; #'scopes-route lets a later reload of this ns take effect live.
+    (.createContext server "/api/alpha/scopes" (handler #'scopes-route))
     (.createContext server "/api/alpha/write-log" (handler write-log-route))
     (.createContext server "/api/alpha/restart-readiness"
                     (handler restart-readiness-route))
@@ -1190,9 +1569,28 @@
         "--bind-host" (recur (nnext args) (assoc opts :bind-host (second args)))
         "--health-port" (recur (nnext args) (assoc opts :health-port
                                                     (Long/parseLong (second args))))
+        "--drawbridge-port" (recur (nnext args) (assoc opts :drawbridge-port
+                                                        (Long/parseLong (second args))))
         (throw (ex-info (str "Unknown arg: " (first args)) {:args args}))))))
 
+(defn- start-drawbridge!
+  "Drawbridge + /eval on 127.0.0.1 (futon1b-drawbridge), for the serving JVM
+   only: started from -main, never from start-server!, so tests and embedded
+   nodes get no eval endpoint. Port from --drawbridge-port, else
+   FUTON1B_DRAWBRIDGE_PORT, else 6769; 0 disables. A missing token is a
+   startup failure, not a silent skip."
+  [{:keys [drawbridge-port]}]
+  (let [port (or drawbridge-port
+                 (some-> (System/getenv "FUTON1B_DRAWBRIDGE_PORT") Long/parseLong)
+                 6769)]
+    (when (pos? port)
+      (let [start! (requiring-resolve 'futon1b-drawbridge/start!)
+            token ((requiring-resolve 'futon1b-drawbridge/read-token))]
+        (start! {:port port :token token})))))
+
 (defn -main [& args]
-  (start-server! (parse-args args))
+  (let [opts (parse-args args)]
+    (start-server! opts)
+    (start-drawbridge! opts))
   ;; block forever — the server owns this JVM.
   @(promise))

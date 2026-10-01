@@ -21,6 +21,8 @@ WorkingDirectory=%h/code/futon1b
 Environment=FUTON1B_STORE_DIR=migration-store-21
 Environment=FUTON1B_PORT=7073
 Environment=FUTON1B_HEALTH_PORT=7072
+# Drawbridge + /eval inside the JVM, loopback only (futon1b_drawbridge.clj).
+Environment=FUTON1B_DRAWBRIDGE_PORT=6769
 
 # NOT a per-box knob: README.md says this one "matters at *any* size". glibc
 # spawns per-thread malloc arenas and a JVM with many threads can hold gigabytes

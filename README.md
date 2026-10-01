@@ -149,6 +149,8 @@ query values (the 2026-08-23 metaspace incident — see `fxt/pq`). Gates for any
 |---|---|---|
 | `FUTON1B_ALLOWED_PENHOLDERS` | `api,joe` | L3 write allow-list |
 | `FUTON1B_COMPAT_PENHOLDER` | (unset) | fallback penholder when neither body `:penholder` nor `x-penholder` header is present; unset ⇒ such writes 403 |
+| `FUTON1B_DRAWBRIDGE_PORT` | `6769` | Drawbridge (`/repl`, nREPL over HTTP for CIDER) + `/eval` inside the serving JVM, loopback only; `0` disables. Started by `-main` only, never by `start-server!`. `scripts/futon1b-eval.sh '(+ 1 2)'` is the CLI; the node is `@futon1b-server/!node`. Refuses `tools.namespace` refresh and `shutdown-agents`; every request is logged to `/tmp/futon1b-eval.log`. See `futon1b_drawbridge.clj` (a port of futon3c's `:6768`) |
+| `FUTON1B_ADMIN_TOKEN` | contents of `./.admintoken` | the `x-admin-token` the endpoint requires; startup fails without one |
 
 futon3c-side (consumers of this server):
 
