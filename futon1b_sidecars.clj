@@ -131,10 +131,11 @@
     :kind :in-memory-cache
     :derived-from {:xtdb-table :entities :filter "alias scans by name/id"}
     :tables {}
-    :maintained-by {:write-hook ['futon1b-graph/with-entity-mutation]
-                    :cadence "issued on read; every :entities write retires all of them"}
+    :maintained-by {:write-hook ['futon1b-graph/with-entity-docs-mutation
+                                 'futon1b-graph/with-entity-mutation]
+                    :cadence "issued on read; a put retires the warrants for the names it writes, a retraction retires all"}
     :gate {:fn 'futon1b-graph/alias-warrant-snapshot
-           :means "a warrant serves only while its basis (boot, entity generation) is current"}
+           :means "a warrant serves only while its basis (boot, entity generation, its key's generation) is current"}
     :serves ["GET /api/alpha/entity/{name-or-id}"]
     :fallback "the alias scan"
     :stands-in-for "xtdb#3663 (declared index on the alias columns)"}])

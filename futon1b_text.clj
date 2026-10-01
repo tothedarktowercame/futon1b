@@ -685,8 +685,9 @@
 
    scheduleWithFixedDelay, not AtFixedRate: a build slower than the interval
    must not stack another on top of it."
-  [node & {:keys [interval-ms page]
-           :or {interval-ms default-catch-up-interval-ms page periodic-page}}]
+  [node & {:keys [interval-ms page min-free-permits]
+           :or {interval-ms default-catch-up-interval-ms page periodic-page
+                min-free-permits 2}}]
   (cond
     (not (pos? (long interval-ms))) {:ok true :periodic false :reason :disabled}
     (some? @!scheduler) {:ok true :periodic true :reason :already-running}
@@ -697,6 +698,12 @@
        ^Runnable
        (fn []
          (try
+           (if (< (fxt/query-permits-available) (long min-free-permits))
+             ;; Defer to interactive reads (2026-09-30: this scan and the hx
+             ;; catch-up held two of the four query permits while agents'
+             ;; evidence appends got 504s). The next tick runs it.
+             (swap! !stats update :periodic-deferred (fnil inc 0))
+           (do
            (when (seq @!failed-ids)
              (println (str "[fts] periodic retry of failed appends: "
                            (pr-str (retry-failed! node))))
@@ -706,7 +713,7 @@
              ;; line here always means something had fallen out of the index.
              (when (and (nil? skipped) (pos? (long (or indexed 0))))
                (println (str "[fts] periodic catch-up re-indexed " indexed " doc(s)"))
-               (flush)))
+               (flush)))))
            (catch InterruptedException _
              ;; stop-periodic-catch-up! interrupting an in-flight scan is an
              ;; intentional shutdown, not a failure — don't cry wolf.

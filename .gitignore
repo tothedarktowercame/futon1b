@@ -53,3 +53,4 @@ benchmarks/**/*.txt
 holes/receipts/**/*.json
 holes/receipts/**/*.log
 .admintoken
+/.clj-kondo/.cache/

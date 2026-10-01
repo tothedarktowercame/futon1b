@@ -61,6 +61,23 @@
       ;; A doc written to XTDB whose live index never happened is exactly the
       ;; on-append! failure case: present in the store, absent from the index,
       ;; and (by design) the checkpoint was not advanced past it.
+      ;; ---- the loop defers while interactive reads hold the permits -----
+      ;; With 3 of the 4 query permits taken, a tick must not scan: the missed
+      ;; doc stays out and the deferral is counted. Released, it is repaired.
+      (let [missed (doc 98 "2026-07-31T00:59:00Z")
+            ^java.util.concurrent.Semaphore permits @#'futon1b-xt/query-permits]
+        (xt/execute-tx node [[:put-docs :evidence missed]])
+        (.acquire permits 3)
+        (try
+          (text/start-periodic-catch-up! node :interval-ms 300 :page 200)
+          (check! "a tick with fewer than 2 free permits defers instead of scanning"
+                  (and (wait-for 5000 #(pos? (long (:periodic-deferred (text/stats) 0))))
+                       (not (in-index? "periodic-98"))))
+          (finally (.release permits 3)))
+        (check! "once permits are free the deferred repair runs"
+                (wait-for 15000 #(in-index? "periodic-98")))
+        (text/stop-periodic-catch-up!))
+
       (let [missed (doc 99 "2026-07-31T01:00:00Z")]
         (xt/execute-tx node [[:put-docs :evidence missed]])
         (check! "a doc whose live index failed is absent from the index"
