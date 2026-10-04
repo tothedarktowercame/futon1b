@@ -454,12 +454,6 @@
   [base-url output-dir]
   (export-via-snapshot base-url output-dir "latest" "graph-snapshot.edn" 300000))
 
-(defn export-hyperedges-snapshot
-  "All hyperedges via snapshot scope 'hyperedges' (server-side open-q). Run on a
-  QUIET serving JVM — see export-via-snapshot note."
-  [base-url output-dir]
-  (export-via-snapshot base-url output-dir "hyperedges" "hyperedges.edn" 600000))
-
 ;; ---------------------------------------------------------------------------
 ;; Export orchestrator.
 ;; ---------------------------------------------------------------------------
