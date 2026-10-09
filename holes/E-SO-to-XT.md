@@ -1,5 +1,7 @@
 # E-SO-to-XT — the StackExchange-family benchmark, from original contents
 
+**VERDICT (2026-10-09, provisional):** OPEN — Specification of the SE benchmark rung; no recorded benchmark run or results, last commit is the 2026-08-10 spec. _(WM status classification by zai-5, medium confidence; not yet confirmed by the author.)_
+
 **Opened:** 2026-08-10 (Fable session, Joe driving)
 **Parent:** `M-xtdb-22x-benchmarking.md` — this excursion specifies the
 SE rung of that mission's ladder, which is probably the **fastest
