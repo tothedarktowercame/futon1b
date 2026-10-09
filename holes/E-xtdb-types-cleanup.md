@@ -145,3 +145,11 @@ reading `futon1b_graph.clj` (`register-types!` `:60`, `retractable-tables`
 `:146`, `retract-documents!` `:176`, `types-mutate!` `:90`) and
 `futon1b_server.clj` (`types-route` `:634`), and by calling `/api/alpha/types`
 and `/api/alpha/census` on both `:7073` and `:7083`.
+
+## Closure criteria (provisional, 2026-10-09)
+
+_Drafted from this document's own stated goals during the War Machine status classification (zai-5, medium confidence); not yet confirmed by the author._
+
+- [ ] Joe decides between the two paths for performing the cleanup (no code path can currently do it) and records the decision
+- [ ] Execute the chosen path: remove/merge the 28 Zone-only probe types against the frozen Dionysus catalogue, or land the prevention half that stops new junk types
+- [ ] Re-diff the two stores' type catalogues and record the result in this note

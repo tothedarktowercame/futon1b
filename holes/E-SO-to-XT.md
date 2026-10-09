@@ -166,3 +166,11 @@ where bitemporality is the validity condition rather than a feature. The
 two rungs together are the #5637 story: one proves the harness and the
 hybrid queries, the other proves the reason text indexing belongs *inside*
 a bitemporal store.
+
+## Closure criteria (provisional, 2026-10-09)
+
+_Drafted from this document's own stated goals during the War Machine status classification (zai-1, high confidence); not yet confirmed by the author._
+
+- [ ] Commit the SE dump ingest script plus query suite with no futon tooling and no LLM in the critical path
+- [ ] Run the duplicate-workload benchmark (pre-posting duplicate search terms) and record results
+- [ ] Verify byte-level reproducibility by a rerun from the raw public dump
