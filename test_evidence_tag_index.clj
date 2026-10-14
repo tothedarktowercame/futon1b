@@ -149,6 +149,33 @@
       ;; init! does not clear it, and the other test expects an unreconciled index.
       (finally (reset! @#'text/!reconciled-at nil)))))
 
+(deftest catch-up-repairs-docs-below-the-checkpoint
+  ;; Once reconciled, list reads come from the index alone. A doc that reached
+  ;; the store without on-append! and whose :at was already below the
+  ;; checkpoint stayed hidden from every read until the next boot.
+  (with-open [node (xtn/start-node)]
+    (let [doc (fn [id at] {:xt/id id :evidence/id id :evidence/at at
+                           :evidence/type :note :evidence/author "a"
+                           :evidence/tags ["alpha"] :evidence/body {}})
+          ids (fn [q] (:ids (run-query node q 50)))]
+      (xt/execute-tx node [[:put-docs :evidence (doc "old" (at-hours 0)) (doc "ck" (at-hours 10))]])
+      (text/init! {:path (temp-db)})
+      (try
+        (text/catch-up! node)
+        (text/reconcile! node)
+        (let [ck (Instant/parse (text/checkpoint-at))]
+          (xt/execute-tx node [[:put-docs :evidence
+                                (doc "inside" (str (.minusSeconds ck 300)))
+                                (doc "outside" (str (.minusSeconds ck 7200)))]]))
+        (is (text/complete?) "the index serves, so the bypassing docs are hidden")
+        (is (= ["ck" "old"] (ids {"author" "a"})))
+        (let [r (text/catch-up! node)]
+          (is (= 1 (:repaired r)) "the doc inside the margin is found"))
+        (is (= ["ck" "inside" "old"] (ids {"author" "a"})))
+        (is (= ["ck" "inside" "old"] (ids {"tags" "alpha" "include-ephemeral" "false"})))
+        (is (= 0 (:repaired (text/catch-up! node))) "a second pass finds nothing")
+        (finally (reset! @#'text/!reconciled-at nil))))))
+
 (defn -main [& _]
   (let [result (run-tests 'test-evidence-tag-index)]
     (shutdown-agents)

@@ -300,6 +300,47 @@
 
 (defonce ^:private !catch-up-running? (atom false))
 
+(def rescan-margin-ms
+  "How far below its checkpoint catch-up! looks for docs the index lacks.
+  Once reconcile! has run, list reads come from the index alone, and a doc
+  that reached the store without on-append! (a write outside futon1b's two
+  write paths, a backdated :at) is hidden until something indexes it. Above
+  the checkpoint the next catch-up! does; one committed with an :at already
+  below it was hidden until the next boot's reconcile!. Same margin as
+  futon1b-evidence/tag-tail-margin-ms, for the same stamp-to-commit reason."
+  (* 15 60 1000))
+
+(defn- repair-margin!
+  "Index the docs between (checkpoint - rescan-margin-ms) and the checkpoint
+  that ev_attr does not hold. Returns how many. Leaves the checkpoint alone."
+  [node ds page]
+  (let [ck [(str (meta-get ds "last-at")) (str (meta-get ds "last-id"))]
+        start (when-not (str/blank? (first ck))
+                (try (str (.minusMillis (Instant/parse (first ck)) rescan-margin-ms))
+                     (catch Exception _ nil)))]
+    (if-not start
+      0
+      (loop [after [start ""] repaired 0]
+        (let [raw (scan-after node after page)
+              in-margin (take-while #(not (pos? (compare [(str (:evidence/at %)) (str (:xt/id %))] ck)))
+                                    raw)
+              ids (mapv #(str (:xt/id %)) in-margin)
+              held (if (seq ids)
+                     (into #{} (map :id)
+                           (jdbc/execute! ds (into [(str "SELECT id FROM ev_attr WHERE id IN ("
+                                                         (str/join "," (repeat (count ids) "?")) ")")]
+                                                   ids)
+                                          unqualified))
+                     #{})
+              missing (vec (remove #(held (str (:xt/id %))) in-margin))
+              repaired (+ repaired (count missing))]
+          (when (seq missing)
+            (with-sidecar-write* catch-up-busy-attempts #(index-batch! ds missing)))
+          (if (and (= (count in-margin) (count raw)) (= (count raw) page))
+            (let [lst (peek (vec raw))]
+              (recur [(str (:evidence/at lst)) (str (:xt/id lst))] repaired))
+            repaired))))))
+
 (defn- tx-id-map
   "Reduce XTDB's per-db completed transaction records to plain numeric ids.
    The full status value remains stored in basis-tx; this normalized companion
@@ -335,7 +376,9 @@
                       [:latest-completed-txs :latest-submitted-msg-ids
                        :latest-processed-msg-ids])
             basis-tx-ids (tx-id-map basis-tx)
-            basis-captured-at (str (Instant/now))]
+            basis-captured-at (str (Instant/now))
+            repaired (repair-margin! node ds page)]
+        (swap! !stats assoc :margin-repaired repaired)
         (loop [after [(or (meta-get ds "last-at") "") (or (meta-get ds "last-id") "")]
                total 0]
           (let [docs (scan-after node after page)]
@@ -354,7 +397,7 @@
                        (meta-set! tx "basis-tx-ids" (pr-str basis-tx-ids))
                        (meta-set! tx "basis-captured-at" basis-captured-at)))
                   (swap! !stats assoc :indexed total)
-                  {:indexed total :last-at (meta-get ds "last-at")})
+                  {:indexed total :repaired repaired :last-at (meta-get ds "last-at")})
               (let [n (with-sidecar-write* catch-up-busy-attempts
                         #(index-batch! ds docs))
                     lst (last docs)
@@ -712,11 +755,15 @@
              (println (str "[fts] periodic retry of failed appends: "
                            (pr-str (retry-failed! node))))
              (flush))
-           (let [{:keys [indexed skipped]} (catch-up! node :page page)]
+           (let [{:keys [indexed repaired skipped]} (catch-up! node :page page)]
              ;; Quiet in the steady state — log only real repair work, so a
              ;; line here always means something had fallen out of the index.
              (when (and (nil? skipped) (pos? (long (or indexed 0))))
                (println (str "[fts] periodic catch-up re-indexed " indexed " doc(s)"))
+               (flush))
+             (when (and (nil? skipped) (pos? (long (or repaired 0))))
+               (println (str "[fts] periodic catch-up found " repaired
+                             " doc(s) below the checkpoint missing from the index"))
                (flush)))))
            (catch InterruptedException _
              ;; stop-periodic-catch-up! interrupting an in-flight scan is an
