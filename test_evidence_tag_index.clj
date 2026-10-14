@@ -129,6 +129,26 @@
           (is (< (:scanned (run-query node q 10))
                  (:scanned (scan-path #(run-query node q 10))))))))))
 
+(deftest repeated-tags-do-not-stall-the-index
+  ;; 2026-10-11..14: one doc whose tags repeated once stringified failed
+  ;; ev_tags' (tag, id) key, rolled back its batch, and stalled catch-up and
+  ;; reconcile! at every boot -- evidence reads scanned for three days.
+  (with-open [node (xtn/start-node)]
+    (xt/execute-tx node [[:put-docs :evidence
+                          {:xt/id "dup" :evidence/id "dup" :evidence/at (at-hours 1)
+                           :evidence/type :note :evidence/author "a"
+                           :evidence/tags ["x" "x" :y ":y"] :evidence/body {}}]])
+    (text/init! {:path (temp-db)})
+    (try
+      (text/catch-up! node)
+      (text/reconcile! node)
+      (is (= #{["x"] [":y"]}
+             (set (map (comp vector :ev_tags/tag)
+                       (jdbc/execute! @text/!ds ["SELECT tag FROM ev_tags WHERE id = ?" "dup"])))))
+      (is (text/complete?) "reconcile! completes, so the index serves reads")
+      ;; init! does not clear it, and the other test expects an unreconciled index.
+      (finally (reset! @#'text/!reconciled-at nil)))))
+
 (defn -main [& _]
   (let [result (run-tests 'test-evidence-tag-index)]
     (shutdown-agents)

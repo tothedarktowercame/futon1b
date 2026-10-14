@@ -268,9 +268,13 @@
                            (str (:evidence/pattern-id d))
                            (if (:evidence/ephemeral? d) 1 0)
                            (if (:evidence/conjecture? d) 1 0)])
-        (doseq [tag (:evidence/tags d)]
+        ;; distinct: ev_tags is keyed (tag, id), and a doc whose tags repeat
+        ;; once stringified (["x" "x"], [:x ":x"]) failed the whole batch on
+        ;; the key -- catch-up and reconcile! then stalled on it at every
+        ;; boot, and every evidence read fell back to scanning (2026-10-11..14).
+        (doseq [tag (distinct (map str (:evidence/tags d)))]
           (jdbc/execute! tx ["INSERT INTO ev_tags(id, tag) VALUES (?,?)"
-                             id (str tag)])))))
+                             id tag])))))
   (count docs))
 
 (def ^:private scan-cols
