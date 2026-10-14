@@ -312,34 +312,37 @@
 
 (defn- repair-margin!
   "Index the docs between (checkpoint - rescan-margin-ms) and the checkpoint
-  that ev_attr does not hold. Returns how many. Leaves the checkpoint alone."
-  [node ds page]
+  that ev_attr does not hold. Returns how many. Leaves the checkpoint alone.
+  Reads ids and :at only, then hydrates the missing docs: XTDB reads the whole
+  evidence table for any predicate, and without bodies that costs ~1.3 s
+  rather than ~7 s per scan-after page (live, 2026-10-14)."
+  [node ds]
   (let [ck [(str (meta-get ds "last-at")) (str (meta-get ds "last-id"))]
         start (when-not (str/blank? (first ck))
                 (try (str (.minusMillis (Instant/parse (first ck)) rescan-margin-ms))
                      (catch Exception _ nil)))]
     (if-not start
       0
-      (loop [after [start ""] repaired 0]
-        (let [raw (scan-after node after page)
-              in-margin (take-while #(not (pos? (compare [(str (:evidence/at %)) (str (:xt/id %))] ck)))
-                                    raw)
-              ids (mapv #(str (:xt/id %)) in-margin)
-              held (if (seq ids)
-                     (into #{} (map :id)
-                           (jdbc/execute! ds (into [(str "SELECT id FROM ev_attr WHERE id IN ("
-                                                         (str/join "," (repeat (count ids) "?")) ")")]
-                                                   ids)
-                                          unqualified))
-                     #{})
-              missing (vec (remove #(held (str (:xt/id %))) in-margin))
-              repaired (+ repaired (count missing))]
-          (when (seq missing)
-            (with-sidecar-write* catch-up-busy-attempts #(index-batch! ds missing)))
-          (if (and (= (count in-margin) (count raw)) (= (count raw) page))
-            (let [lst (peek (vec raw))]
-              (recur [(str (:evidence/at lst)) (str (:xt/id lst))] repaired))
-            repaired))))))
+      (let [ids (->> (fxt/safe-q node (fxt/pq '[p-start]
+                                              '(-> (from :evidence [xt/id evidence/at])
+                                                   (where (>= evidence/at p-start)))
+                                              start))
+                     (remove #(pos? (compare [(str (:evidence/at %)) (str (:xt/id %))] ck)))
+                     (mapv #(str (:xt/id %))))
+            held (into #{}
+                       (mapcat (fn [chunk]
+                                 (map :id (jdbc/execute!
+                                           ds (into [(str "SELECT id FROM ev_attr WHERE id IN ("
+                                                          (str/join "," (repeat (count chunk) "?")) ")")]
+                                                    chunk)
+                                           unqualified))))
+                       (partition-all 500 ids))
+            missing (vec (remove held ids))]
+        (doseq [chunk (partition-all 500 missing)]
+          (let [docs (fxt/hydrate-by-ids node :evidence chunk)]
+            (when (seq docs)
+              (with-sidecar-write* catch-up-busy-attempts #(index-batch! ds docs)))))
+        (count missing)))))
 
 (defn- tx-id-map
   "Reduce XTDB's per-db completed transaction records to plain numeric ids.
@@ -377,7 +380,7 @@
                        :latest-processed-msg-ids])
             basis-tx-ids (tx-id-map basis-tx)
             basis-captured-at (str (Instant/now))
-            repaired (repair-margin! node ds page)]
+            repaired (repair-margin! node ds)]
         (swap! !stats assoc :margin-repaired repaired)
         (loop [after [(or (meta-get ds "last-at") "") (or (meta-get ds "last-id") "")]
                total 0]
