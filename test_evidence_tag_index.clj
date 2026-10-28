@@ -176,6 +176,38 @@
         (is (= 0 (:repaired (text/catch-up! node))) "a second pass finds nothing")
         (finally (reset! @#'text/!reconciled-at nil))))))
 
+(deftest catch-up-drains-under-live-appends
+  ;; Boot of 2026-10-28: catch-up! waited for an empty page, but each page scan
+  ;; took longer than the gap between live appends, so every scan found the
+  ;; docs written during the last one. reconcile! never ran and every evidence
+  ;; read scanned. Here a doc lands in the store during every scan.
+  (with-open [node (xtn/start-node)]
+    (let [doc (fn [id at] {:xt/id id :evidence/id id :evidence/at at
+                           :evidence/type :note :evidence/author "a"
+                           :evidence/tags [] :evidence/body {}})
+          scan-after @#'text/scan-after
+          !scans (atom 0)]
+      (xt/execute-tx node (vec (for [i (range 5)]
+                                 [:put-docs :evidence (doc (format "seed-%d" i) (at-hours i))])))
+      (text/init! {:path (temp-db)})
+      (try
+        (with-redefs [text/scan-after
+                      (fn [node after page]
+                        (let [n (swap! !scans inc)]
+                          (when (> n 20) (throw (ex-info "catch-up! did not drain" {:scans n})))
+                          (let [docs (scan-after node after page)]
+                            (xt/execute-tx node [[:put-docs :evidence
+                                                  (doc (format "live-%d" n) (at-hours (+ 100 n)))]])
+                            docs)))]
+          (let [r (text/catch-up! node :page 3)]
+            ;; seed-0..2 | seed-3, seed-4, live-1 | live-2 (short: drain).
+            ;; Before the fix every scan found one more live doc, to the cap.
+            (is (= 7 (:indexed r)) "two full pages, then a short one")
+            (is (= 3 @!scans) "the short page drains; live-3 is left to on-append!")))
+        (text/reconcile! node)
+        (is (text/complete?) "reconcile! runs once catch-up! drains")
+        (finally (reset! @#'text/!reconciled-at nil))))))
+
 (defn -main [& _]
   (let [result (run-tests 'test-evidence-tag-index)]
     (shutdown-agents)

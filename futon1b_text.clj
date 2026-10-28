@@ -382,34 +382,47 @@
             basis-captured-at (str (Instant/now))
             repaired (repair-margin! node ds)]
         (swap! !stats assoc :margin-repaired repaired)
-        (loop [after [(or (meta-get ds "last-at") "") (or (meta-get ds "last-id") "")]
-               total 0]
-          (let [docs (scan-after node after page)]
-            (if (empty? docs)
-              ;; Drain: the pre-scan basis is now proven covered (contract
-              ;; C6). The checkpoint is NOT written here — it advances per
-              ;; completed page below, which is what keeps a long rebuild
-              ;; resumable and its progress observable in stats. The two
-              ;; claims differ: the checkpoint's ("everything <= (at,id) is
-              ;; indexed") is true after every page; the basis's ("reflects
-              ;; the store as of these coordinates") only on a full drain.
-              (do (with-sidecar-write*
+        (letfn [(drain [total]
+                  ;; Drain: the pre-scan basis is now proven covered (contract
+                  ;; C6). The checkpoint is NOT written here — it advances per
+                  ;; completed page below, which is what keeps a long rebuild
+                  ;; resumable and its progress observable in stats. The two
+                  ;; claims differ: the checkpoint's ("everything <= (at,id) is
+                  ;; indexed") is true after every page; the basis's ("reflects
+                  ;; the store as of these coordinates") only on a full drain.
+                  (with-sidecar-write*
                     catch-up-busy-attempts
                     #(jdbc/with-transaction [tx ds]
                        (meta-set! tx "basis-tx" (pr-str basis-tx))
                        (meta-set! tx "basis-tx-ids" (pr-str basis-tx-ids))
                        (meta-set! tx "basis-captured-at" basis-captured-at)))
                   (swap! !stats assoc :indexed total)
-                  {:indexed total :repaired repaired :last-at (meta-get ds "last-at")})
-              (let [n (with-sidecar-write* catch-up-busy-attempts
-                        #(index-batch! ds docs))
-                    lst (last docs)
-                    hi [(str (:evidence/at lst)) (str (:xt/id lst))]]
-                (with-sidecar-write* catch-up-busy-attempts
-                  #(do (meta-set! ds "last-at" (first hi))
-                       (meta-set! ds "last-id" (second hi))))
-                (swap! !stats assoc :last-at (first hi))
-                (recur hi (+ total n)))))))
+                  {:indexed total :repaired repaired :last-at (meta-get ds "last-at")})]
+          (loop [after [(or (meta-get ds "last-at") "") (or (meta-get ds "last-id") "")]
+                 total 0]
+            (let [docs (scan-after node after page)]
+              (if (empty? docs)
+                (drain total)
+                (let [n (with-sidecar-write* catch-up-busy-attempts
+                          #(index-batch! ds docs))
+                      lst (last docs)
+                      hi [(str (:evidence/at lst)) (str (:xt/id lst))]
+                      total (+ total n)]
+                  (with-sidecar-write* catch-up-busy-attempts
+                    #(do (meta-set! ds "last-at" (first hi))
+                         (meta-set! ds "last-id" (second hi))))
+                  (swap! !stats assoc :last-at (first hi))
+                  ;; A short page reached the end of the store as of its scan,
+                  ;; which began after the basis was captured: the same proof
+                  ;; an empty page gives. Waiting for an empty page instead
+                  ;; never ended under live writes once a page scan took
+                  ;; longer than the gap between appends (boot of 2026-10-28:
+                  ;; the checkpoint trailed the head by ~45 s for 15+ minutes,
+                  ;; reconcile! never ran, every evidence read scanned). Docs
+                  ;; after this scan are on-append!'s, as after an empty page.
+                  (if (< (count docs) page)
+                    (drain total)
+                    (recur hi total))))))))
       (finally (reset! !catch-up-running? false)))))
 
 ;; ---------------------------------------------------------------------------
