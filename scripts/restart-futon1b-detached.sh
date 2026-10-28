@@ -90,8 +90,12 @@ else
 fi
 
 # ---- RESTART ---------------------------------------------------------------
-OLD_PID=$(pgrep -f -- '-m futon1b-server' | while read -r p; do
-           [ "$(cat /proc/$p/comm 2>/dev/null)" = "java" ] && echo "$p"; done | head -1)
+# The unit's own MainPID (the clojure wrapper execs java). A pgrep for
+# '-m futon1b-server' also matches other stores' servers -- on 2026-10-28 it
+# picked minus40's scratch server (:7093), so the PID-change check compared
+# the wrong process.
+OLD_PID=$(systemctl --user show "$UNIT" -p MainPID --value 2>/dev/null)
+[ "$OLD_PID" = "0" ] && OLD_PID=
 RESTART_AT=$(date -u +%FT%TZ)
 say "restarting $UNIT (t0=$RESTART_AT, old-pid=${OLD_PID:-none})"
 systemctl --user restart "$UNIT"
