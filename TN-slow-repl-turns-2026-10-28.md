@@ -123,8 +123,15 @@ appears to be process output from streaming turns, plus the 4/s
 Review finding (eea3db17b): url.el reports a 404 as
 `(:error (error http 404))`, so the fallback check placed behind
 `(plist-get status :error)` never ran. A client loaded before the Agency
-route existed delivered no parks or followups (about 00:20–00:26 on
-10-29; queued items were not lost). Test fakes of url.el should pass url.el's real
+route existed delivered no parks or followups. Measured on 10-29 from the
+Agency journal, pairing "auto-bellback suppressed … will wake claude-11"
+(the resume is ready) with the next `From: parked-resume` turn: resumes
+before 00:21 and after 00:25:40 arrived in 2–6 s. The two ready at 00:21:31 and
+00:22:27 arrived at 00:25:20 and 00:25:32, after the Agency reload. claude-11
+was idle for most of that gap (turns 00:19:05–00:20:23 and
+00:23:33–00:24:35 only), so Agency's busy gate does not explain it. Nothing
+was lost, but claude-11 reported these as "dropped bellbacks". The pairing
+above is the quickest way to tell a delivery fault from the busy gate. Test fakes of url.el should pass url.el's real
 error status for 4xx/5xx.
 
 Two traps from the same session:
