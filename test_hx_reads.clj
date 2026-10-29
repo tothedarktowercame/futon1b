@@ -140,7 +140,7 @@
                           (when (and (string? (first qa))
                                      (str/starts-with?
                                       (first qa)
-                                      "SELECT * FROM hyperedges WHERE _id IN"))
+                                      "SELECT * FROM hyperedges WHERE _id"))
                             (swap! full-read-ids into (rest qa)))
                           (fxt/safe-q n qa))
             _ (graph/invalidate-hyperedge-query-cache!)
@@ -203,10 +203,11 @@
                               (hx-doc "hx:e1:01" :probe/edits ["E1" "SHARED"])]])
         (hx/catch-up! node))
 
-      ;; ---- P3: one XTDB read per candidate page ----------------------------
-      ;; The type re-check and the body read are a single `_id IN` read (each
-      ;; is a whole-table scan live). A type-only read whose candidates fit
-      ;; one page makes exactly one XTDB call, with or without `fields`.
+      ;; ---- P3: the type re-check and the body read share each read --------
+      ;; The type is read together with the body, so a type-only read whose
+      ;; candidates fit one page makes one XTDB call per candidate (`_id = ?`
+      ;; point reads, up to indexed-point-read-max ids) and no separate
+      ;; re-check pass, with or without `fields`.
       (doseq [fields [nil ["hx/endpoints"]]]
         (let [calls (atom 0)
               counting (fn [n q] (swap! calls inc) (futon1b-xt/safe-q n q))
@@ -214,9 +215,9 @@
               r (graph/hyperedges-query node (cond-> {:type "probe/edits" :limit 10}
                                                fields (assoc :fields fields))
                                         counting)]
-          (check! (str "P3: an indexed type-only read makes ONE XTDB read (fields "
+          (check! (str "P3: an indexed type-only read makes one XTDB read per candidate (fields "
                        (pr-str fields) ")")
-                  (and (some? (:hx-index r)) (= 6 (count (:hyperedges r))) (= 1 @calls)))))
+                  (and (some? (:hx-index r)) (= 6 (count (:hyperedges r))) (= 6 @calls)))))
 
       ;; hx:e1:00 carries {:note "p2b"}; the others have no props at all.
       (let [r (query node {:type "probe/edits" :limit 10 :fields ["hx/props"]})]

@@ -1179,6 +1179,16 @@
   parameters at 32767, so 1000 is far inside the wire limit."
   1000)
 
+(def ^:private indexed-point-read-max
+  "Up to this many ids, fetch-hyperedge-cols-by-ids reads each id with
+  `_id = ?` instead of one `_id IN`. Measured 2026-10-29 on the live store
+  (1.05M hyperedges): `_id = ?` took 25-37 ms per id (65-74 ms for
+  `SELECT *`), while `_id IN` scanned the whole table at 2.4 s for 5 ids,
+  so every indexed read paid seconds and held a query permit throughout,
+  starving evidence writes (504s). Above this size the single scan is
+  cheaper again."
+  250)
+
 (defn- sql-column
   "SQL column name for a hyperedge attribute keyword (:hx/type → \"hx$type\",
   :xt/id → \"_id\")."
@@ -1201,13 +1211,22 @@
                       (str/join ", " (mapv sql-column (distinct (cons :xt/id cols))))
                       " FROM hyperedges WHERE _id IN (")
                  "SELECT * FROM hyperedges WHERE _id IN (")
-        rows (mapcat (fn [chunk]
-                       (query-fn node
-                                 (into [(str select
-                                             (str/join ", " (repeat (count chunk) "?"))
-                                             ")")]
-                                       chunk)))
-                     (partition-all indexed-read-chunk-size ids))
+        rows (if (<= (count ids) indexed-point-read-max)
+               ;; Point reads, four at a time (the query-permit width).
+               (let [point (str/replace select #"_id IN \($" "_id = ?")]
+                 (->> ids
+                      (partition-all 4)
+                      (mapcat (fn [batch]
+                                (->> batch
+                                     (mapv #(future (query-fn node [point %])))
+                                     (mapcat deref))))))
+               (mapcat (fn [chunk]
+                         (query-fn node
+                                   (into [(str select
+                                               (str/join ", " (repeat (count chunk) "?"))
+                                               ")")]
+                                         chunk)))
+                       (partition-all indexed-read-chunk-size ids)))
         by-id (into {} (map (fn [doc] [(:xt/id doc) doc])) rows)]
     (into [] (keep by-id) ids)))
 
