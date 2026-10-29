@@ -138,6 +138,33 @@ standing value and updating README "Memory requirements" to say why.
 Whatever lands: if the heap returns to 4g, delete the drop-in; if 8g stays,
 fold it into `deps.edn :server` and the README table instead of a drop-in.
 
+## After the restart: boot catch-up never finished (fixed, cfc7c68)
+
+The restart fixed the heap but not the latency. `/health` showed
+`:evidence-text {:serving? false :why :not-reconciled-since-boot}` for 20
+minutes: the boot `catch-up!` waited for an empty page, each page scan took
+~30 s, and live appends landed during every scan, so the checkpoint trailed
+the head by ~45 s and never drained. `reconcile!` (which runs after it on the
+boot thread) never started, and every evidence read scanned the store.
+
+Fix: `catch-up!` also drains after a short page (same proof as an empty one —
+the scan reached the end of the store as of a snapshot taken after the basis).
+Regression test `catch-up-drains-under-live-appends` in
+`test_evidence_tag_index.clj` appends a doc during every scan; without the fix
+it hits its 20-scan cap.
+
+Getting the *running* boot loop out needed one more step, since a reload does
+not replace a loop already executing the old fn: after
+`(require 'futon1b-text :reload)`, `scan-after` was wrapped to return `[]`
+exactly once and restore itself. The boot loop drained (954 indexed), and
+`reconcile!` ran: 722,810 store docs, 2 missing, indexed. Sound because the
+append hook had indexed every post-boot append (368/368, 0 failed) and
+`reconcile!` compares every id regardless. Evidence POST latency afterwards:
+median 84 ms, p90 221 ms (32 writes), against 5 s timeouts before.
+
+Any future restart under load would have hit this; it is not specific to
+the heap problem.
+
 ## Also changed on 2026-10-28
 
 `scripts/restart-futon1b-detached.sh` took the old PID from
