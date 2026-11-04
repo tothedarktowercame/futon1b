@@ -1363,11 +1363,14 @@
   "True when OPTS can be answered wholly from the current SQLite projection,
    without entering XTDB. The HTTP route uses this to bypass expensive-read
    admission; keep it identical to the projection branch below."
-  [{:keys [type limit latest? include-total? repo source-file mission
+  [{:keys [type end end-prefix limit latest? include-total? repo source-file mission
            valid-as-of system-as-of]}]
   (and (= :clock/clocked-on (normalize-type type))
        (not latest?) (int? limit) (pos? limit) (not include-total?)
-       (not (or repo source-file mission valid-as-of system-as-of))
+       ;; end/end-prefix reads take their own (XTDB) branches in
+       ;; hyperedges-query-uncached before the type branch; they must keep the
+       ;; expensive-read permit, so they are never projection-servable.
+       (not (or end end-prefix repo source-file mission valid-as-of system-as-of))
        (hx/reads-usable?)
        (hx/clock-projection-ready?)))
 

@@ -121,6 +121,10 @@
             (check! "admission: projection succeeds while every permit is held"
                     (and (= 200 (:status projected))
                          (true? (get-in projected [:body :clock-projection :served?])))))
+          (let [by-end (get-edn base "/api/alpha/hyperedges?type=clock%2Fclocked-on&end=agent%3Aa1&limit=3&include-total=false")]
+            (check! "admission: an end-filtered clock read keeps the permit (busy 503)"
+                    (and (= 503 (:status by-end))
+                         (= :expensive-read-busy (get-in by-end [:body :error])))))
           (reset! reads-enabled false)
           (let [fallback (get-edn base "/api/alpha/hyperedges?type=clock%2Fclocked-on&limit=3&include-total=false")]
             (check! "admission: hydration fallback gets the usual busy 503"
