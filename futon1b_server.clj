@@ -1105,28 +1105,29 @@
     (if (or (p "type") (p "end") (p "end-prefix"))
       ;; Validate the window before taking a permit: a 400 must not count as
       ;; an admitted-then-errored read in the holder stats.
-      (let [limit (parse-hyperedge-limit p)]
-        (with-expensive-read!
-         ex #(respond! ex 200 (graph/hyperedges-query
-                               @!node {:type (p "type") :end (p "end")
-                                      :end-prefix (p "end-prefix")
-                                      :limit limit
-                                      :after (p "after")
-                                      :repo (p "repo")
-                                      :source-file (p "source-file")
-                                      :mission (p "mission")
-                                      :fields (parse-hyperedge-fields (p "fields"))
-                                      :valid-as-of
-                                      (parse-instant
-                                       (or (p "valid-as-of")
-                                           (p "as-of")))
-                                      :system-as-of
-                                      (parse-instant (p "system-as-of"))
-                                      ;; Exact totals are opt-in: counting scans the full
-                                      ;; matching type, and false enables bounded-window caching.
-                                      :include-total? (= "true" (p "include-total"))
-                                      :latest? (= "true" (p "latest"))}
-                               fxt/timed-q))))
+      (let [limit (parse-hyperedge-limit p)
+            opts {:type (p "type") :end (p "end")
+                  :end-prefix (p "end-prefix")
+                  :limit limit
+                  :after (p "after")
+                  :repo (p "repo")
+                  :source-file (p "source-file")
+                  :mission (p "mission")
+                  :fields (parse-hyperedge-fields (p "fields"))
+                  :valid-as-of (parse-instant (or (p "valid-as-of")
+                                                  (p "as-of")))
+                  :system-as-of (parse-instant (p "system-as-of"))
+                  ;; Exact totals are opt-in: counting scans the full matching
+                  ;; type, and false enables bounded-window caching.
+                  :include-total? (= "true" (p "include-total"))
+                  :latest? (= "true" (p "latest"))}
+            respond #(respond! ex 200 (graph/hyperedges-query
+                                       @!node opts fxt/timed-q))]
+        ;; A current clock projection is one indexed SQLite window, not a
+        ;; corpus read. Every fallback keeps today's admission path.
+        (if (graph/clock-projection-servable? opts)
+          (respond)
+          (with-expensive-read! ex respond)))
       (respond! ex 400 (pr-str {:error "type or end parameter required"})))))
 
 (defn- census-route [^HttpExchange ex]
@@ -1535,7 +1536,9 @@
     ;; /api/alpha/hyperedges context must be registered so it wins over
     ;; /api/alpha/hyperedge for the plural query route (same for entities).
     (.createContext server "/api/alpha/hyperedge" (handler hyperedge-route))
-    (.createContext server "/api/alpha/hyperedges" (handler hyperedges-route))
+    ;; Var indirection lets a namespace reload update the admission split
+    ;; without restarting the single-process XTDB store.
+    (.createContext server "/api/alpha/hyperedges" (handler #'hyperedges-route))
     (.createContext server "/api/alpha/evidence" (handler evidence-route))
     (.createContext server "/api/alpha/memory/assert" (handler memory-assert-route))
     ;; longer prefix wins (see NB above): text-search must out-rank /evidence

@@ -1359,6 +1359,18 @@
              :clock-projection {:served? true :checkpoint (hx/checkpoint)}}
       next-cursor (assoc :next-cursor next-cursor))))
 
+(defn clock-projection-servable?
+  "True when OPTS can be answered wholly from the current SQLite projection,
+   without entering XTDB. The HTTP route uses this to bypass expensive-read
+   admission; keep it identical to the projection branch below."
+  [{:keys [type limit latest? include-total? repo source-file mission
+           valid-as-of system-as-of]}]
+  (and (= :clock/clocked-on (normalize-type type))
+       (not latest?) (int? limit) (pos? limit) (not include-total?)
+       (not (or repo source-file mission valid-as-of system-as-of))
+       (hx/reads-usable?)
+       (hx/clock-projection-ready?)))
+
 (defn- hyperedges-indexed-type-end-prefix
   "P3d (DESIGN-hyperedge-scope-sidecar-2026-09-26 §7 item 3, Q3): serve a
   type + endpoint-PREFIX read from the SQLite sidecar. There is NO scan
@@ -1500,13 +1512,7 @@
     (let [t (normalize-type type)
           limited? (and (not latest?) (int? limit) (pos? limit))]
       (cond
-        (and (= :clock/clocked-on t)
-             limited?
-             (not include-total?)
-             (not (or repo source-file mission))
-             (not (or (:valid-as-of temporal) (:system-as-of temporal)))
-             (hx/reads-usable?)
-             (hx/clock-projection-ready?))
+        (clock-projection-servable? opts)
         (hyperedges-clock-projection
          {:n (long limit) :after after :fields fields})
 

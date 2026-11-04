@@ -1,10 +1,14 @@
 (ns test-clock-projection
-  (:require [futon1b-graph :as graph]
+  (:require [clojure.edn :as edn]
+            [futon1b-graph :as graph]
             [futon1b-hxindex :as hx]
+            [futon1b-server :as server]
             [futon1b-text :as text]
             [xtdb.api :as xt]
             [xtdb.node :as xtn])
-  (:import [java.nio.file Files]))
+  (:import [java.net URI]
+           [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]
+           [java.nio.file Files]))
 
 (defn- temp-dir []
   (-> (Files/createTempDirectory
@@ -33,6 +37,14 @@
 
 (defn- without-marker [response]
   (dissoc response :clock-projection :hx-index))
+
+(defn- get-edn [base path]
+  (let [response (.send (HttpClient/newHttpClient)
+                        (-> (HttpRequest/newBuilder (URI/create (str base path)))
+                            .GET .build)
+                        (HttpResponse$BodyHandlers/ofString))]
+    {:status (.statusCode response)
+     :body (edn/read-string (.body response))}))
 
 (defn -main [& _]
   (let [dir (temp-dir)
@@ -95,6 +107,29 @@
                 (= (without-marker p1) (without-marker h1)))
         (check! "paging: second page rows and cursor equal hydration"
                 (= (without-marker p2) (without-marker h2))))
+
+      ;; Saturate the real HTTP admission semaphore. Projection reads bypass
+      ;; it; disabling the currency gate sends the same request through the
+      ;; unchanged fallback admission path and yields its normal 503.
+      (let [srv (server/start-server! {:node node :port 0 :bind-host "127.0.0.1"})
+            base (str "http://127.0.0.1:" (.getPort (.getAddress srv)))
+            permit-var (ns-resolve 'futon1b-server 'expensive-read-permit)
+            ^java.util.concurrent.Semaphore permits @permit-var]
+        (.acquire permits 4)
+        (try
+          (let [projected (get-edn base "/api/alpha/hyperedges?type=clock%2Fclocked-on&limit=3&include-total=false")]
+            (check! "admission: projection succeeds while every permit is held"
+                    (and (= 200 (:status projected))
+                         (true? (get-in projected [:body :clock-projection :served?])))))
+          (reset! reads-enabled false)
+          (let [fallback (get-edn base "/api/alpha/hyperedges?type=clock%2Fclocked-on&limit=3&include-total=false")]
+            (check! "admission: hydration fallback gets the usual busy 503"
+                    (and (= 503 (:status fallback))
+                         (= :expensive-read-busy (get-in fallback [:body :error])))))
+          (finally
+            (reset! reads-enabled true)
+            (.release permits 4)
+            (server/stop-server! srv))))
 
       ;; Branch-local timing with 50 current clock rows. Query cache is flushed
       ;; before each measurement; only sidecar serving changes.
