@@ -1345,6 +1345,20 @@
                         :hook-failures (:hook-failures @hx/!stats)}}
       next-cursor (assoc :next-cursor next-cursor))))
 
+(defn- hyperedges-clock-projection
+  "Serve a current-valid clock window wholly from the SQLite sidecar."
+  [{:keys [n after fields]}]
+  (let [docs (hx/clock-window {:after after :limit n})
+        ids (mapv :xt/id docs)
+        out (mapv #(if (seq fields)
+                     (project-hyperedge-fields % fields)
+                     (dissoc % :xt/id))
+                  docs)
+        next-cursor (when (= n (count docs)) (peek ids))]
+    (cond-> {:hyperedges out :count (count out) :count-exact? false
+             :clock-projection {:served? true :checkpoint (hx/checkpoint)}}
+      next-cursor (assoc :next-cursor next-cursor))))
+
 (defn- hyperedges-indexed-type-end-prefix
   "P3d (DESIGN-hyperedge-scope-sidecar-2026-09-26 §7 item 3, Q3): serve a
   type + endpoint-PREFIX read from the SQLite sidecar. There is NO scan
@@ -1485,7 +1499,18 @@
     type
     (let [t (normalize-type type)
           limited? (and (not latest?) (int? limit) (pos? limit))]
-      (if (and limited?
+      (cond
+        (and (= :clock/clocked-on t)
+             limited?
+             (not include-total?)
+             (not (or repo source-file mission))
+             (not (or (:valid-as-of temporal) (:system-as-of temporal)))
+             (hx/reads-usable?)
+             (hx/clock-projection-ready?))
+        (hyperedges-clock-projection
+         {:n (long limit) :after after :fields fields})
+
+        (and limited?
                (not (or repo source-file mission))
                (not (or (:valid-as-of temporal) (:system-as-of temporal)))
                (hx/reads-usable?)
@@ -1499,6 +1524,8 @@
         (hyperedges-indexed-type
          node {:t t :n (long limit) :after after
                :include-total? include-total? :fields fields} query-fn)
+
+        :else
         (let [;; Values ride as parameters (fxt/pq) so the compiled plan is keyed
           ;; on which filters are present, not on their values.
           specs (cond-> [['p-type '(= hx/type p-type) t]]
@@ -1586,6 +1613,13 @@
                         (count out)
                         total)
                :count-exact? (boolean include-total?)}
+        (= :clock/clocked-on t)
+        (assoc :clock-projection
+               {:served? false
+                :fallback (if (and (hx/reads-usable?)
+                                   (hx/clock-projection-ready?))
+                            :unsupported-query
+                            :sidecar-not-current)})
         next-cursor (assoc :next-cursor next-cursor))))))))
 
 (def ^:private max-hyperedge-query-cache-entries

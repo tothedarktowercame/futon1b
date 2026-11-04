@@ -25,7 +25,8 @@
     transaction).
 
   The index is DERIVED data: rebuild! from empty is always safe."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [futon1b-text :as text]
@@ -151,6 +152,9 @@
    "CREATE TABLE IF NOT EXISTS hx_node (
       hx_id TEXT PRIMARY KEY, type TEXT NOT NULL)"
    "CREATE INDEX IF NOT EXISTS hx_node_type_id ON hx_node(type, hx_id)"
+   "CREATE TABLE IF NOT EXISTS hx_clock (
+      hx_id TEXT PRIMARY KEY, endpoints_edn TEXT NOT NULL,
+      ends_edn TEXT NOT NULL, props_edn TEXT NOT NULL)"
    "CREATE TABLE IF NOT EXISTS hx_meta (k TEXT PRIMARY KEY, v TEXT)"])
 
 (defn- ds* [] @text/!ds)
@@ -164,6 +168,21 @@
    (fn []
      (jdbc/execute! ds ["INSERT INTO hx_meta(k,v) VALUES(?,?)
                          ON CONFLICT(k) DO UPDATE SET v=excluded.v" k (str v)]))))
+
+(def ^:private clock-type ":clock/clocked-on")
+
+(defn- clock-doc? [doc]
+  (= clock-type (str (:hx/type doc))))
+
+(defn- upsert-clock! [tx id doc]
+  (jdbc/execute! tx ["DELETE FROM hx_clock WHERE hx_id = ?" id])
+  (when (clock-doc? doc)
+    (jdbc/execute! tx
+                   ["INSERT INTO hx_clock(hx_id,endpoints_edn,ends_edn,props_edn)
+                     VALUES (?,?,?,?)"
+                    id (pr-str (vec (:hx/endpoints doc)))
+                    (pr-str (vec (or (:hx/ends doc) (:hx/endpoints doc))))
+                    (pr-str (or (:hx/props doc) {}))])))
 
 (defn init!
   "Create the hyperedge tables on the shared sidecar datasource.
@@ -195,7 +214,8 @@
                             VALUES (?,?,?,?)" id t pos (str end)]))
       (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type) VALUES (?,?)
                           ON CONFLICT(hx_id) DO UPDATE SET type=excluded.type"
-                         id t])))
+                         id t])
+      (upsert-clock! tx id doc)))
   (count (:hx/endpoints doc)))
 
 (defn index-docs!
@@ -211,13 +231,15 @@
                               VALUES (?,?,?,?)" id t pos (str end)]))
         (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type) VALUES (?,?)
                             ON CONFLICT(hx_id) DO UPDATE SET type=excluded.type"
-                           id t]))))
+                           id t])
+        (upsert-clock! tx id doc))))
   (count docs))
 
 (defn delete-id! [ds id]
   (with-write-tx [tx ds]
     (jdbc/execute! tx ["DELETE FROM hx_edge WHERE hx_id = ?" (str id)])
-    (jdbc/execute! tx ["DELETE FROM hx_node WHERE hx_id = ?" (str id)])))
+    (jdbc/execute! tx ["DELETE FROM hx_node WHERE hx_id = ?" (str id)])
+    (jdbc/execute! tx ["DELETE FROM hx_clock WHERE hx_id = ?" (str id)])))
 
 ;; ---------------------------------------------------------------------------
 ;; Write-path hooks. Fire-and-forget; never fail the request; never advance
@@ -304,13 +326,16 @@
                       (comp (mapcat (fn [chunk]
                                       (fxt/timed-q
                                        node
-                                       (into [(str "SELECT _id, hx$type AS t, hx$endpoints AS ends
+                                       (into [(str "SELECT _id, hx$type AS t, hx$endpoints AS ends,
+                                                    hx$ends AS clock_ends, hx$props AS props
                                                     FROM hyperedges WHERE _id IN ("
                                                    (str/join "," (repeat (count chunk) "?")) ")")]
                                              chunk))))
                             (map (fn [r] [(str (row-id r))
                                           {:hx/type (or (:t r) (:hx/type r))
-                                           :hx/endpoints (or (:ends r) (:hx/endpoints r))}])))
+                                           :hx/endpoints (or (:ends r) (:hx/endpoints r))
+                                           :hx/ends (or (:clock_ends r) (:hx/ends r))
+                                           :hx/props (or (:props r) (:hx/props r))}])))
                       (partition-all 500 ids))]
     (with-write-tx [tx ds]
       (doseq [id ids]
@@ -322,9 +347,11 @@
                                    id (str (:hx/type doc)) pos (str end)]))
               (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type) VALUES (?,?)
                                   ON CONFLICT(hx_id) DO UPDATE SET type=excluded.type"
-                                 id (str (:hx/type doc))]))
+                                 id (str (:hx/type doc))])
+              (upsert-clock! tx id (assoc doc :xt/id id)))
           (do (jdbc/execute! tx ["DELETE FROM hx_edge WHERE hx_id = ?" id])
-              (jdbc/execute! tx ["DELETE FROM hx_node WHERE hx_id = ?" id])))))
+              (jdbc/execute! tx ["DELETE FROM hx_node WHERE hx_id = ?" id])
+              (jdbc/execute! tx ["DELETE FROM hx_clock WHERE hx_id = ?" id])))))
     (count ids)))
 
 (defn- latest-tx-id
@@ -339,7 +366,8 @@
   [node after page]
   (fxt/timed-q
    node
-   ["SELECT _id, hx$type AS t, hx$endpoints AS ends FROM hyperedges
+   ["SELECT _id, hx$type AS t, hx$endpoints AS ends, hx$ends AS clock_ends,
+            hx$props AS props FROM hyperedges
      WHERE _id > ? ORDER BY _id LIMIT ?"
     (str after) (long page)]))
 
@@ -382,7 +410,11 @@
                                              id (str (or (:t r) (:hx/type r))) pos (str end)]))
                         (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type) VALUES (?,?)
                                             ON CONFLICT(hx_id) DO UPDATE SET type=excluded.type"
-                                           id (str (or (:t r) (:hx/type r)))])))
+                                           id (str (or (:t r) (:hx/type r)))])
+                        (upsert-clock! tx id {:hx/type (or (:t r) (:hx/type r))
+                                              :hx/endpoints (or (:ends r) (:hx/endpoints r))
+                                              :hx/ends (or (:clock_ends r) (:hx/ends r))
+                                              :hx/props (or (:props r) (:hx/props r))})))
                     (recur (str (row-id (last rows))) (+ n (count rows)))))))]
     ;; (ts, id) of the newest version, same keyset as the legs: re-reading it
     ;; would let the upsert leg repair a delete of that doc (see docstring).
@@ -442,6 +474,52 @@
   []
   (boolean (when-let [ds (ds*)] (meta-get ds "hx-node-backfill"))))
 
+(defn backfill-clock!
+  "Populate the current-valid clock projection from XTDB. Idempotent; the
+   completion marker gates reads so an interrupted backfill is never served."
+  [ds node & {:keys [page] :or {page 1000}}]
+  (let [started (System/currentTimeMillis)
+        n (loop [after "" n 0]
+            (let [rows (fxt/timed-q
+                        node
+                        ["SELECT _id, hx$type AS t, hx$endpoints AS ends,
+                                 hx$ends AS clock_ends, hx$props AS props
+                          FROM hyperedges
+                          WHERE hx$type = ? AND _id > ?
+                          ORDER BY _id LIMIT ?"
+                         :clock/clocked-on (str after) (long page)])]
+              (if (empty? rows)
+                n
+                (do
+                  (with-write-tx [tx ds]
+                    (doseq [r rows
+                            :let [id (str (row-id r))]]
+                      (upsert-clock! tx id
+                                     {:hx/type (or (:t r) (:hx/type r))
+                                      :hx/endpoints (or (:ends r) (:hx/endpoints r))
+                                      :hx/ends (or (:clock_ends r) (:hx/ends r))
+                                      :hx/props (or (:props r) (:hx/props r))})))
+                  (recur (str (row-id (last rows))) (+ n (count rows)))))))]
+    {:clock-rows n :elapsed-ms (- (System/currentTimeMillis) started)}))
+
+(defn clock-projection-ready? []
+  (boolean (when-let [ds (ds*)] (meta-get ds "hx-clock-backfill"))))
+
+(defn clock-window
+  "Current-valid clock documents from the materialized projection."
+  [{:keys [after limit]}]
+  (when-let [ds (ds*)]
+    (mapv (fn [{:keys [hx_id endpoints_edn ends_edn props_edn]}]
+            {:xt/id hx_id :hx/id hx_id :hx/type :clock/clocked-on
+             :hx/endpoints (edn/read-string endpoints_edn)
+             :hx/ends (edn/read-string ends_edn)
+             :hx/props (edn/read-string props_edn)})
+          (jdbc/execute! ds
+                         ["SELECT hx_id,endpoints_edn,ends_edn,props_edn FROM hx_clock
+                           WHERE hx_id > ? ORDER BY hx_id LIMIT ?"
+                          (str (or after "")) (long limit)]
+                         unqualified))))
+
 (defn catch-up!
   "Repair the index for everything changed since the checkpoint, then advance
    it. Keyset-paged on (system-time, _id) for both the upsert leg
@@ -467,21 +545,30 @@
             ;; not wait for a store write.
             node-backfill (when (nil? (meta-get ds "hx-node-backfill"))
                             (backfill-hx-node! ds node))
+            clock-backfill (when (nil? (meta-get ds "hx-clock-backfill"))
+                             (backfill-clock! ds node))
             tx-id (latest-tx-id node)
             prior-tx (some-> (meta-get ds "last-tx-id") Long/parseLong)]
         (cond
           (and (not force) (some? prior-tx) (= prior-tx tx-id))
-          (cond-> {:skipped :no-new-tx :tx-id tx-id}
-            node-backfill (assoc :hx-node-backfill node-backfill))
+          (do
+            (when clock-backfill
+              (meta-set! ds "hx-clock-backfill" (str (Instant/now))))
+            (cond-> {:skipped :no-new-tx :tx-id tx-id}
+              node-backfill (assoc :hx-node-backfill node-backfill)
+              clock-backfill (assoc :hx-clock-backfill clock-backfill)))
 
           (nil? (meta-get ds "checkpoint-ts"))
           (let [n (fill! ds node tx-id fill-page)
                 elapsed (- (System/currentTimeMillis) started)]
             (meta-set! ds "hook-failures-at-catch-up" failures-at-start)
+            (when clock-backfill
+              (meta-set! ds "hx-clock-backfill" (str (Instant/now))))
             (swap! !stats assoc :last-catch-up
                    {:at (str (Instant/now)) :elapsed-ms elapsed :changed n :fill true})
             (cond-> {:filled n :elapsed-ms elapsed :tx-id tx-id}
-              node-backfill (assoc :hx-node-backfill node-backfill)))
+              node-backfill (assoc :hx-node-backfill node-backfill)
+              clock-backfill (assoc :hx-clock-backfill clock-backfill)))
 
           :else
           (let [checkpoint [(or (meta-get ds "checkpoint-ts") (str epoch))
@@ -517,11 +604,14 @@
             (meta-set! ds "checkpoint-id" (second upsert-hi))
             (meta-set! ds "last-tx-id" (str tx-id))
             (meta-set! ds "hook-failures-at-catch-up" failures-at-start)
+            (when clock-backfill
+              (meta-set! ds "hx-clock-backfill" (str (Instant/now))))
             (let [elapsed (- (System/currentTimeMillis) started)
                   res (cond-> {:changed (+ upserted deleted)
                                :upsert-leg upserted :tombstone-leg deleted
                                :elapsed-ms elapsed :tx-id tx-id}
-                        node-backfill (assoc :hx-node-backfill node-backfill))]
+                        node-backfill (assoc :hx-node-backfill node-backfill)
+                        clock-backfill (assoc :hx-clock-backfill clock-backfill))]
               (swap! !stats assoc :last-catch-up
                      {:at (str (Instant/now)) :elapsed-ms elapsed
                       :changed (:changed res)})
@@ -538,7 +628,8 @@
     (with-write-tx [tx ds]
       (jdbc/execute! tx ["DELETE FROM hx_edge"])
       (jdbc/execute! tx ["DELETE FROM hx_node"])
-      (jdbc/execute! tx ["DELETE FROM hx_meta WHERE k IN ('checkpoint-ts','checkpoint-id','last-tx-id','hx-node-backfill')"]))
+      (jdbc/execute! tx ["DELETE FROM hx_clock"])
+      (jdbc/execute! tx ["DELETE FROM hx_meta WHERE k IN ('checkpoint-ts','checkpoint-id','last-tx-id','hx-node-backfill','hx-clock-backfill')"]))
     (assoc (catch-up! node :page page :force true)
            :total-elapsed-ms (- (System/currentTimeMillis) started))))
 
