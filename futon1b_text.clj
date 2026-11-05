@@ -309,19 +309,23 @@
     (when-not @!ds
       (throw (ex-info "Evidence sidecar is not initialized"
                       {:kind :evidence-sidecar-unavailable})))
-    (with-sidecar-write*
-      nil
-      #(jdbc/with-transaction [tx @!ds]
-         (doseq [id ids]
-           (jdbc/execute! tx ["DELETE FROM ev_fts WHERE rowid IN
-                                (SELECT fts_rowid FROM ev_fts_map WHERE id = ?)" id])
-           ;; The map was backfilled after the original FTS table. Delete by
-           ;; id as well so a pre-backfill/unmapped legacy row cannot survive.
-           (jdbc/execute! tx ["DELETE FROM ev_fts WHERE id = ?" id])
-           (jdbc/execute! tx ["DELETE FROM ev_fts_map WHERE id = ?" id])
-           (jdbc/execute! tx ["DELETE FROM ev_attr WHERE id = ?" id])
-           (jdbc/execute! tx ["DELETE FROM ev_tags WHERE id = ?" id])
-           (jdbc/execute! tx ["DELETE FROM ev_doc WHERE id = ?" id]))))
+    ;; One statement per table for the whole batch, not one per id. FTS5
+    ;; cannot index ev_fts.id, so `WHERE id = ?` scans the table: 0.6 s at
+    ;; 825k rows live (2026-11-05), i.e. 5 min of held write lock for a
+    ;; 500-id batch. `id IN (...)` pays that scan once.
+    (when (seq ids)
+      (let [marks (str "(" (str/join "," (repeat (count ids) "?")) ")")]
+        (with-sidecar-write*
+          nil
+          #(jdbc/with-transaction [tx @!ds]
+             (jdbc/execute! tx (into [(str "DELETE FROM ev_fts WHERE rowid IN
+                                  (SELECT fts_rowid FROM ev_fts_map WHERE id IN " marks ")")]
+                                     ids))
+             ;; The map was backfilled after the original FTS table. Delete by
+             ;; id as well so a pre-backfill/unmapped legacy row cannot survive.
+             (doseq [table ["ev_fts" "ev_fts_map" "ev_attr" "ev_tags" "ev_doc"]]
+               (jdbc/execute! tx (into [(str "DELETE FROM " table " WHERE id IN " marks)]
+                                       ids)))))))
     (let [remaining (evidence-sidecar-counts ids)]
       (when-not (every? zero? (vals remaining))
         (throw (ex-info "Evidence sidecar erase verification failed"

@@ -4,11 +4,13 @@
             [clojure.test :refer [deftest is run-tests]]
             [futon1b-derived :as derived]
             [futon1b-evidence-erase :as erase]
+            [futon1b-migrate-derived :as migrate]
             [futon1b-text :as text]
             [futon1b-xt :as fxt]
             [xtdb.api :as xt]
             [xtdb.node :as xtn])
-  (:import [java.nio.file Files]))
+  (:import [java.nio.file Files]
+           [java.time Instant]))
 
 (defn- temp-dir []
   (.toFile (Files/createTempDirectory
@@ -149,6 +151,58 @@
                       :reason "must be reviewed in chunks" :dry-run true})
                nil
                (catch clojure.lang.ExceptionInfo error (:kind (ex-data error)))))))))
+
+(deftest history-check-sees-every-version-the-erase-must-remove
+  ;; The bad case the post-erase check exists for: a row whose only version is
+  ;; in past valid time, and a row replaced by a later version. A check that
+  ;; reads only the current row would miss both.
+  (with-open [node (xtn/start-node)]
+    (let [remaining #'erase/remaining-history
+          past (evidence-doc "hist:past" "p")
+          twice (evidence-doc "hist:twice" "t1")]
+      (xt/execute-tx node [[:put-docs {:into :evidence
+                                       :valid-from (Instant/parse "2026-01-01T00:00:00Z")
+                                       :valid-to (Instant/parse "2026-02-01T00:00:00Z")}
+                            past]])
+      (xt/execute-tx node [[:put-docs :evidence twice]])
+      (xt/execute-tx node [[:put-docs :evidence (assoc-in twice [:evidence/body :marker] "t2")]])
+      (is (= #{"hist:past" "hist:twice"} (remaining node ["hist:past" "hist:twice" "hist:none"])))
+      (xt/execute-tx node [[:erase-docs :evidence "hist:past"] [:erase-docs :evidence "hist:twice"]])
+      (is (empty? (remaining node ["hist:past" "hist:twice"]))))))
+
+(deftest migration-manifest-drives-the-erase
+  ;; The real producer of the manifest, not a hand-written one: a field-name
+  ;; or hash drift between C and D refuses here rather than on the live store.
+  (with-open [node (xtn/start-node)]
+    (let [dir (temp-dir)
+          rows (mapv (fn [n]
+                       (let [id (format "aa-%03d" n)]
+                         {:xt/id id :evidence/id id :evidence/type :artifact/weak-activation
+                          :evidence/claim-type :observation
+                          :evidence/author "futon3c/artifact-activation"
+                          :evidence/at (str (Instant/ofEpochMilli (+ 1793900000000 n)))
+                          :evidence/tags [:artifact-retrieval :weak-activation]
+                          :evidence/body {:artifact {:kind :invoke :id (str "i-" n)}
+                                          :text (str "prompt " n) :text-truncated? false
+                                          :text-sha256 "x" :hits []}}))
+                     (range 12))]
+      (xt/execute-tx node (mapv (fn [d] [:put-docs :evidence d]) rows))
+      (text/init! {:path (str (io/file dir "sidecar.db"))})
+      (text/catch-up! node)
+      (binding [migrate/*pressure-fn* (constantly {:permits/available 4 :permits/waiters 0})
+                migrate/*sleep-fn* (constantly nil)]
+        (is (= :complete (:status (migrate/run! node :artifact-activation
+                                                {:root (.getPath dir) :run-id "r"
+                                                 :batch-size 5 :pause-ms 0})))))
+      (let [run-dir (io/file dir "artifact-activation" "r")
+            ids (mapv :evidence/id rows)
+            result (erase/erase-evidence!
+                    node {:ids ids :family :artifact-activation
+                          :migration-run-dir (.getPath run-dir) :reason "integration"})]
+        (is (= :erased (:status result)))
+        (is (empty? (#'erase/remaining-history node ids)))
+        (is (every? zero? (vals (text/evidence-sidecar-counts ids))))
+        (is (= 12 (count (fxt/safe-q node '(from :derived [xt/id])))))))))
 
 (defn -main [& _]
   (let [result (run-tests 'test-evidence-erase)]

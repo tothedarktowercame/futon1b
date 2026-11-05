@@ -163,25 +163,23 @@
       (.force directory true))
     (.getCanonicalPath ^File file)))
 
-(defn- evidence-history [node id]
-  {:all-system-time
-   (fxt/timed-q node ["SELECT _id FROM evidence FOR ALL SYSTEM_TIME WHERE _id = ?" id])
-   :all-valid-time
-   (fxt/safe-q node
-               (fxt/pq '[p-id]
-                       '(-> (from :evidence {:bind [xt/id]
-                                             :for-valid-time :all-time})
-                            (where (= xt/id p-id))) id))})
+(defn- remaining-history
+  "Ids among IDS with any row left in evidence, across all system time and
+  all valid time, by one statement. Per id this was two queries at ~0.55 s
+  each live (2026-11-05), 9 min for a 500-id batch; `_id IN` is one scan."
+  [node ids]
+  (set (map (comp str :xt/id)
+            (fxt/timed-q node (into [(str "SELECT _id FROM evidence"
+                                          " FOR ALL SYSTEM_TIME FOR ALL VALID_TIME"
+                                          " WHERE _id IN ("
+                                          (str/join "," (repeat (count ids) "?")) ")")]
+                                    ids)))))
 
 (defn- verify-store-erased! [node ids]
-  (let [remaining (into {}
-                        (keep (fn [id]
-                                (let [history (evidence-history node id)]
-                                  (when (some seq (vals history)) [id history]))))
-                        ids)]
+  (let [remaining (remaining-history node ids)]
     (when (seq remaining)
       (throw (ex-info "Evidence history remains after erase"
-                      {:kind :evidence-erase-incomplete :remaining remaining})))
+                      {:kind :evidence-erase-incomplete :remaining (vec (sort remaining))})))
     true))
 
 (defn erase-evidence!
