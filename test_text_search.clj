@@ -57,8 +57,8 @@
 
 (defn -main [& _]
   (let [dir (temp-dir)
-        docs (vec
-              (for [i (range 48)]
+        ordinary-docs (vec
+                       (for [i (range 48)]
                 {:xt/id (str "text-" i)
                  :evidence/id (str "text-" i)
                  :evidence/type (if (even? i) :memory/assert :note)
@@ -73,7 +73,41 @@
                             "peradam gflownets"
                             "zabuton correction lexicon"
                             "evidence backend futon1b sunflower"]
-                           (mod i 4)))}))]
+                           (mod i 4)))}))
+        scope-docs
+        [{:xt/id "scope-operator" :evidence/id "scope-operator"
+          :evidence/type :coordination :evidence/author "joe"
+          :evidence/at "2026-07-31T01:00:00Z" :evidence/tags [:chat :turn]
+          :evidence/body "scopephrase operator turn"}
+         {:xt/id "scope-assistant" :evidence/id "scope-assistant"
+          :evidence/type :coordination :evidence/author "claude-8"
+          :evidence/at "2026-07-31T01:01:00Z" :evidence/tags [:chat :turn]
+          :evidence/body "scopephrase assistant reply"}
+         {:xt/id "scope-commit" :evidence/id "scope-commit"
+          :evidence/type :coordination :evidence/author "claude-8"
+          :evidence/at "2026-07-31T01:02:00Z" :evidence/tags [:turn-commits]
+          :evidence/body "scopephrase committed work"}
+         {:xt/id "scope-artifact" :evidence/id "scope-artifact"
+          :evidence/type :artifact-activation :evidence/author "artifact-activation"
+          :evidence/at "2026-07-31T01:03:00Z" :evidence/tags [:artifact-activation]
+          :evidence/body "scopephrase artifact derived"}
+         {:xt/id "scope-start" :evidence/id "scope-start"
+          :evidence/type :coordination :evidence/author "zai-1"
+          :evidence/at "2026-07-31T01:04:00Z" :evidence/tags [:turn-start]
+          :evidence/body "scopephrase harness start derived"}
+         {:xt/id "scope-round" :evidence/id "scope-round"
+          :evidence/type :coordination :evidence/author "象-1"
+          :evidence/at "2026-07-31T01:05:00Z" :evidence/tags [:turn-round]
+          :evidence/body "scopephrase circus round derived"}
+         {:xt/id "scope-xiang" :evidence/id "scope-xiang"
+          :evidence/type :memory :evidence/author "xiang-turn-service"
+          :evidence/at "2026-07-31T01:06:00Z" :evidence/tags [:xiang-turn]
+          :evidence/body "scopephrase settled turn derived"}
+         {:xt/id "scope-ma" :evidence/id "scope-ma"
+          :evidence/type :observation :evidence/author "馬"
+          :evidence/at "2026-07-31T01:07:00Z" :evidence/tags [:ma-observation]
+          :evidence/body "scopephrase observation derived"}]
+        docs (into ordinary-docs scope-docs)]
     (with-open [node (xtn/start-node)]
       (xt/execute-tx node (mapv (fn [doc] [:put-docs :evidence doc]) docs))
       (text/init! {:path (str dir "/fts5-evidence.db")})
@@ -109,7 +143,7 @@
       (let [{:keys [df indexed]} (text/document-frequencies ["common" "missing"])]
         (check! "df reports index-only per-term document frequencies"
                 (= {"common" 48 "missing" 0} df))
-        (check! "df reports total indexed rows" (= 48 indexed)))
+        (check! "df reports total indexed rows" (= 56 indexed)))
       (let [first-page (text/search node {:q "common" :limit 3 :hydrate false})
             second-page (text/search node {:q "common" :limit 2 :offset 1
                                            :hydrate false})]
@@ -133,8 +167,8 @@
                       "/api/alpha/evidence/text-search")]
         (try
           (let [q (URLEncoder/encode "common" "UTF-8")
-                full (get-edn (str base "?q=" q "&limit=6"))
-                light (get-edn (str base "?q=" q "&limit=6&hydrate=false"))
+                full (get-edn (str base "?q=" q "&limit=6&scope=all"))
+                light (get-edn (str base "?q=" q "&limit=6&hydrate=false&scope=all"))
                 full-ids (mapv #(get-in % [:entry :evidence/id])
                                (get-in full [:body :results]))
                 light-ids (mapv :evidence/id (get-in light [:body :results]))
@@ -150,6 +184,22 @@
                             (get-in df [:body :df]))))
             (check! "HTTP offset cap is enforced"
                     (= 400 (:status bad-offset))))
+          (let [q (URLEncoder/encode "scopephrase" "UTF-8")
+                acts (get-edn (str base "?q=" q "&limit=3"))
+                all (get-edn (str base "?q=" q "&limit=20&scope=all"))
+                act-ids (set (get-in acts [:body :ids]))
+                all-ids (set (get-in all [:body :ids]))]
+            (check! "default acts scope returns exactly participant acts before limit"
+                    (= #{"scope-operator" "scope-assistant" "scope-commit"}
+                       act-ids))
+            (check! "scope=all retains today's unfiltered behaviour"
+                    (= (set (map :evidence/id scope-docs)) all-ids))
+            (check! "acts response names scope and rows removed"
+                    (and (= :acts (get-in acts [:body :scope]))
+                         (= 5 (get-in acts [:body :scope-removed]))))
+            (check! "all response names scope and removes nothing"
+                    (and (= :all (get-in all [:body :scope]))
+                         (zero? (get-in all [:body :scope-removed])))))
           (let [{:keys [exit out err]}
                 (shell/sh "bb" "fts_oracle.clj"
                           (str "http://127.0.0.1:" port))]

@@ -827,13 +827,66 @@
     (let [raw (str/replace-first (str v) #"^:" "")]
       [raw (str ":" raw)])))
 
+(def act-scope-rules
+  "The explicit participant-act allow-list for operator-facing text search.
+   New evidence families are excluded until deliberately added here."
+  [{:kind :chat-turn
+    :required-tags [:chat :turn]
+    :comment "Operator user turns, assistant replies, and parked-resume harness dispatches."}
+   {:kind :turn-commit
+    :required-tags [:turn-commits]
+    :comment "An agent's commit announcement is a participant act."}
+   {:kind :invoke-start
+    :required-tags [:invoke-start]
+    :comment "The durable start of an agent dispatch is a participant act."}
+   {:kind :mesh-edge
+    :required-tags [:mesh-edge]
+    :excluded-authors ["ma-reading" "lu-rerank" "ma-occurrence" "turn-capture"
+                       "xiang-turn-service" "馬" "驴-haiku" "馬-sonnet" "象-sonnet"]
+    :excluded-author-prefixes ["象" "猴"]
+    :comment "Agent mesh dispatches are acts; Circus readers and animal-derived writers are not."}])
+
+(defn- required-tags-sql [tags]
+  {:clauses (mapv (fn [_]
+                    "EXISTS (SELECT 1 FROM ev_tags ts
+                             WHERE ts.id = a.id AND ts.tag IN (?,?))")
+                  tags)
+   :params (vec (mapcat index-enum-values tags))})
+
+(defn- act-rule-sql [{:keys [required-tags excluded-authors
+                             excluded-author-prefixes]}]
+  (let [{:keys [clauses params]} (required-tags-sql required-tags)
+        author-clauses
+        (cond-> []
+          (seq excluded-authors)
+          (conj (str "a.author NOT IN ("
+                     (str/join "," (repeat (count excluded-authors) "?")) ")"))
+          (seq excluded-author-prefixes)
+          (into (map (constantly "a.author NOT LIKE ?") excluded-author-prefixes)))
+        author-clause (when (seq author-clauses)
+                        (str "(a.author IS NULL OR ("
+                             (str/join " AND " author-clauses) "))"))]
+    {:clause (str "(" (str/join " AND " (cond-> clauses author-clause
+                                                   (conj author-clause))) ")")
+     :params (cond-> params
+               (seq excluded-authors) (into excluded-authors)
+               (seq excluded-author-prefixes)
+               (into (map #(str % "%") excluded-author-prefixes)))}))
+
+(defn- acts-scope-sql []
+  (let [rules (mapv act-rule-sql act-scope-rules)]
+    {:clause (str "(" (str/join " OR " (map :clause rules)) ")")
+     :params (vec (mapcat :params rules))}))
+
 (defn- attr-clauses
   "Attribute predicates over the `a` (ev_attr) alias, shared by candidate
    search and scoped document frequencies so the two cannot drift. Excludes
    the content MATCH, which each caller supplies itself."
   [{:keys [author session-id since before type claim-type tags
-           subject-type subject-id pattern-id]}]
-  {:clauses (cond-> []
+           subject-type subject-id pattern-id scope]}]
+  (let [{scope-clause :clause scope-params :params}
+        (when (= :acts scope) (acts-scope-sql))]
+    {:clauses (cond-> []
               author (conj "a.author = ?")
               session-id (conj "a.session = ?")
               since (conj "a.at >= ?")
@@ -843,12 +896,13 @@
               subject-type (conj "a.subject_type IN (?,?)")
               subject-id (conj "a.subject_id = ?")
               pattern-id (conj "a.pattern_id IN (?,?)")
+              scope-clause (conj scope-clause)
               (seq tags)
               (into (repeat
                      (count tags)
                      "EXISTS (SELECT 1 FROM ev_tags t
                               WHERE t.id = a.id AND t.tag IN (?,?))")))
-   :params (cond-> []
+     :params (cond-> []
              author (conj (str author))
              session-id (conj (str session-id))
              since (conj (str since))
@@ -858,7 +912,23 @@
              subject-type (into (index-enum-values subject-type))
              subject-id (conj (str subject-id))
              pattern-id (into (index-enum-values pattern-id))
-             (seq tags) (into (mapcat index-enum-values tags)))})
+             scope-clause (into scope-params)
+             (seq tags) (into (mapcat index-enum-values tags)))}))
+
+(defn- matching-count
+  "Index count before LIMIT for one search population."
+  [ds {:keys [q] :as opts}]
+  (let [content? (not (str/blank? (str q)))
+        from (if content? "ev_fts f JOIN ev_attr a USING (id)" "ev_attr a")
+        {attr-c :clauses attr-p :params} (attr-clauses opts)
+        clauses (cond-> [] content? (conj "ev_fts MATCH ?") :always (into attr-c))
+        params (cond-> [] content? (conj (match-string q)) :always (into attr-p))]
+    (:n (jdbc/execute-one!
+         ds (into [(str "SELECT count(*) AS n FROM " from
+                        (when (seq clauses)
+                          (str " WHERE " (str/join " AND " clauses))))]
+                  params)
+         unqualified))))
 
 (defn- candidates
   "Candidate ids from one composable SQL statement. Content queries rank by
@@ -1107,9 +1177,15 @@
    index's."
   [node {:keys [limit hydrate] :as params}]
   (let [ds @!ds
+        scope (if (= :acts (:scope params)) :acts :all)
+        params (assoc params :scope scope)
         k (or limit 10)
         hydrate? (not (false? hydrate))
         cands (candidates ds params)
+        scoped-count (matching-count ds params)
+        all-count (if (= :acts scope)
+                    (matching-count ds (assoc params :scope :all))
+                    scoped-count)
         ;; Two phases, deliberately: the re-check wave fetches recheck-cols
         ;; (which must include body — content certification reads the STORE's
         ;; text, not the index's), then hydrate-survivors fetches full docs
@@ -1135,6 +1211,8 @@
                    :evidence/type (:evidence/type doc)})
                 survivors))]
     {:results results
+     :scope scope
+     :scope-removed (- all-count scoped-count)
      ;; Identities in rank order, OUTSIDE the payload text. A hydrated
      ;; response cannot be lexically scraped: evidence bodies legitimately
      ;; contain ':score ' and ':evidence/id' themselves, so splitting on

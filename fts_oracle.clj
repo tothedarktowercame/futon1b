@@ -60,7 +60,7 @@
 (defn sidecar-hits [q]
   (let [enc (java.net.URLEncoder/encode (str q) "UTF-8")
         res (get-edn (str base "/api/alpha/evidence/text-search?q=" enc
-                          "&" subset-params "&limit=2000"))]
+                          "&" subset-params "&limit=2000&scope=all"))]
     (set (map #(get-in % [:entry :evidence/id]) (:results res)))))
 
 (def failures (atom 0))

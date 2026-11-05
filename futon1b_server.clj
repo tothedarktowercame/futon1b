@@ -1308,6 +1308,8 @@
 (defn- text-search-route
   "GET /api/alpha/evidence/text-search — unified content/attribute candidate
    search with store-side re-check. q is optional; tags is repeatable.
+   scope defaults to acts (the explicit participant-act allow-list); scope=all
+   requests the legacy unscoped population.
    ?df=t1,t2 returns index-only document frequencies; ?stats=true returns
    index stats instead. POST {:op :catch-up} (penholder-gated) starts a
    background catch-up/rebuild."
@@ -1366,8 +1368,15 @@
       :else
       (with-expensive-read!
         ex
-        #(let [params (cond-> {:limit (parse-limit p)
+        #(let [scope-param (some-> (p "scope") str/lower-case)
+               scope (cond
+                       (or (nil? scope-param) (= "" scope-param)
+                           (= "acts" scope-param)) :acts
+                       (= "all" scope-param) :all
+                       :else ::invalid)
+               params (cond-> {:limit (parse-limit p)
                                :offset (parse-text-offset p)
+                               :scope scope
                                :hydrate (not= "false"
                                               (str/lower-case
                                                (str (p "hydrate"))))}
@@ -1387,8 +1396,10 @@
                         (assoc :include-ephemeral
                                (= "true" (str/lower-case
                                           (p "include-ephemeral")))))]
-           (respond! ex 200 (pr-str (assoc (text/search @!node params)
-                                           :ok true))))))))
+           (if (= ::invalid scope)
+             (respond! ex 400 (pr-str {:ok false :error "scope must be acts or all"}))
+             (respond! ex 200 (pr-str (assoc (text/search @!node params)
+                                             :ok true)))))))))
 
 (defonce ^:private !server-executors (atom {}))
 
