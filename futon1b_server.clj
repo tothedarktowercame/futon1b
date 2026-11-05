@@ -41,6 +41,7 @@
             [migration.ingest :as ingest]
             [futon1b-gates :as gates]
             [futon1b-evidence :as ev]
+            [futon1b-derived :as derived]
             [futon1b-graph :as graph]
             [zai-memory-1b :as zm]
             [futon1b-xt :as fxt]
@@ -939,6 +940,38 @@
           (respond! ex 404 {:error "not found" :evidence/id tail}))
         (respond! ex 404 {:error "not found" :evidence/id tail})))))
 
+(defn- derived-route
+  "Single/batch writes and exact point reads for the derived XTDB table."
+  [^HttpExchange ex]
+  (let [method (.getRequestMethod ex)
+        tail (uri-tail ex "/api/alpha/derived")]
+    (cond
+      (and (= method "POST") (str/blank? tail))
+      (let [payload (parse-payload ex)
+            _ (penholder! ex payload)
+            result (derived/write-derived! @!node payload)]
+        (respond! ex (if (:no-op? result) 200 201) (pr-str result)))
+
+      (and (= method "POST") (= tail "batch"))
+      (let [payload (parse-payload ex)
+            _ (penholder! ex payload)
+            items (:derived payload)]
+        (if-not (sequential? items)
+          (respond! ex 400 (pr-str {:ok false
+                                    :error "body needs :derived, a list of payloads"}))
+          (let [results (derived/write-derived-batch! @!node (vec items))]
+            (respond! ex 200 (pr-str {:ok (every? :ok results)
+                                      :results results})))))
+
+      (and (= method "GET") (not (str/blank? tail)) (not= tail "batch"))
+      (if-let [doc (derived/fetch-by-id @!node tail)]
+        (respond! ex 200 doc)
+        (respond! ex 404 {:error "not found" :derived/id tail}))
+
+      :else
+      (respond! ex 405 (pr-str {:ok false
+                                :error "POST, POST /batch, or GET /{id}"})))))
+
 (defn- memory-assert-route [^HttpExchange ex]
   (if (= "POST" (.getRequestMethod ex))
     (let [payload (parse-payload ex)
@@ -1551,6 +1584,8 @@
     ;; without restarting the single-process XTDB store.
     (.createContext server "/api/alpha/hyperedges" (handler #'hyperedges-route))
     (.createContext server "/api/alpha/evidence" (handler evidence-route))
+    ;; Registered by var so a later namespace reload reaches the route.
+    (.createContext server "/api/alpha/derived" (handler #'derived-route))
     (.createContext server "/api/alpha/memory/assert" (handler memory-assert-route))
     ;; longer prefix wins (see NB above): text-search must out-rank /evidence
     ;; By var, so a reload of this ns reaches the live route (see /scopes).
