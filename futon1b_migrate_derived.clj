@@ -12,7 +12,7 @@
            [java.nio.file Files StandardCopyOption]))
 
 (def default-root "/home/joe/code/storage/derived-migration")
-(def default-batch-size 200)
+(def default-batch-size 1000)
 (def default-pause-ms 2000)
 
 (defn- canonical [x]
@@ -90,12 +90,18 @@
         (pos? (long (or (:permits/waiters p) 0)))
         (pos? (long (or (get-in p [:request-workers 0 :queue-depth]) 0))))))
 
-(defn- page-source [node spec cursor limit]
+(defn- page-keys
+  "The next LIMIT [xt/id evidence/at] pairs of SPEC's family after CURSOR.
+  Narrow on purpose: the same where/order-by/limit over `[*]` took 103 s per
+  200-row page on the live store (2026-11-05, evidence ~600k rows), because it
+  carries every matching body through the sort; this projection took 7.4 s
+  for 200 and 7.3 s for 1,000."
+  [node spec cursor limit]
   (let [{:keys [author type]} (:select spec)
         [after-at after-id] (or cursor ["" ""])]
     (vec (fxt/safe-q
           node (fxt/pq '[p-author p-type p-at p-id p-limit]
-                       '(-> (from :evidence [*])
+                       '(-> (from :evidence [xt/id evidence/at evidence/author evidence/type])
                             (where (and (= evidence/author p-author)
                                         (= evidence/type p-type)
                                         (or (> evidence/at p-at)
@@ -104,6 +110,27 @@
                             (order-by evidence/at xt/id)
                             (limit p-limit))
                        author type after-at after-id limit)))))
+
+(defn- hydrate
+  "Full evidence rows for KEYS, in KEYS order, by one `_id IN` statement.
+  `_id IN` is a table scan at any size (fxt/equality-hydrate-max-ids), so one
+  statement per page: 15 s for 200 ids, 25 s for 1,000 live, against 0.28 s
+  per id by point read."
+  [node keys]
+  (if (empty? keys) []
+      (let [ids (mapv :xt/id keys)
+            sql (str "SELECT * FROM evidence WHERE _id IN ("
+                     (str/join "," (repeat (count ids) "?")) ")")
+            by-id (into {} (map (juxt :xt/id identity))
+                        (fxt/safe-q node (into [sql] ids)))
+            missing (remove by-id ids)]
+        (when (seq missing)
+          (throw (ex-info "Evidence row vanished between page and hydrate"
+                          {:reason :hydrate-missing :ids (vec missing)})))
+        (mapv by-id ids))))
+
+(defn- page-source [node spec cursor limit]
+  (hydrate node (page-keys node spec cursor limit)))
 
 (defn- family-rows [node family]
   (fxt/safe-q node (fxt/pq '[p-family]
@@ -242,14 +269,14 @@
         ;; id hash, never the whole family (artifact-activation is 270 MB).
         [source-count sample]
         (loop [cursor nil n 0 sample (sorted-map)]
-          (let [page (page-source node spec cursor 500)]
-            (if (empty? page) [n (vals sample)]
+          (let [page (page-keys node spec cursor 5000)]
+            (if (empty? page) [n (hydrate node (vals sample))]
                 (let [x (peek page)
-                      sample (reduce (fn [m row]
-                                       (let [m (assoc m (sha256 (:evidence/id row)) row)]
+                      sample (reduce (fn [m k]
+                                       (let [m (assoc m (sha256 (:xt/id k)) k)]
                                          (if (> (count m) 20) (dissoc m (key (last m))) m)))
                                      sample page)]
-                  (recur [(:evidence/at x) (:evidence/id x)] (+ n (count page)) sample)))))
+                  (recur [(:evidence/at x) (:xt/id x)] (+ n (count page)) sample)))))
         rows (family-rows node family)
         by-id (into {} (map (juxt :derived/id identity) rows))
         bad (keep (fn [{:keys [derived-id derived-body-sha256]}]
