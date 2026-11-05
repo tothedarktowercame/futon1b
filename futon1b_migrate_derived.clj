@@ -88,7 +88,16 @@
   (let [p (*pressure-fn*)]
     (or (zero? (long (or (:permits/available p) 0)))
         (pos? (long (or (:permits/waiters p) 0)))
-        (pos? (long (or (get-in p [:request-workers 0 :queue-depth]) 0))))))
+        (pos? (long (or (get-in p [:request-workers 0 :requests/queued]) 0))))))
+
+(defn- wait-for-quiet?
+  "True once pressure clears; false after PATIENCE checks PAUSE-MS apart.
+  One busy moment (a reader holding every permit) should delay a run, not end it."
+  [patience pause-ms]
+  (loop [n 0]
+    (cond (not (pressure?)) true
+          (>= n patience) false
+          :else (do (*sleep-fn* (max pause-ms 250)) (recur (inc n))))))
 
 (defn- page-keys
   "The next LIMIT [xt/id evidence/at] pairs of SPEC's family after CURSOR.
@@ -205,9 +214,9 @@
       [])))
 
 (defn run!
-  [node family {:keys [root run-id batch-size pause-ms dry-run? max-batches]
+  [node family {:keys [root run-id batch-size pause-ms dry-run? max-batches patience]
                 :or {root default-root batch-size default-batch-size
-                     pause-ms default-pause-ms}}]
+                     pause-ms default-pause-ms patience 30}}]
   (let [spec (or (family-specs family)
                  (throw (ex-info "Unknown derived family" {:family family})))
         run-id (or run-id (str (Instant/now)))
@@ -218,7 +227,7 @@
     (loop [cursor (:cursor state) batches (long (or (:batches state) 0))
            seen 0 written 0 existing 0 bytes 0 timings []]
       (if-let [stop (cond (and max-batches (>= batches max-batches)) :interrupted
-                          (pressure?) :paused-pressure)]
+                          (not (wait-for-quiet? patience pause-ms)) :paused-pressure)]
         {:status stop
          :family family :run-id run-id :batches batches :seen seen
          :written written :existing existing :bytes bytes :batch-ms timings}

@@ -125,6 +125,38 @@
             (is (false? (:ok (migrate/verify! node :artifact-activation
                                               {:root root :run-id "run-1"}))))))))))
 
+(deftest pressure-delays-a-run-and-persistent-pressure-stops-it
+  (with-open [node (xtn/start-node)]
+    (put-docs! node (mapv activation (range 30)))
+    (let [root (.toString (Files/createTempDirectory
+                           "derived-migration-pressure"
+                           (make-array java.nio.file.attribute.FileAttribute 0)))
+          busy {:permits/available 0 :permits/waiters 1}
+          quiet {:permits/available 4 :permits/waiters 0}
+          queued {:permits/available 4 :permits/waiters 0
+                  :request-workers [{:requests/queued 2}]}]
+      (binding [migrate/*sleep-fn* (constantly nil)]
+        (testing "a queued request counts as pressure"
+          (binding [migrate/*pressure-fn* (constantly queued)]
+            (is (= :paused-pressure
+                   (:status (migrate/run! node :artifact-activation
+                                          {:root root :run-id "q" :patience 3}))))
+            (is (zero? (table-count node :derived)))))
+        (testing "pressure that never clears stops before any write"
+          (binding [migrate/*pressure-fn* (constantly busy)]
+            (is (= :paused-pressure
+                   (:status (migrate/run! node :artifact-activation
+                                          {:root root :run-id "p" :patience 3}))))
+            (is (zero? (table-count node :derived)))))
+        (testing "a busy moment delays the run instead of ending it"
+          (let [calls (atom 0)]
+            (binding [migrate/*pressure-fn* #(if (< (swap! calls inc) 4) busy quiet)]
+              (is (= :complete
+                     (:status (migrate/run! node :artifact-activation
+                                            {:root root :run-id "d" :batch-size 10
+                                             :patience 5}))))
+              (is (= 30 (table-count node :derived))))))))))
+
 (defn -main [& _]
   (let [result (run-tests 'test-migrate-derived)]
     (shutdown-agents)
