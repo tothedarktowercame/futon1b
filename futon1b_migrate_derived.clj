@@ -27,7 +27,7 @@
                        (.getBytes (pr-str (canonical x)) "UTF-8"))]
     (apply str (map #(format "%02x" (bit-and 0xff %)) bytes))))
 
-(defn- text-sha [s]
+(defn sha256-text [s]
   (let [bytes (.digest (MessageDigest/getInstance "SHA-256")
                        (.getBytes (str s) "UTF-8"))]
     (apply str (map #(format "%02x" (bit-and 0xff %)) bytes))))
@@ -41,12 +41,22 @@
     (if (seq ids) (vec (sort (distinct (map str ids))))
         [(str (:evidence/id row))])))
 
-(defn artifact-activation-transform [row]
+(defn artifact-activation-transform
+  "The body the f75fb0fff writer would have stored: no :text and no
+  :text-truncated?. Rows written before f75fb0fff already carry :text-sha256 of
+  the FULL text, computed before truncation, so it is kept as written; hashing
+  the stored :text would hash a 64 KiB prefix for truncated rows. A row with
+  no hash gets one only when its text was complete; a truncated row without a
+  hash keeps :text-truncated? so the gap stays visible."
+  [row]
   (let [body (:evidence/body row)
         text (:text body)
+        truncated? (true? (:text-truncated? body))
         body (cond-> (dissoc body :text :text-truncated?)
-               text (assoc :text-sha256 (text-sha text)
-                           :text-chars (count (str text))))]
+               (and text (not (:text-sha256 body)) (not truncated?))
+               (assoc :text-sha256 (sha256-text text))
+               (and (not (:text-sha256 body)) truncated?)
+               (assoc :text-truncated? true))]
     {:derived/id (str "derived:artifact-activation:" (:evidence/id row))
      :derived/family :artifact-activation
      :derived/writer "futon3c/artifact-activation"
@@ -180,8 +190,9 @@
         started (System/nanoTime)]
     (loop [cursor (:cursor state) batches (long (or (:batches state) 0))
            seen 0 written 0 existing 0 bytes 0 timings []]
-      (if (or (and max-batches (>= batches max-batches)) (pressure?))
-        {:status (if (pressure?) :paused-pressure :interrupted)
+      (if-let [stop (cond (and max-batches (>= batches max-batches)) :interrupted
+                          (pressure?) :paused-pressure)]
+        {:status stop
          :family family :run-id run-id :batches batches :seen seen
          :written written :existing existing :bytes bytes :batch-ms timings}
         (let [rows (page-source node spec cursor batch-size)]
@@ -223,19 +234,28 @@
   [node family {:keys [root run-id] :or {root default-root}}]
   (let [spec (family-specs family)
         dir (io/file root (name family) run-id)
-        manifest (manifest-lines dir)
-        source (loop [cursor nil out []]
-                 (let [page (page-source node spec cursor 500)]
-                   (if (empty? page) out
-                       (let [x (peek page)]
-                         (recur [(:evidence/at x) (:evidence/id x)] (into out page))))))
+        ;; A crash after the manifest append but before state.edn is written
+        ;; replays that batch on resume, so one derived id can appear twice.
+        manifest (vals (into {} (map (juxt :derived-id identity))
+                             (manifest-lines dir)))
+        ;; Stream the source: keep a count and the 20 rows with the lowest
+        ;; id hash, never the whole family (artifact-activation is 270 MB).
+        [source-count sample]
+        (loop [cursor nil n 0 sample (sorted-map)]
+          (let [page (page-source node spec cursor 500)]
+            (if (empty? page) [n (vals sample)]
+                (let [x (peek page)
+                      sample (reduce (fn [m row]
+                                       (let [m (assoc m (sha256 (:evidence/id row)) row)]
+                                         (if (> (count m) 20) (dissoc m (key (last m))) m)))
+                                     sample page)]
+                  (recur [(:evidence/at x) (:evidence/id x)] (+ n (count page)) sample)))))
         rows (family-rows node family)
         by-id (into {} (map (juxt :derived/id identity) rows))
         bad (keep (fn [{:keys [derived-id derived-body-sha256]}]
                     (when-not (= derived-body-sha256
                                  (some-> (by-id derived-id) :derived/body sha256))
                       derived-id)) manifest)
-        sample (take 20 (sort-by #(sha256 (:evidence/id %)) source))
         sample-bad (keep (fn [row]
                            (let [payload ((:transform spec) row)
                                  expected (-> (derived/build-derived-doc payload)
@@ -244,9 +264,9 @@
                                           (some-> (by-id (:derived/id payload))
                                                   (dissoc :xt/id)))
                                (:evidence/id row)))) sample)
-        ok? (and (= (count source) (count manifest) (count rows))
+        ok? (and (= source-count (count manifest) (count rows))
                  (empty? bad) (empty? sample-bad))
-        receipt {:ok ok? :family family :source-count (count source)
+        receipt {:ok ok? :family family :source-count source-count
                  :manifest-count (count manifest) :derived-count (count rows)
                  :bad-ids (vec bad) :sample-bad (vec sample-bad)}]
     (atomic-spit! (io/file dir "verification.edn") receipt)

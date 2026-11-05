@@ -7,18 +7,28 @@
   (:import [java.nio.file Files]
            [java.time Instant]))
 
-(defn- activation [n]
+(defn- full-text [n] (str "copied prompt " n " DISTINCTIVE-TEXT"))
+
+(defn- activation
+  "Rows as the pre-f75fb0fff writer stored them: :text-sha256 of the FULL text,
+  and every 7th row's :text cut to a prefix with :text-truncated? true. Rows
+  from 1150 on carry no hash, as the oldest rows may not."
+  [n]
   (let [id (format "activation-%04d" n)
         at (str (Instant/ofEpochMilli (+ 1793900000000 n)))
-        text (str "copied prompt " n " DISTINCTIVE-TEXT")]
-    {:xt/id id :evidence/id id :evidence/type :artifact/weak-activation
+        truncated? (zero? (mod n 7))
+        text (cond-> (full-text n) truncated? (subs 0 10))]
+    (cond->
+     {:xt/id id :evidence/id id :evidence/type :artifact/weak-activation
      :evidence/claim-type :observation
      :evidence/author "futon3c/artifact-activation" :evidence/at at
      :evidence/subject {:ref/type :invoke :ref/id (str "invoke-" n)}
      :evidence/tags [:artifact-retrieval :weak-activation]
      :evidence/body {:artifact {:kind :invoke :id (str "invoke-" n)}
-                     :text text :text-truncated? false
-                     :retrieval {:model "test"} :hits [] :cited [] :weak []}}))
+                     :text text :text-truncated? truncated?
+                     :retrieval {:model "test"} :hits [] :cited [] :weak []}}
+      (< n 1150) (assoc-in [:evidence/body :text-sha256]
+                           (migrate/sha256-text (full-text n)))))) 
 
 (defn- unrelated [n]
   {:xt/id (str "other-" n) :evidence/id (str "other-" n)
@@ -59,14 +69,32 @@
         (testing "text is replaced and unrelated evidence remains untouched"
           (let [rows (fxt/safe-q node '(from :derived [*]))]
             (is (every? #(nil? (get-in % [:derived/body :text])) rows))
-            (is (every? string? (map #(get-in % [:derived/body :text-sha256]) rows)))
-            (is (every? pos-int? (map #(get-in % [:derived/body :text-chars]) rows)))
+            (let [by-n (into {} (map (fn [r] [(parse-long (subs (:derived/id r) 39)) r])) rows)
+                  sha (fn [n] (get-in (by-n n) [:derived/body :text-sha256]))]
+              (testing "a stored full-text hash is kept, never recomputed from a prefix"
+                (is (= (migrate/sha256-text (full-text 7)) (sha 7)))
+                (is (every? #(= (migrate/sha256-text (full-text %)) (sha %))
+                            (range 1150))))
+              (testing "a complete text without a hash gets the writer's hash"
+                (is (= (migrate/sha256-text (full-text 1151)) (sha 1151))))
+              (testing "a truncated text without a hash gets none, and says so"
+                (is (nil? (sha 1155)))
+                (is (true? (get-in (by-n 1155) [:derived/body :text-truncated?]))))
+              (is (not-any? #(contains? (:derived/body (by-n %)) :text-truncated?)
+                            (range 1150))))
             (is (= 1250 (table-count node :evidence)))
             (is (= 50 (count (fxt/safe-q
                               node '(-> (from :evidence [evidence/author])
                                         (where (= evidence/author "joe")))))))))
 
         (testing "rerun is a no-op and verification passes"
+          ;; A crash between the manifest append and state.edn replays a batch.
+          (spit (str root "/artifact-activation/run-1/manifest.edn")
+                (first (line-seq (java.io.BufferedReader.
+                                  (java.io.FileReader.
+                                   (str root "/artifact-activation/run-1/manifest.edn")))))
+                :append true)
+          (spit (str root "/artifact-activation/run-1/manifest.edn") "\n" :append true)
           (let [again (migrate/run! node :artifact-activation
                                     (assoc opts :run-id "rerun"))
                 receipt (migrate/verify! node :artifact-activation
