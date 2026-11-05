@@ -1,6 +1,7 @@
 (ns futon1b-derived
   "Validated writes and point reads for the operational derived-record table."
   (:require [clojure.string :as str]
+            [clojure.set :as set]
             [futon1b-gates :as gates]
             [futon1b-xt :as fxt]
             [migration.transform :as xf]
@@ -9,6 +10,7 @@
            [java.time Instant]))
 
 (def batch-max 500)
+(def list-max 1000)
 (defonce !shape-log (xf/make-shape-log))
 
 (defn- canonical [x]
@@ -103,6 +105,9 @@
 
 (defn- comparable [doc] (dissoc doc :xt/id))
 
+(defn- link-id [derived-id source-id]
+  (str "derived-source:" derived-id ":" source-id))
+
 (defn- classify-write [node {:keys [doc valid-from] :as prepared}]
   (let [stored (fetch-by-id node (:xt/id doc) valid-from)]
     (cond
@@ -112,22 +117,33 @@
       (throw (gates/layered-error 1 :derived-id-conflict
                                   {:derived/id (:xt/id doc)
                                    :valid-time (str valid-from)}))
-      :else (assoc prepared :action :write))))
+      :else (let [old (set (:derived/source-act-ids stored))
+                  new (set (:derived/source-act-ids doc))]
+              (assoc prepared :action :write
+                     :dropped-link-ids
+                     (mapv #(link-id (:xt/id doc) %) (sort (set/difference old new))))))))
 
-(defn- ops-for [{:keys [doc links valid-from]}]
-  (into [[:put-docs {:into :derived :valid-from valid-from} doc]]
+(defn- ops-for [{:keys [doc links valid-from dropped-link-ids]}]
+  (into (into [[:put-docs {:into :derived :valid-from valid-from} doc]]
+              (map (fn [id]
+                     [:delete-docs {:from :derived-source-links
+                                    :valid-from valid-from} id]))
+              dropped-link-ids)
         (map (fn [link]
                [:put-docs {:into :derived-source-links :valid-from valid-from} link]))
         links))
 
-(defn- verify! [node {:keys [doc links valid-from]}]
+(defn- verify! [node {:keys [doc links valid-from dropped-link-ids]}]
   (let [stored (fetch-by-id node (:xt/id doc) valid-from)
         missing-links (keep #(when-not (= % (link-by-id node (:xt/id %) valid-from))
-                               (:xt/id %)) links)]
-    (when-not (and (= (comparable doc) stored) (empty? missing-links))
+                               (:xt/id %)) links)
+        stale-links (filterv #(link-by-id node % valid-from) dropped-link-ids)]
+    (when-not (and (= (comparable doc) stored) (empty? missing-links)
+                   (empty? stale-links))
       (throw (gates/layered-error 0 :postcommit-missing-derived
                                   {:derived/id (:xt/id doc)
-                                   :missing-links (vec missing-links)})))
+                                   :missing-links (vec missing-links)
+                                   :stale-links stale-links})))
     true))
 
 (defn- rescued [prepared stage]
@@ -212,3 +228,65 @@
                                             :reason (or (get-in (ex-data error) [:error :reason])
                                                         :derived-write-failed)})))))))
     @results))
+
+(defn list-derived
+  "Return one current-version page ordered by derived id. Source lookup uses
+   the scalar companion rows, then resolves each current derived document."
+  [node {:keys [source-act-id family limit after]}]
+  (let [family (some-> family normalize-family)
+        limit (long (or limit 100))
+        _ (required! (<= 1 limit list-max) :limit limit)
+        after (or after "")
+        rows (if source-act-id
+               (let [links (fxt/safe-q
+                            node (if family
+                                   (fxt/pq '[p-source p-family p-after p-limit]
+                                           '(-> (from :derived-source-links [link/derived-id link/source-act-id link/family])
+                                                (where (and (= link/source-act-id p-source)
+                                                            (= link/family p-family)
+                                                            (> link/derived-id p-after)))
+                                                (order-by link/derived-id)
+                                                (limit p-limit))
+                                           source-act-id family after (inc limit))
+                                   (fxt/pq '[p-source p-after p-limit]
+                                           '(-> (from :derived-source-links [link/derived-id link/source-act-id])
+                                                (where (and (= link/source-act-id p-source)
+                                                            (> link/derived-id p-after)))
+                                                (order-by link/derived-id)
+                                                (limit p-limit))
+                                           source-act-id after (inc limit))))]
+                 (keep #(fetch-by-id node (:link/derived-id %)) links))
+               (fxt/safe-q
+                node (if family
+                       (fxt/pq '[p-family p-after p-limit]
+                               '(-> (from :derived [*])
+                                    (where (and (= derived/family p-family)
+                                                (> xt/id p-after)))
+                                    (order-by xt/id)
+                                    (limit p-limit))
+                               family after (inc limit))
+                       (fxt/pq '[p-after p-limit]
+                               '(-> (from :derived [*])
+                                    (where (> xt/id p-after))
+                                    (order-by xt/id)
+                                    (limit p-limit))
+                               after (inc limit)))))
+        rows (cond->> rows family (filter #(= family (:derived/family %))))
+        page (vec (take limit rows))]
+    {:derived (mapv #(dissoc % :xt/id) page)
+     :count (count page)
+     :next-cursor (when (> (count rows) limit)
+                    (:derived/id (peek page)))}))
+
+(defn census
+  "Exact current-version counts, optionally restricted to one family."
+  [node family]
+  (let [family (some-> family normalize-family)
+        rows (fxt/safe-q node (if family
+                                (fxt/pq '[p-family]
+                                        '(-> (from :derived [derived/family])
+                                             (where (= derived/family p-family)))
+                                        family)
+                                '(from :derived [derived/family])))
+        counts (frequencies (map :derived/family rows))]
+    {:ok true :total (reduce + 0 (vals counts)) :families counts}))

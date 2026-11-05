@@ -8,6 +8,7 @@
             [futon1b-text :as text]
             [futon1b-xt :as fxt]
             [next.jdbc :as jdbc]
+            [xtdb.api :as xt]
             [xtdb.node :as xtn])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
@@ -74,7 +75,12 @@
           (is (= 409 (first (request client :post base "/api/alpha/derived"
                                     (assoc original :derived/body {:different true})))))
           (is (= 201 (first (request client :post base "/api/alpha/derived"
-                                    (payload id at2 {:marker "derived-only-marker" :n 2})))))
+                                    (assoc (payload id at2 {:marker "derived-only-marker" :n 2})
+                                           :derived/source-act-ids ["act:two" "act:three"])))))
+          (is (empty? (filter #(= id (:link/derived-id %))
+                              (source-links node "act:one"))))
+          (is (= #{id} (set (map :link/derived-id
+                                  (source-links node "act:three")))))
           (is (= 2 (count (fxt/safe-q
                            node
                            (fxt/pq '[p-id]
@@ -100,6 +106,19 @@
                              (filter #(str/starts-with? (:link/derived-id %) "derived:artifact-activation:batch-")
                                      (source-links node "act:one"))))))))
 
+        (testing "source lookup, family census, cap, and unknown parameters"
+          (let [[status lookup] (request client :get base
+                                         "/api/alpha/derived?source-act-id=act%3Athree" nil)
+                [_ census] (request client :get base
+                                    "/api/alpha/derived/census?family=artifact-activation" nil)]
+            (is (= 200 status))
+            (is (= [id] (mapv :derived/id (:derived lookup))))
+            (is (pos? (:total census))))
+          (is (= 400 (first (request client :get base
+                                     "/api/alpha/derived?family=artifact-activation&wat=1" nil))))
+          (is (= 400 (first (request client :get base
+                                     "/api/alpha/derived?family=artifact-activation&limit=1001" nil)))))
+
         (testing "derived writes never enter evidence FTS"
           (is (empty? (:results (text/search node {:q "derived-only-marker"
                                                    :scope :all :limit 10}))))
@@ -119,6 +138,44 @@
                   (catch clojure.lang.ExceptionInfo error
                     (get-in (ex-data error) [:error :reason]))))
           (str field)))))
+
+(deftest family-list-pages-2500-current-rows-once
+  (gates/seed-mission-contract!)
+  (with-open [node (xtn/start-node)]
+    (let [at "2026-11-05T22:00:00Z"
+          docs (mapv (fn [n]
+                       (:doc (derived/build-derived-doc
+                              {:derived/id (format "derived:paging:%04d" n)
+                               :derived/family :paging
+                               :derived/writer "test-derived"
+                               :derived/writer-version "v1"
+                               :derived/source-act-ids [(str "act:" n)]
+                               :derived/subject {:n n} :derived/at at
+                               :derived/body {:n n}})))
+                     (range 2500))]
+      (doseq [chunk (partition-all 500 docs)]
+        (xt/execute-tx node (mapv (fn [doc]
+                                    [:put-docs {:into :derived
+                                                :valid-from (java.time.Instant/parse at)} doc])
+                                  chunk)))
+      (let [srv (server/start-server! {:node node :port 0 :bind-host "127.0.0.1"})
+            base (str "http://127.0.0.1:" (.getPort (.getAddress srv)))
+            client (HttpClient/newHttpClient)]
+        (try
+          (loop [after nil seen [] page-sizes []]
+            (let [path (str "/api/alpha/derived?family=paging&limit=1000"
+                            (when after (str "&after=" after)))
+                  [status body] (request client :get base path nil)
+                  ids (mapv :derived/id (:derived body))
+                  all (into seen ids)
+                  sizes (conj page-sizes (count ids))]
+              (is (= 200 status))
+              (if-let [cursor (:next-cursor body)]
+                (recur cursor all sizes)
+                (do (is (= [1000 1000 500] sizes))
+                    (is (= 2500 (count all)))
+                    (is (= 2500 (count (distinct all))))))))
+          (finally (.stop srv 0)))))))
 
 (defn -main [& _]
   (let [result (run-tests 'test-derived)]

@@ -941,10 +941,11 @@
         (respond! ex 404 {:error "not found" :evidence/id tail})))))
 
 (defn- derived-route
-  "Single/batch writes and exact point reads for the derived XTDB table."
+  "Writes, bounded lists/census, and exact point reads for derived rows."
   [^HttpExchange ex]
   (let [method (.getRequestMethod ex)
-        tail (uri-tail ex "/api/alpha/derived")]
+        tail (uri-tail ex "/api/alpha/derived")
+        params (query-params ex)]
     (cond
       (and (= method "POST") (str/blank? tail))
       (let [payload (parse-payload ex)
@@ -963,7 +964,38 @@
             (respond! ex 200 (pr-str {:ok (every? :ok results)
                                       :results results})))))
 
-      (and (= method "GET") (not (str/blank? tail)) (not= tail "batch"))
+      (and (= method "GET") (= tail "census"))
+      (let [unknown (seq (remove #{"family"} (keys params)))]
+        (if unknown
+          (respond! ex 400 (pr-str {:ok false :reason :unknown-parameters
+                                    :parameters (vec (sort unknown))}))
+          (with-expensive-read!
+            ex #(respond! ex 200 (derived/census @!node (params "family"))))))
+
+      (and (= method "GET") (str/blank? tail))
+      (let [unknown (seq (remove #{"source-act-id" "family" "limit" "after"}
+                                 (keys params)))
+            limit (try (some-> (params "limit") Long/parseLong)
+                       (catch Throwable _ ::invalid))]
+        (cond
+          unknown
+          (respond! ex 400 (pr-str {:ok false :reason :unknown-parameters
+                                    :parameters (vec (sort unknown))}))
+          (and (nil? (params "source-act-id")) (nil? (params "family")))
+          (respond! ex 400 (pr-str {:ok false :reason :missing-filter
+                                    :required ["source-act-id" "family"]}))
+          (or (= ::invalid limit) (and limit (not (<= 1 limit derived/list-max))))
+          (respond! ex 400 (pr-str {:ok false :reason :invalid-limit
+                                    :max derived/list-max}))
+          :else
+          (with-expensive-read!
+            ex #(respond! ex 200 (derived/list-derived
+                                  @!node {:source-act-id (params "source-act-id")
+                                          :family (params "family") :limit limit
+                                          :after (params "after")})))))
+
+      (and (= method "GET") (not (str/blank? tail))
+           (not (#{"batch" "census"} tail)))
       (if-let [doc (derived/fetch-by-id @!node tail)]
         (respond! ex 200 doc)
         (respond! ex 404 {:error "not found" :derived/id tail}))
