@@ -277,6 +277,58 @@
                              id tag])))))
   (count docs))
 
+(def evidence-sidecar-tables
+  "Every SQLite table that retains an evidence id. Kept public so destructive
+   migration verification can enumerate the same declared set it deletes."
+  [:ev_fts :ev_fts_map :ev_attr :ev_tags :ev_doc])
+
+(defn evidence-sidecar-counts
+  "Return the number of rows retained for each ID in each evidence sidecar
+   table. Intended for migration verification, not serving reads."
+  [ids]
+  (let [ids (mapv str ids)]
+    (if (empty? ids)
+      (zipmap evidence-sidecar-tables (repeat 0))
+      (let [marks (str/join "," (repeat (count ids) "?"))]
+        (into {}
+              (map (fn [table]
+                     [table
+                      (:n (jdbc/execute-one!
+                           @!ds
+                           (into [(str "SELECT count(*) AS n FROM " (name table)
+                                       " WHERE id IN (" marks ")")]
+                                 ids)
+                           unqualified))]))
+              evidence-sidecar-tables)))))
+
+(defn erase-evidence-sidecar!
+  "Delete IDS from all five evidence sidecar tables in one SQLite transaction
+   under the sidecar writer lock, then verify no row remains."
+  [ids]
+  (let [ids (mapv str ids)]
+    (when-not @!ds
+      (throw (ex-info "Evidence sidecar is not initialized"
+                      {:kind :evidence-sidecar-unavailable})))
+    (with-sidecar-write*
+      nil
+      #(jdbc/with-transaction [tx @!ds]
+         (doseq [id ids]
+           (jdbc/execute! tx ["DELETE FROM ev_fts WHERE rowid IN
+                                (SELECT fts_rowid FROM ev_fts_map WHERE id = ?)" id])
+           ;; The map was backfilled after the original FTS table. Delete by
+           ;; id as well so a pre-backfill/unmapped legacy row cannot survive.
+           (jdbc/execute! tx ["DELETE FROM ev_fts WHERE id = ?" id])
+           (jdbc/execute! tx ["DELETE FROM ev_fts_map WHERE id = ?" id])
+           (jdbc/execute! tx ["DELETE FROM ev_attr WHERE id = ?" id])
+           (jdbc/execute! tx ["DELETE FROM ev_tags WHERE id = ?" id])
+           (jdbc/execute! tx ["DELETE FROM ev_doc WHERE id = ?" id]))))
+    (let [remaining (evidence-sidecar-counts ids)]
+      (when-not (every? zero? (vals remaining))
+        (throw (ex-info "Evidence sidecar erase verification failed"
+                        {:kind :evidence-sidecar-erase-incomplete
+                         :remaining remaining})))
+      {:erased (count ids) :remaining remaining})))
+
 (def ^:private scan-cols
   '[xt/id evidence/at evidence/author evidence/session-id evidence/body
     evidence/type evidence/claim-type evidence/tags evidence/subject
