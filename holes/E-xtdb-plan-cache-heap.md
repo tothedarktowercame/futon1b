@@ -172,3 +172,11 @@ the heap problem.
 (:7093). The receipt said `old-pid=1395` (minus40) for a restart of 24011, so
 its PID-change check compared the wrong process. It now reads the unit's
 `MainPID`.
+
+## Completion criteria
+
+- H1: retained size of the plan cache and parse cache measured from the heap dump, with a table of retained MB by owner and per-plan average — check: a report under `/home/joe/notes/futon1b-heap/` or `/home/joe/code/futon1b/holes/` naming the method (Eclipse MAT or equivalent) **Not met.**
+- H2: the four IN-list call sites (futon1b_evidence rows-by-ids, futon1b_xt hydrate-by-ids, futon1b_graph, futon1b_text) collapse arities to a fixed set via one shared helper, with a unit test that padded queries return exactly the unpadded rows — check: the helper in `/home/joe/code/futon1b/futon1b_xt.clj` and its tests **Not met.**
+- After H2, a day of sampler data on Zone shows plan count well under 4096 with heap stable — check: `/home/joe/notes/futon1b-heap/samples.tsv` plans column **Not started.**
+- Heap disposition settled: either the 8g drop-in is deleted (heap back to 4g) or 8g is folded into deps.edn :server and the README memory table — check: `~/.config/systemd/user/futon1b-zone.service.d/heap.conf` absent or README updated **Not met.**
+- The boot catch-up fix holds under live appends — check: `catch-up-drains-under-live-appends` at `/home/joe/code/futon1b/test_evidence_tag_index.clj:179` passes **Met.**
