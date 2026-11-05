@@ -54,7 +54,7 @@
   (let [lim (clamp-limit limit)
         sidecar ((requiring-resolve 'futon1b-text/search)
                  node {:q (str text) :author author :since since
-                       :limit (max lim 24)})
+                       :limit (max lim 24) :scope :all})
         items (->> (:results sidecar)
                    (filter (fn [{:keys [entry]}]
                              (and (or (nil? type) (= type (:evidence/type entry)))

@@ -1553,7 +1553,8 @@
     (.createContext server "/api/alpha/evidence" (handler evidence-route))
     (.createContext server "/api/alpha/memory/assert" (handler memory-assert-route))
     ;; longer prefix wins (see NB above): text-search must out-rank /evidence
-    (.createContext server "/api/alpha/evidence/text-search" (handler text-search-route))
+    ;; By var, so a reload of this ns reaches the live route (see /scopes).
+    (.createContext server "/api/alpha/evidence/text-search" (handler #'text-search-route))
     (.createContext server "/api/alpha/entity" (handler entity-route))
     (.createContext server "/api/alpha/entities" (handler entities-route))
     (.createContext server "/api/alpha/entities/latest" (handler entities-latest-route))

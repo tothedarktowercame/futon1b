@@ -1177,7 +1177,9 @@
    index's."
   [node {:keys [limit hydrate] :as params}]
   (let [ds @!ds
-        scope (if (= :acts (:scope params)) :acts :all)
+        ;; Absent scope means acts, the same default as the HTTP route, so
+        ;; a caller that wants every family (memory search) says :all.
+        scope (if (= :all (:scope params)) :all :acts)
         params (assoc params :scope scope)
         k (or limit 10)
         hydrate? (not (false? hydrate))

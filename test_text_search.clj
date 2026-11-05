@@ -112,7 +112,7 @@
       (xt/execute-tx node (mapv (fn [doc] [:put-docs :evidence doc]) docs))
       (text/init! {:path (str dir "/fts5-evidence.db")})
       (text/catch-up! node)
-      (let [params {:q "common" :limit 6 :include-ephemeral false}
+      (let [params {:q "common" :limit 6 :include-ephemeral false :scope :all}
             hydrated (text/search node (assoc params :hydrate true))
             projected (text/search node (assoc params :hydrate false))
             hydrated-ids (mapv #(get-in % [:entry :evidence/id])
@@ -144,13 +144,13 @@
         (check! "df reports index-only per-term document frequencies"
                 (= {"common" 48 "missing" 0} df))
         (check! "df reports total indexed rows" (= 56 indexed)))
-      (let [first-page (text/search node {:q "common" :limit 3 :hydrate false})
+      (let [first-page (text/search node {:q "common" :limit 3 :hydrate false :scope :all})
             second-page (text/search node {:q "common" :limit 2 :offset 1
-                                           :hydrate false})]
+                                           :hydrate false :scope :all})]
         (check! "candidate offset preserves ranked-window pagination"
                 (= (subvec (mapv :evidence/id (:results first-page)) 1 3)
                    (mapv :evidence/id (:results second-page)))))
-      (let [params {:q "common" :limit 20}
+      (let [params {:q "common" :limit 20 :scope :all}
             _ (old-serial-search node params)
             _ (text/search node params)
             before (median-ms #(old-serial-search node params))
@@ -199,7 +199,14 @@
                          (= 5 (get-in acts [:body :scope-removed]))))
             (check! "all response names scope and removes nothing"
                     (and (= :all (get-in all [:body :scope]))
-                         (zero? (get-in all [:body :scope-removed])))))
+                         (zero? (get-in all [:body :scope-removed]))))
+            ;; The running server's route predates the scope parameter and
+            ;; calls search without one; that must still mean acts.
+            (check! "search with no :scope returns acts only"
+                    (= #{"scope-operator" "scope-assistant" "scope-commit"}
+                       (set (:ids (text/search node {:q "scopephrase" :limit 3})))))
+            (check! "memory search asks for every family"
+                    (re-find #":scope :all" (slurp "zai_memory_1b.clj"))))
           (let [{:keys [exit out err]}
                 (shell/sh "bb" "fts_oracle.clj"
                           (str "http://127.0.0.1:" port))]
