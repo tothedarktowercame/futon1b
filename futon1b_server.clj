@@ -1222,7 +1222,10 @@
                                        @!node opts fxt/timed-q))]
         ;; A current clock projection is one indexed SQLite window, not a
         ;; corpus read. Every fallback keeps today's admission path.
-        (if (graph/clock-projection-servable? opts)
+        ;; Fix C: a backfilled current doc projection is the same shape of
+        ;; read for any type, so it takes the same bypass.
+        (if (or (graph/clock-projection-servable? opts)
+                (graph/type-projection-servable? opts))
           (respond)
           (with-expensive-read! ex respond)))
       (respond! ex 400 (pr-str {:error "type or end parameter required"})))))

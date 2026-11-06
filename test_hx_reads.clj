@@ -42,9 +42,10 @@
   (graph/hyperedges-query node opts))
 
 (defn- comparable
-  "The scan-path shape: drop the index-only annotation before comparing."
+  "The scan-path shape: drop the index-only annotations (P3's :hx-index and,
+   since Fix C, the doc projection's :doc-projection) before comparing."
   [r]
-  (dissoc r :hx-index))
+  (dissoc r :hx-index :doc-projection))
 
 (defn -main [& _]
   (let [dir (temp-dir)
@@ -203,11 +204,13 @@
                               (hx-doc "hx:e1:01" :probe/edits ["E1" "SHARED"])]])
         (hx/catch-up! node))
 
-      ;; ---- P3: the type re-check and the body read share each read --------
-      ;; The type is read together with the body, so a type-only read whose
-      ;; candidates fit one page makes one XTDB call per candidate (`_id = ?`
-      ;; point reads, up to indexed-point-read-max ids) and no separate
-      ;; re-check pass, with or without `fields`.
+      ;; ---- Fix C: the type-only read no longer enters XTDB ------------------
+      ;; The doc projection backfilled on an earlier catch-up (see the dir3
+      ;; section at the end for the not-ready era), so the type-only read is
+      ;; now served wholly from the sidecar: ZERO XTDB calls, with or without
+      ;; `fields`. (The P3 re-check contract — one `_id = ?` point read per
+      ;; candidate, no separate body read — is asserted on a fresh sidecar
+      ;; at the end of this file, where the projection is not yet ready.)
       (doseq [fields [nil ["hx/endpoints"]]]
         (let [calls (atom 0)
               counting (fn [n q] (swap! calls inc) (futon1b-xt/safe-q n q))
@@ -215,9 +218,11 @@
               r (graph/hyperedges-query node (cond-> {:type "probe/edits" :limit 10}
                                                fields (assoc :fields fields))
                                         counting)]
-          (check! (str "P3: an indexed type-only read makes one XTDB read per candidate (fields "
+          (check! (str "Fix C: a type-only read makes ZERO XTDB calls (fields "
                        (pr-str fields) ")")
-                  (and (some? (:hx-index r)) (= 6 (count (:hyperedges r))) (= 6 @calls)))))
+                  (and (true? (get-in r [:doc-projection :served?]))
+                       (= 6 (count (:hyperedges r)))
+                       (zero? @calls)))))
 
       ;; hx:e1:00 carries {:note "p2b"}; the others have no props at all.
       (let [r (query node {:type "probe/edits" :limit 10 :fields ["hx/props"]})]
@@ -309,11 +314,22 @@
       (xt/execute-tx node [[:put-docs :hyperedges
                             (hx-doc "hx:e1:04" :probe/edits ["E1" "SHARED"])]])
       (hx/catch-up! node)
-      ;; type changed unhooked: re-listed under the OLD type, re-check drops it
+      ;; type changed unhooked: Fix C semantics. A production write always
+      ;; fires the on-put! hook (a failed hook flips reads-usable? off and
+      ;; the read falls back to the scan — asserted above); this direct
+      ;; xt/execute-tx bypasses it entirely, so the row stays listed under
+      ;; its OLD type until the next catch-up repairs it — the clock
+      ;; projection's contract ("exact only up to the checkpoint plus hook
+      ;; repairs"), now the type-only read's too. (The old P3 re-check
+      ;; dropped it immediately at the cost of a point read per candidate.)
       (xt/execute-tx node [[:put-docs :hyperedges
                             (hx-doc "hx:e1:04" :probe/moved ["E1"])]])
       (let [limited (query node {:type "probe/edits" :limit 10})]
-        (check! "P3: type-changed unhooked candidate dropped by the re-check"
+        (check! "Fix C: an unhooked type-change is served stale until the next catch-up (the projection's bounded staleness)"
+                (some #{"hx:e1:04"} (map :hx/id (:hyperedges limited)))))
+      (hx/catch-up! node)
+      (let [limited (query node {:type "probe/edits" :limit 10})]
+        (check! "Fix C: after catch-up the moved row is gone from the old type"
                 (not-any? #(= "hx:e1:04" %) (map :hx/id (:hyperedges limited)))))
       (xt/execute-tx node [[:put-docs :hyperedges
                             (hx-doc "hx:e1:04" :probe/edits ["E1" "SHARED"])]])
@@ -527,6 +543,85 @@
       ;; suffix char \f < \z — the full-endpoint prefix is the reliable
       ;; detector.)
 
+      ;; ---- Fix C: type-only paging from the current-doc projection --------
+      ;; The doc backfill has already run (an earlier section's catch-up!):
+      ;; assert readiness directly rather than re-deriving the transition —
+      ;; the not-ready era is covered on a fresh sidecar at the end.
+      (check! "Fix C: the doc projection is backfilled and ready"
+              (hx/doc-projection-ready?))
+
+      ;; zero-endpoint hyperedge: a member of the type the re-check path
+      ;; also sees (hx_node holds it, P3c) — the projection must include it.
+      (xt/execute-tx node [[:put-docs :hyperedges
+                            (hx-doc "hx:e0:zero" :probe/edits [])]])
+      (hx/catch-up! node)
+
+      (let [opts {:type "probe/edits" :limit 3}
+            projected (query node opts)
+            _ (reset! reads-enabled false)
+            scanned (query node opts)
+            _ (reset! reads-enabled true)]
+        (check! "Fix C: the projection served it (:doc-projection annotation)"
+                (true? (get-in projected [:doc-projection :served?])))
+        (check! "Fix C: same rows, same count, same cursor as the scan path"
+                (and (= (:hyperedges projected) (:hyperedges scanned))
+                     (= (:count projected) (:count scanned))
+                     (= (:next-cursor projected) (:next-cursor scanned))))
+        (check! "Fix C: the zero-endpoint hyperedge is included"
+                (some #{"hx:e0:zero"} (map :hx/id (:hyperedges projected)))))
+
+      ;; cursor continuity across the two paths
+      (let [cursor (:next-cursor (query node {:type "probe/edits" :limit 3}))]
+        (check! "Fix C: cursor minted on the scan path resumes on the projection"
+                (let [r (query node {:type "probe/edits" :limit 3 :after cursor})]
+                  (and (true? (get-in r [:doc-projection :served?]))
+                       (not (some #{cursor} (map :hx/id (:hyperedges r)))))))
+        (check! "Fix C: cursor minted on the projection resumes on the scan path"
+                (let [c2 (:next-cursor
+                          (query node {:type "probe/edits" :limit 3}))
+                      _ (reset! reads-enabled false)
+                      r (query node {:type "probe/edits" :limit 3 :after c2})
+                      _ (reset! reads-enabled true)]
+                  (and (not (some #{c2} (map :hx/id (:hyperedges r))))
+                       (= (count (:hyperedges r)) (:count r))))))
+
+      ;; BAD CASE (the defect the fix is named for): a type-only page whose
+      ;; every candidate is re-read from XTDB — 25.6 s live for limit 100.
+      ;; The projection path must answer with a query-fn that THROWS: if any
+      ;; code path entered XTDB the read would fail loudly.
+      (check! "Fix C: the served page never calls the XTDB query-fn"
+              (do (graph/invalidate-hyperedge-query-cache!)
+                  (let [res (graph/hyperedges-query
+                             node {:type "probe/edits" :limit 3}
+                             (fn [& _] (throw (ex-info "XTDB entered" {}))))]
+                    (and (= 3 (:count res))
+                         (true? (get-in res [:doc-projection :served?]))))))
+
+      ;; include-total from the projection's own type count
+      (let [r (query node {:type "probe/edits" :limit 2 :include-total? true})]
+        (check! "Fix C: include-total is the sidecar's hx_node count"
+                (and (= (hx/type-count :probe/edits) (:count r))
+                     (true? (:count-exact? r))
+                     (= 2 (count (:hyperedges r))))))
+
+      ;; deletion maintenance: a tombstone repaired by catch-up leaves the
+      ;; projection (the row is gone from hx_node entirely)
+      (xt/execute-tx node [[:delete-docs :hyperedges "hx:e0:zero"]])
+      (hx/catch-up! node)
+      (let [r (query node {:type "probe/edits" :limit 10})]
+        (check! "Fix C: a deleted hyperedge is no longer served"
+                (not (some #{"hx:e0:zero"} (map :hx/id (:hyperedges r))))))
+
+      ;; hook-failure fallback: the projection gates on reads-usable? like
+      ;; every indexed read
+      (let [before (:hook-failures @stats-var)]
+        (swap! stats-var update :hook-failures inc)
+        (check! "Fix C: a hook failure falls back to the scan (no annotation)"
+                (not (contains? (query node {:type "probe/edits" :limit 2})
+                                :hx-index)))
+        (swap! stats-var assoc :hook-failures before)
+        (hx/catch-up! node))
+
       ;; ---- unusable index ----------------------------------------------------
       ;; (a) a hook failure since the last catch-up: a fresh hyperedge could
       ;; be missing from the candidates in a way the re-check cannot see.
@@ -559,7 +654,41 @@
                 (let [r (graph/census node {:type "probe/edits"})]
                   (and (not (hx/node-index-ready?))
                        (not (contains? r :hx-index))
-                       (= 8 (:count r)))))))
+                       (= 8 (:count r))))))
+
+      ;; (c) Fix C transition, on a fresh sidecar: the FIRST catch-up fills
+      ;; the index (no doc projection yet — the type-only read takes the P3
+      ;; re-check path, one `_id = ?` point read per candidate); the SECOND
+      ;; backfills the doc projection, and the same read makes ZERO XTDB
+      ;; calls.
+      (let [dir3 (temp-dir)]
+        (text/init! {:path (str dir3 "/fts5-evidence.db")})
+        (hx/init!)
+        (hx/catch-up! node)
+        (check! "Fix C: after the first catch-up the doc projection is not ready"
+                (not (hx/doc-projection-ready?)))
+        (let [calls (atom 0)
+              counting (fn [n q] (swap! calls inc) (futon1b-xt/safe-q n q))
+              _ (graph/invalidate-hyperedge-query-cache!)
+              r (graph/hyperedges-query node {:type "probe/edits" :limit 10}
+                                        counting)]
+          (check! "Fix C: not ready: the P3 re-check path serves (one XTDB read per candidate)"
+                  (and (some? (:hx-index r))
+                       (not (contains? r :doc-projection))
+                       (= 8 (count (:hyperedges r)))
+                       (= 8 @calls))))
+        (hx/catch-up! node)
+        (check! "Fix C: after the second catch-up the doc projection is ready"
+                (hx/doc-projection-ready?))
+        (let [calls (atom 0)
+              counting (fn [n q] (swap! calls inc) (futon1b-xt/safe-q n q))
+              _ (graph/invalidate-hyperedge-query-cache!)
+              r (graph/hyperedges-query node {:type "probe/edits" :limit 10}
+                                        counting)]
+          (check! "Fix C: ready: the same read makes ZERO XTDB calls"
+                  (and (true? (get-in r [:doc-projection :served?]))
+                       (= 8 (count (:hyperedges r)))
+                       (zero? @calls))))))
 
     (println "HX READS: ALL PASS"))
   (shutdown-agents))

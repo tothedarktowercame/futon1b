@@ -192,6 +192,14 @@
    (when-not ds
      (throw (ex-info "hxindex: no sidecar datasource (text/init! first)" {})))
    (doseq [stmt ddl] (jdbc/execute! ds [stmt]))
+   ;; Fix C (M-ways-of-working finding 3, Joe 2026-11-06 "OK to C"): the
+   ;; current-doc projection column. SQLite has no ADD COLUMN IF NOT EXISTS,
+   ;; so check the pragma and alter once. Existing rows keep doc_edn NULL
+   ;; until backfill-hx-docs! runs; doc-projection-ready? gates reads on its
+   ;; completion marker, so the NULL period is never served.
+   (when-not (some (comp #{"doc_edn"} :name)
+                   (jdbc/execute! ds ["PRAGMA table_info(hx_node)"]))
+     (jdbc/execute! ds ["ALTER TABLE hx_node ADD COLUMN doc_edn TEXT"]))
    {:ok true}))
 
 ;; ---------------------------------------------------------------------------
@@ -212,9 +220,10 @@
       (doseq [[pos end] (map-indexed vector endpoints)]
         (jdbc/execute! tx ["INSERT INTO hx_edge(hx_id, type, pos, endpoint)
                             VALUES (?,?,?,?)" id t pos (str end)]))
-      (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type) VALUES (?,?)
-                          ON CONFLICT(hx_id) DO UPDATE SET type=excluded.type"
-                         id t])
+      (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type, doc_edn) VALUES (?,?,?)
+                          ON CONFLICT(hx_id) DO UPDATE
+                          SET type=excluded.type, doc_edn=excluded.doc_edn"
+                         id t (pr-str (dissoc doc :xt/id))])
       (upsert-clock! tx id doc)))
   (count (:hx/endpoints doc)))
 
@@ -229,9 +238,10 @@
         (doseq [[pos end] (map-indexed vector (:hx/endpoints doc))]
           (jdbc/execute! tx ["INSERT INTO hx_edge(hx_id, type, pos, endpoint)
                               VALUES (?,?,?,?)" id t pos (str end)]))
-        (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type) VALUES (?,?)
-                            ON CONFLICT(hx_id) DO UPDATE SET type=excluded.type"
-                           id t])
+        (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type, doc_edn) VALUES (?,?,?)
+                            ON CONFLICT(hx_id) DO UPDATE
+                            SET type=excluded.type, doc_edn=excluded.doc_edn"
+                           id t (pr-str (dissoc doc :xt/id))])
         (upsert-clock! tx id doc))))
   (count docs))
 
@@ -320,22 +330,21 @@
    version (from the _system_from leg) re-upserts, a tombstone deletes."
   [ds node ids]
   (let [ids (vec (distinct ids))
-        ;; the two columns the index needs, not SELECT * (hydrate-by-ids):
-        ;; 2.5 s against 4.8 s for 200 live ids (claude-12, 2026-09-26)
+        ;; Fix C: SELECT * (full current rows), not the old narrow projection
+        ;; - the hx_node doc_edn projection must be refreshed whenever the
+        ;; current version changed, so a repaired id's stored doc can never
+        ;; be older than its stored type. The narrow read was measured
+        ;; cheaper (2.5 s vs 4.8 s for 200 live ids, claude-12 2026-09-26);
+        ;; correctness of the served projection buys that back on the repair
+        ;; path only.
         present (into {}
                       (comp (mapcat (fn [chunk]
                                       (fxt/timed-q
                                        node
-                                       (into [(str "SELECT _id, hx$type AS t, hx$endpoints AS ends,
-                                                    hx$ends AS clock_ends, hx$props AS props
-                                                    FROM hyperedges WHERE _id IN ("
-                                                   (str/join "," (repeat (count chunk) "?")) ")")]
+                                       (into [(str "SELECT * FROM hyperedges WHERE _id IN ("
+                                              (str/join "," (repeat (count chunk) "?")) ")")]
                                              chunk))))
-                            (map (fn [r] [(str (row-id r))
-                                          {:hx/type (or (:t r) (:hx/type r))
-                                           :hx/endpoints (or (:ends r) (:hx/endpoints r))
-                                           :hx/ends (or (:clock_ends r) (:hx/ends r))
-                                           :hx/props (or (:props r) (:hx/props r))}])))
+                            (map (fn [r] [(str (:xt/id r)) r])))
                       (partition-all 500 ids))]
     (with-write-tx [tx ds]
       (doseq [id ids]
@@ -345,9 +354,11 @@
                 (jdbc/execute! tx ["INSERT INTO hx_edge(hx_id, type, pos, endpoint)
                                     VALUES (?,?,?,?)"
                                    id (str (:hx/type doc)) pos (str end)]))
-              (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type) VALUES (?,?)
-                                  ON CONFLICT(hx_id) DO UPDATE SET type=excluded.type"
-                                 id (str (:hx/type doc))])
+              (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type, doc_edn) VALUES (?,?,?)
+                                  ON CONFLICT(hx_id) DO UPDATE
+                                  SET type=excluded.type, doc_edn=excluded.doc_edn"
+                                 id (str (:hx/type doc))
+                                 (pr-str (dissoc doc :xt/id))])
               (upsert-clock! tx id (assoc doc :xt/id id)))
           (do (jdbc/execute! tx ["DELETE FROM hx_edge WHERE hx_id = ?" id])
               (jdbc/execute! tx ["DELETE FROM hx_node WHERE hx_id = ?" id])
@@ -505,6 +516,69 @@
 (defn clock-projection-ready? []
   (boolean (when-let [ds (ds*)] (meta-get ds "hx-clock-backfill"))))
 
+(defn backfill-hx-docs!
+  "Fix C (M-ways-of-working finding 3, Joe 2026-11-06 \"OK to C\"): populate
+   hx_node.doc_edn, the current-valid DOCUMENT projection, so the walk's
+   type-only paging shape can be served wholly from the sidecar exactly as
+   the clock projection is - no XTDB round-trip, where the P3 re-check path
+   paid 25-37 ms per candidate id (measured 2026-10-29; 25.6 s for a live
+   100-row page of mission-scope/pattern on 2026-11-06). Pages the store's
+   CURRENT rows in full; a write that lands after its page passed is
+   maintained by the on-put! hook and by the next catch-up's repair-ids!
+   (which reads full rows). Idempotent; the completion marker gates reads
+   so an interrupted backfill is never served. Only run when a checkpoint
+   exists (an empty index is filled first, then backfilled on the next
+   catch-up)."
+  [ds node & {:keys [page] :or {page 2000}}]
+  (let [started (System/currentTimeMillis)
+        n (loop [after "" n 0]
+            (let [rows (fxt/timed-q
+                        node
+                        ["SELECT * FROM hyperedges WHERE _id > ? ORDER BY _id LIMIT ?"
+                         (str after) (long page)])]
+              (if (empty? rows)
+                n
+                (do (with-write-tx [tx ds]
+                      (doseq [r rows
+                              :let [id (str (:xt/id r))]]
+                        (jdbc/execute! tx
+                                       ["INSERT INTO hx_node(hx_id, type, doc_edn) VALUES (?,?,?)
+                                         ON CONFLICT(hx_id) DO UPDATE
+                                         SET type=excluded.type, doc_edn=excluded.doc_edn"
+                                        id (str (:hx/type r))
+                                        (pr-str (dissoc r :xt/id))])))
+                  (recur (str (:xt/id (last rows))) (+ n (count rows)))))))]
+    (meta-set! ds "hx-doc-backfill" (str (Instant/now)))
+    {:doc-rows n :elapsed-ms (- (System/currentTimeMillis) started)}))
+
+(defn doc-projection-ready?
+  "Fix C gate: hx_node.doc_edn has been backfilled. False (the type-only
+   read stays on the P3 re-check path) on a sidecar written before the
+   column existed, until the first catch-up! after the reload backfills it."
+  []
+  (boolean (when-let [ds (ds*)] (meta-get ds "hx-doc-backfill"))))
+
+(defn type-docs
+  "Fix C: current-valid documents of TYPE (stored as `(str keyword)`, colon
+   included), keyset-paged on hx_id > AFTER (empty pages from the start), at
+   most LIMIT, straight from the hx_node doc projection - no XTDB read.
+   Ordering is the type branch's (xt/id ascending, TEXT comparison, the
+   same lexicographic order the store's order-by applies). Exact only up to
+   the checkpoint plus hook repairs, like every projection read; rows whose
+   doc_edn is still NULL (a sidecar mid-migration) are skipped - but the
+   readiness marker means they are never served in practice. Zero-endpoint
+   hyperedges included (hx_node holds one row per hyperedge, P3c)."
+  [{:keys [type after limit]}]
+  (when-let [ds (ds*)]
+    (->> (jdbc/execute! ds
+                        ["SELECT hx_id, doc_edn FROM hx_node
+                          WHERE type = ? AND hx_id > ? AND doc_edn IS NOT NULL
+                          ORDER BY hx_id LIMIT ?"
+                         (str type) (str (or after "")) (long limit)]
+                        unqualified)
+         (mapv (fn [{:keys [hx_id doc_edn]}]
+                 (assoc (edn/read-string doc_edn) :xt/id hx_id))))))
+
 (defn clock-window
   "Current-valid clock documents from the materialized projection."
   [{:keys [after limit]}]
@@ -547,6 +621,11 @@
                             (backfill-hx-node! ds node))
             clock-backfill (when (nil? (meta-get ds "hx-clock-backfill"))
                              (backfill-clock! ds node))
+            ;; Fix C: only after a checkpoint exists — an empty index fills
+            ;; first and backfills its doc projection on the NEXT catch-up.
+            doc-backfill (when (and (nil? (meta-get ds "hx-doc-backfill"))
+                                    (meta-get ds "checkpoint-ts"))
+                           (backfill-hx-docs! ds node))
             tx-id (latest-tx-id node)
             prior-tx (some-> (meta-get ds "last-tx-id") Long/parseLong)]
         (cond
@@ -556,7 +635,8 @@
               (meta-set! ds "hx-clock-backfill" (str (Instant/now))))
             (cond-> {:skipped :no-new-tx :tx-id tx-id}
               node-backfill (assoc :hx-node-backfill node-backfill)
-              clock-backfill (assoc :hx-clock-backfill clock-backfill)))
+              clock-backfill (assoc :hx-clock-backfill clock-backfill)
+              doc-backfill (assoc :hx-doc-backfill doc-backfill)))
 
           (nil? (meta-get ds "checkpoint-ts"))
           (let [n (fill! ds node tx-id fill-page)
@@ -568,7 +648,8 @@
                    {:at (str (Instant/now)) :elapsed-ms elapsed :changed n :fill true})
             (cond-> {:filled n :elapsed-ms elapsed :tx-id tx-id}
               node-backfill (assoc :hx-node-backfill node-backfill)
-              clock-backfill (assoc :hx-clock-backfill clock-backfill)))
+              clock-backfill (assoc :hx-clock-backfill clock-backfill)
+              doc-backfill (assoc :hx-doc-backfill doc-backfill)))
 
           :else
           (let [checkpoint [(or (meta-get ds "checkpoint-ts") (str epoch))
@@ -611,7 +692,8 @@
                                :upsert-leg upserted :tombstone-leg deleted
                                :elapsed-ms elapsed :tx-id tx-id}
                         node-backfill (assoc :hx-node-backfill node-backfill)
-                        clock-backfill (assoc :hx-clock-backfill clock-backfill))]
+                        clock-backfill (assoc :hx-clock-backfill clock-backfill)
+                        doc-backfill (assoc :hx-doc-backfill doc-backfill))]
               (swap! !stats assoc :last-catch-up
                      {:at (str (Instant/now)) :elapsed-ms elapsed
                       :changed (:changed res)})
@@ -629,7 +711,7 @@
       (jdbc/execute! tx ["DELETE FROM hx_edge"])
       (jdbc/execute! tx ["DELETE FROM hx_node"])
       (jdbc/execute! tx ["DELETE FROM hx_clock"])
-      (jdbc/execute! tx ["DELETE FROM hx_meta WHERE k IN ('checkpoint-ts','checkpoint-id','last-tx-id','hx-node-backfill','hx-clock-backfill')"]))
+      (jdbc/execute! tx ["DELETE FROM hx_meta WHERE k IN ('checkpoint-ts','checkpoint-id','last-tx-id','hx-node-backfill','hx-clock-backfill','hx-doc-backfill')"]))
     (assoc (catch-up! node :page page :force true)
            :total-elapsed-ms (- (System/currentTimeMillis) started))))
 

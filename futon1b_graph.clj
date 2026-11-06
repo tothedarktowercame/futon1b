@@ -1388,6 +1388,51 @@
        (hx/reads-usable?)
        (hx/clock-projection-ready?)))
 
+(defn- hyperedges-type-doc-projection
+  "Fix C (M-ways-of-working finding 3, Joe 2026-11-06 \"OK to C\"): serve the
+   walk's type-only paging shape (`type` + `limit`/`after`/`include-total`/
+   `fields`) wholly from the SQLite sidecar's current-doc projection - no
+   XTDB round-trip. The P3 re-check path it replaces pays one point read
+   per candidate id (25-37 ms each measured 2026-10-29; 25.6 s for a live
+   100-row page of mission-scope/pattern on 2026-11-06) purely to drop rows
+   the sidecar already knows are current. Ordering, keyset cursor,
+   next-cursor and include-total (hx/type-count) semantics are the type
+   branch's, so a cursor minted by either path resumes correctly on the
+   other. Exact only up to the checkpoint plus hook repairs; :hx-index
+   annotates the source like every indexed read, :doc-projection marks that
+   XTDB was never entered."
+  [{:keys [t n after include-total? fields]}]
+  (let [docs (hx/type-docs {:type t :after after :limit n})
+        ids (mapv :xt/id docs)
+        out (mapv #(if (seq fields)
+                     (project-hyperedge-fields % fields)
+                     (dissoc % :xt/id))
+                  docs)
+        next-cursor (when (= n (count ids)) (peek ids))]
+    (cond-> {:hyperedges out
+             :count (if include-total? (hx/type-count t) (count out))
+             :count-exact? (boolean include-total?)
+             :hx-index {:checkpoint (hx/checkpoint)
+                        :hook-failures (:hook-failures @hx/!stats)}
+             :doc-projection {:served? true}}
+      next-cursor (assoc :next-cursor next-cursor))))
+
+(defn type-projection-servable?
+  "Fix C: True when OPTS (a bounded type-only read - no end/end-prefix,
+   filters, latest or as-of) can be answered wholly from the current doc
+   projection, without entering XTDB. The HTTP route uses this to bypass
+   expensive-read admission, exactly as the clock projection. Keep the
+   conditions identical to the projection branch in hyperedges-query-uncached."
+  [{:keys [type end end-prefix limit latest? repo source-file mission
+           valid-as-of system-as-of]}]
+  (and (some? type)
+       (not (or end end-prefix latest? repo source-file mission
+                valid-as-of system-as-of))
+       (int? limit) (pos? limit)
+       (hx/reads-usable?)
+       (hx/node-index-ready?)
+       (hx/doc-projection-ready?)))
+
 (defn- hyperedges-indexed-type-end-prefix
   "P3d (DESIGN-hyperedge-scope-sidecar-2026-09-26 §7 item 3, Q3): serve a
   type + endpoint-PREFIX read from the SQLite sidecar. There is NO scan
@@ -1532,6 +1577,17 @@
         (clock-projection-servable? opts)
         (hyperedges-clock-projection
          {:n (long limit) :after after :fields fields})
+
+        ;; Fix C: the walk's type-only paging shape, served wholly from the
+        ;; current doc projection when it is backfilled — no XTDB round-trip
+        ;; (see hyperedges-type-doc-projection). Falls through to the P3
+        ;; re-check path when the projection is not ready, and to the scan
+        ;; path when the sidecar is unusable, so every guard below keeps its
+        ;; existing meaning.
+        (type-projection-servable? opts)
+        (hyperedges-type-doc-projection
+         {:t t :n (long limit) :after after
+          :include-total? include-total? :fields fields})
 
         (and limited?
                (not (or repo source-file mission))
