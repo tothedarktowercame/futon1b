@@ -37,6 +37,57 @@
       [500 {:error {:reason :exception :message (.getMessage e)}}])))
 
 ;; ---------------------------------------------------------------------------
+;; Reserved arxana/* namespace (M-jvm-arxana, D7-DR4 / O-D7f).
+;;
+;; The arxana/* type and property namespace is reserved at the store boundary:
+;; generic write routes refuse to create or mutate arxana-typed records or
+;; arxana/* properties. The ONLY write path for them is the authenticated
+;; conditional command route (futon1b-arxana), which commits
+;; revision/head/outcome/journal atomically. An Arxana-side validation
+;; followed by an open generic write would state the invariant without
+;; enforcing it; refusing here is the enforcement.
+;; ---------------------------------------------------------------------------
+
+(defn arxana-namespaced?
+  "True when X is a keyword or \":…\" string whose namespace is `arxana`
+  (e.g. :arxana/artifact-revision). Plain strings without a leading colon are
+  treated as keyword names (the routes keywordize types)."
+  [x]
+  (let [k (cond (keyword? x) x
+                (string? x) (keyword (str/replace x #"^:" ""))
+                :else nil)]
+    (and k (= "arxana" (namespace k)))))
+
+(defn arxana-id?
+  "True when ID is a string in the arxana identity space (`arxana:…`, or the
+  stable hyperedge id form `hx:arxana/…`). Generic retract/refetch gates use
+  this to refuse arxana-owned documents."
+  [id]
+  (and (string? id)
+       (or (str/starts-with? id "arxana:")
+           (str/starts-with? id "hx:arxana/"))))
+
+(defn reject-reserved-arxana!
+  "L3 refusal for any generic-route write touching the reserved namespace.
+  L3 (403), not L4: the shape may be valid, but this route is forbidden for
+  arxana/* records (protocol category :forbidden)."
+  [context]
+  (throw (layered-error 3 :reserved-arxana-namespace
+                        (assoc context
+                               :message "arxana/* records are reserved; use the authenticated conditional command route"))))
+
+(defn gate-reserved-namespace!
+  "Refuse when :type or any :props key of the payload lives in the reserved
+  arxana/* namespace. CONTEXT names the route/site for the error envelope."
+  [context {:keys [type props]}]
+  (when (arxana-namespaced? type)
+    (reject-reserved-arxana! (assoc context :type type)))
+  (when (map? props)
+    (doseq [k (keys props)]
+      (when (arxana-namespaced? k)
+        (reject-reserved-arxana! (assoc context :prop k))))))
+
+;; ---------------------------------------------------------------------------
 ;; L3 — penholder.
 ;; ---------------------------------------------------------------------------
 

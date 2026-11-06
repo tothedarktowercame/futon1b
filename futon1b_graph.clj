@@ -467,6 +467,11 @@
                                    4 :invalid-document-retraction
                                    {:allowed-tables retractable-tables
                                     :document {:table table :id id}})))
+                         ;; M-jvm-arxana D7-DR4: arxana-owned documents are
+                         ;; immutable through generic routes; no retraction.
+                         (when (gates/arxana-id? id)
+                           (gates/reject-reserved-arxana!
+                            {:site :documents-retract :table table :id id}))
                          {:table table :id id})))
                distinct
                vec)
@@ -571,6 +576,10 @@
        (throw (gates/layered-error 4 :missing-required
                                    {:required [:name :type]
                                     :got (select-keys payload [:name :type])})))
+     ;; M-jvm-arxana D7-DR4: arxana/* is reserved; only the authenticated
+     ;; conditional command route may create or mutate it.
+     (gates/gate-reserved-namespace! {:site :entity-write}
+                                     {:type type :props (:props payload)})
      (let [id (ensure-entity-id node {:id (:id payload) :name' name' :type type}
                                 batch-candidates)
            doc (cond-> {:xt/id id :entity/id id :entity/name name' :entity/type type}
@@ -854,6 +863,8 @@
     (when (or (nil? type) (nil? src) (nil? dst))
       (throw (gates/layered-error 4 :missing-required
                                   {:required [:type :src :dst]})))
+    ;; M-jvm-arxana D7-DR4: reserved namespace refusal on generic routes.
+    (gates/gate-reserved-namespace! {:site :relation-write} {:type type})
     (let [prov (or (:provenance payload)
                    (when (map? (:props payload))
                      {:note (:label (:props payload)) :props (:props payload)}))
@@ -899,6 +910,9 @@
                (throw (gates/layered-error 4 :missing-required
                                            {:required [:type :src :dst]
                                             :got (select-keys r [:type :src :dst])})))
+             ;; M-jvm-arxana D7-DR4: reserved namespace refusal (batch too).
+             (gates/gate-reserved-namespace! {:site :relations-batch-write}
+                                             {:type (:type r)})
              (let [type (normalize-type (:type r))
                    prov (or (:provenance r)
                             (when (map? (:props r))

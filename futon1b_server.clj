@@ -1651,6 +1651,8 @@
     ;; Registered by var so a later namespace reload reaches the route.
     (.createContext server "/api/alpha/derived" (handler #'derived-route))
     (.createContext server "/api/alpha/memory/assert" (handler memory-assert-route))
+    ;; M-jvm-arxana increment 2: authenticated conditional command route.
+    (.createContext server "/api/alpha/arxana/command" (handler #'arxana-command-route))
     ;; longer prefix wins (see NB above): text-search must out-rank /evidence
     ;; By var, so a reload of this ns reaches the live route (see /scopes).
     (.createContext server "/api/alpha/evidence/text-search" (handler #'text-search-route))
