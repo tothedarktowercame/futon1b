@@ -52,6 +52,7 @@
             [futon1b-sidecars :as sidecars]
             [futon1b-write-log :as write-log]
             [futon1b-request-executor :as request-executor]
+            [futon1b-arxana :as arxana]
             [xtdb.api :as xt])
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
            [java.net InetSocketAddress URLDecoder]
@@ -114,6 +115,12 @@
                   (stable-hyperedge-id hx-type endpoints))
         labels (some->> (or (:hx/labels payload) (:labels payload))
                         (mapv normalize-type))]
+    ;; M-jvm-arxana D7-DR4: the reserved arxana/* namespace is refused on
+    ;; every generic write path; this builder is the single choke point for
+    ;; hyperedge puts (single, batch and minted-act all build through it).
+    (gates/gate-reserved-namespace! {:site :hyperedge-write}
+                                    {:type hx-type
+                                     :props (or (:hx/props payload) (:props payload))})
     (cond-> {:xt/id hx-id
              :hx/id hx-id
              :hx/type hx-type
@@ -515,6 +522,15 @@
 
 (def ^:dynamic *json-response?* false)
 
+;; Request journal volume (Joe 2026-11-06: "demote to debug and we can see if
+;; that improves things"): the start line fires twice per request (~170k
+;; journal lines/day) and its unique content — admission state — is debug
+;; noise; the end lines carry elapsed/outcome and stay. Re-enable with
+;; (binding [*request-start-log?* true] …) or by starting the service with
+;; -Dfuton1b.request.start.log=true.
+(def ^:dynamic *request-start-log?*
+  (Boolean/parseBoolean (System/getProperty "futon1b.request.start.log" "false")))
+
 (defn- json-safe-response-value [value]
   (walk/postwalk (fn [x]
                    (if (instance? TemporalAccessor x) (str x) x))
@@ -597,9 +613,10 @@
                          (some-> (request-executor/task-observation)
                                  :request-task/id (->> (str "http-task:")))
                          "-")]
-        (println (format "[futon1b-request] start method=%s uri=%s trace-id=%s admission=%s"
-                         method uri trace-id (pr-str (request-executor/task-observation))))
-        (flush)
+        (when *request-start-log?*
+          (println (format "[futon1b-request] start method=%s uri=%s trace-id=%s admission=%s"
+                           method uri trace-id (pr-str (request-executor/task-observation))))
+          (flush))
         (binding [*json-response?* (wants-json? ex)]
           (try
             (route-fn ex)
@@ -1011,6 +1028,21 @@
           [status body] (write-memory-assert! @!node payload)]
       (respond! ex status body))
     (respond! ex 405 {:ok false :error "POST only"})))
+
+(defn- arxana-command-route
+  "POST /api/alpha/arxana/command — M-jvm-arxana increment 2: the ONLY write
+  path for arxana/* records. Authenticated service principal
+  (x-arxana-principal), expected-head assertion, atomic
+  revision/head/outcome/journal transaction, idempotency by message id
+  (futon1b-arxana; D3 write contract, V3 S1 semantics)."
+  [^HttpExchange ex]
+  (if (= "POST" (.getRequestMethod ex))
+    (let [payload (parse-payload ex)
+          principal (.getFirst (.getRequestHeaders ex) "x-arxana-principal")
+          _ (arxana/authenticate! principal)
+          res (arxana/conditional-command! @!node payload)]
+      (respond! ex 200 res))
+    (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
 
 (defn- entity-route [^HttpExchange ex]
   (let [method (.getRequestMethod ex)
