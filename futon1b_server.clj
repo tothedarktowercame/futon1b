@@ -776,6 +776,7 @@
                          (- now (apply min (map :started-at holders)))
                          0)
      :stats @!expensive-read-stats
+     :evidence-contracts (ev/contract-audit-snapshot)
      :alias-warrants (graph/alias-warrant-snapshot)
      ;; One line per declared derived index (futon1b-sidecars): a sidecar that
      ;; has silently stopped serving shows here, not only as slowness.

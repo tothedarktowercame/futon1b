@@ -47,6 +47,85 @@
     (= "promise" (namespace etype)) :hyperedge/promise-history
     :else nil))
 
+;; Audit-first admission contracts.  A contract becomes fail-closed by changing
+;; only its :mode to :enforce after its owner has reviewed the live audit.  Keep
+;; the registry at the store boundary: producer-local schemas cannot prevent a
+;; new or forgotten producer from polluting evidence.
+(def evidence-contracts
+  {[:coordination :step]        {:owner :agency :mode :audit}
+   [:coordination :observation] {:owner :agency :mode :audit}
+   [:coordination :question]    {:owner :agency :mode :audit}
+   [:coordination :goal]        {:owner :agency :mode :audit}
+   [:memory :assert]            {:owner :apm-memory :mode :audit}
+   [:memory :observation]       {:owner :apm-memory :mode :audit}
+   [:reflection :observation]   {:owner :apm-memory :mode :audit}
+   [:pattern-outcome :observation] {:owner :apm-memory :mode :audit}})
+
+(def ^:private default-contract-envelope
+  ;; The largest indexed body in the measured 24-hour corpus was 58,310 bytes;
+  ;; p99 was 9,146.  These bounds therefore observe anomalies without rejecting
+  ;; today's traffic while contracts remain in :audit.
+  {:max-body-bytes 65536
+   :max-per-author-hour 500})
+
+(defonce ^:private !contract-audit
+  (atom {:writes 0 :registered 0 :unregistered 0 :violations 0
+         :hours {} :recent []}))
+
+(defn- utf8-size [x]
+  (alength (.getBytes (pr-str x) java.nio.charset.StandardCharsets/UTF_8)))
+
+(defn- hour-bucket []
+  (.toString (.truncatedTo (java.time.Instant/now) java.time.temporal.ChronoUnit/HOURS)))
+
+(defn evidence-contract-assessment
+  "Pure contract assessment for DOC and the author's count in this UTC hour."
+  [doc author-hour-count]
+  (let [k [(:evidence/type doc) (:evidence/claim-type doc)]
+        contract (get evidence-contracts k)
+        envelope (merge default-contract-envelope contract)
+        body-bytes (utf8-size (:evidence/body doc))
+        violations (cond-> []
+                     (nil? contract) (conj :unregistered-contract)
+                     (> body-bytes (:max-body-bytes envelope)) (conj :body-too-large)
+                     (> author-hour-count (:max-per-author-hour envelope))
+                     (conj :author-hour-rate-exceeded))]
+    {:contract k :owner (:owner contract) :mode (or (:mode contract) :audit)
+     :body-bytes body-bytes :author-hour-count author-hour-count
+     :envelope (select-keys envelope [:max-body-bytes :max-per-author-hour])
+     :violations violations}))
+
+(defn- record-contract-audit! [doc]
+  (let [k [(:evidence/type doc) (:evidence/claim-type doc)]
+        bucket (hour-bucket)
+        hk [bucket (:evidence/author doc) k]
+        new-state (swap! !contract-audit
+                         (fn [s]
+                           (let [current-hours (into {}
+                                                     (filter (fn [[[b _ _] _]]
+                                                               (= bucket b)))
+                                                     (:hours s))
+                                 n (inc (get current-hours hk 0))
+                                 assessment (evidence-contract-assessment doc n)
+                                 event (assoc assessment :evidence/id (:evidence/id doc))]
+                             (-> s
+                                 (update :writes inc)
+                                 (update (if (contains? evidence-contracts k)
+                                           :registered :unregistered) inc)
+                                 (update :violations + (count (:violations assessment)))
+                                 ;; Retain only the current hour plus a small,
+                                 ;; operator-readable diagnostic ring.
+                                 (assoc :hours (assoc current-hours hk n))
+                                 (update :recent #(vec (take-last 64 (conj % event))))))))]
+    (peek (:recent new-state))))
+
+(defn contract-audit-snapshot
+  "Cheap, bounded evidence-admission audit for /health."
+  []
+  (assoc (dissoc @!contract-audit :hours)
+         :contracts (count evidence-contracts)
+         :policy :audit-first))
+
 (defn build-evidence-doc
   "Validate + default the evidence payload. Returns {:doc m} or
   {:invalid <plain-400-body>} (the three required-field 400s are plain
@@ -242,6 +321,16 @@
     (cond
       invalid {:status (or invalid-status 400) :body invalid}
 
+      :else
+      (let [assessment (record-contract-audit! prepared-doc)]
+        (if (and (= :enforce (:mode assessment)) (seq (:violations assessment)))
+          {:status 422
+           :doc prepared-doc
+           :body {:error/code :evidence-contract-violation
+                  :error "Evidence admission contract refused the write"
+                  :assessment assessment}}
+
+      (cond
       (and (:evidence/in-reply-to doc)
            (not (evidence-exists? node (:evidence/in-reply-to doc))))
       {:status 409
@@ -263,7 +352,7 @@
        :doc prepared-doc
        :body {:error "duplicate evidence id" :evidence/id (:xt/id doc)}}
 
-      :else {:doc prepared-doc})))
+      :else {:doc prepared-doc}))))))
 
 (defn rescue-evidence-doc!
   "Apply the evidence writer's existing rescue ladder to a prepared doc."

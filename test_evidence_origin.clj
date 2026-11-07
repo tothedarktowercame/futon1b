@@ -33,6 +33,20 @@
   ;; This first defence is intentionally narrow: legitimate evidence types
   ;; continue through the existing contract while the full registry is built.
   (is (nil? (:invalid (evidence/build-evidence-doc entry)))))
+
+(deftest evidence-contract-audit-classifies-shapes-and-envelopes
+  (let [registered (:doc (evidence/build-evidence-doc entry))
+        unknown (:doc (evidence/build-evidence-doc
+                       (assoc entry :type :novel/unowned)))
+        known-audit (evidence/evidence-contract-assessment registered 1)
+        unknown-audit (evidence/evidence-contract-assessment unknown 1)
+        rate-audit (evidence/evidence-contract-assessment registered 501)]
+    (is (= :audit (:mode known-audit)))
+    (is (empty? (:violations known-audit)))
+    (is (= [:unregistered-contract] (:violations unknown-audit)))
+    (is (= [:author-hour-rate-exceeded] (:violations rate-audit)))
+    (is (= {:max-body-bytes 65536 :max-per-author-hour 500}
+           (:envelope known-audit)))))
 (deftest ^:slow roundtrip
   (with-open [node (xtn/start-node)]
     (is (= 201 (first (evidence/write-evidence! node entry))))
