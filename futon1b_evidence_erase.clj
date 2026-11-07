@@ -169,15 +169,18 @@
 
 (defn- remaining-history
   "Ids among IDS with any row left in evidence, across all system time and
-  all valid time, by one statement. Per id this was two queries at ~0.55 s
-  each live (2026-11-05), 9 min for a 500-id batch; `_id IN` is one scan."
+  all valid time. This deliberately uses indexed equality queries: the former
+  `_id IN` scan allocated a ~38 MB Arrow buffer for every erase batch and hit
+  the serving JVM's direct-memory ceiling during the reviewed cleanup."
   [node ids]
-  (set (map (comp str :xt/id)
-            (fxt/timed-q node (into [(str "SELECT _id FROM evidence"
+  (into #{}
+        (mapcat (fn [id]
+                  (map (comp str :xt/id)
+                       (fxt/timed-q node
+                                    [(str "SELECT _id FROM evidence"
                                           " FOR ALL SYSTEM_TIME FOR ALL VALID_TIME"
-                                          " WHERE _id IN ("
-                                          (str/join "," (repeat (count ids) "?")) ")")]
-                                    ids)))))
+                                          " WHERE _id = ?") id]))))
+        ids))
 
 (defn- verify-store-erased! [node ids]
   (let [remaining (remaining-history node ids)]
