@@ -4,6 +4,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [futon1b-derived :as derived]
+            [futon1b-evidence :as evidence]
             [futon1b-text :as text]
             [futon1b-xt :as fxt]
             [xtdb.api :as xt])
@@ -95,7 +96,10 @@
      {} (mapcat manifest-values files))))
 
 (defn- current-evidence [node ids]
-  (let [docs (fxt/hydrate-by-ids node :evidence ids)
+  ;; Erase validation is a correctness boundary, not a bulk display path.
+  ;; The `_id IN` hydration route can omit current rows after large erasures;
+  ;; use the same indexed point read as the public evidence endpoint.
+  (let [docs (keep #(evidence/fetch-by-id node %) ids)
         by-id (into {} (map (juxt (comp str :xt/id) identity)) docs)]
     (when-let [missing (seq (remove by-id ids))]
       (refuse! :evidence-not-current {:ids (vec missing)}))
