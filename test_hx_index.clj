@@ -337,6 +337,91 @@
           (try (hx/catch-up! node :force true) (catch clojure.lang.ExceptionInfo _ nil)))
         (hx/catch-up! node :force true)
         (check! "a delete survives a failed tombstone leg and is repaired next run"
-                (and (zero? (row-count "hx:tomb:1")) (pos? (row-count "hx:tomb:2"))))))
+                (and (zero? (row-count "hx:tomb:1")) (pos? (row-count "hx:tomb:2")))))
+
+      ;; ---- Fix C doc backfill: id ranges, bounded per run, resumable ------
+      ;; 2026-11-07: the first backfill sorted every current document to
+      ;; page 2,000 of them and took the live JVM's whole Arrow budget; now
+      ;; it walks (after, hi] ranges bounded by sidecar ids, saves its
+      ;; cursor after each, and ends with an open range.
+      (let [dir2 (temp-dir)
+            nulls (fn [] (:n (jdbc/execute-one!
+                              (ds) ["SELECT count(*) AS n FROM hx_node WHERE doc_edn IS NULL"]
+                              unqualified)))
+            doc-of (fn [id] (:doc_edn (jdbc/execute-one!
+                                       (ds) ["SELECT doc_edn FROM hx_node WHERE hx_id = ?" id]
+                                       unqualified)))
+            meta-of (fn [k] (:v (jdbc/execute-one!
+                                 (ds) ["SELECT v FROM hx_meta WHERE k = ?" k]
+                                 unqualified)))]
+        (xt/execute-tx node (vec (for [i (range 25)]
+                                   [:put-docs :hyperedges
+                                    (hx-doc (format "hx:doc:%02d" i) :probe/doc ["e"])])))
+        (text/init! {:path (str dir2 "/fts5-evidence.db")})
+        (hx/init!)
+        (hx/catch-up! node)
+        (check! "fill leaves doc_edn unset; the doc backfill waits for the next catch-up"
+                (and (not (hx/doc-projection-ready?))
+                     (pos? (nulls))
+                     (nil? (doc-of "hx:doc:00"))))
+        (let [total (:n (jdbc/execute-one! (ds) ["SELECT count(*) AS n FROM hx_node"]
+                                           unqualified))
+              r (hx/backfill-hx-docs! (ds) node :page 10 :budget-ms 0)]
+          (check! "zero budget: one range of :page sidecar ids, cursor saved, not complete"
+                  (and (false? (:complete r))
+                       (= 1 (:ranges r))
+                       (= 10 (:doc-rows r))
+                       (= (:resume-after r) (meta-of "hx-doc-backfill-after"))
+                       (not (hx/doc-projection-ready?))
+                       (= (- total 10) (nulls))))
+          ;; bad case for the open-ended last range: a doc XTDB has that the
+          ;; sidecar never saw (hook skipped), sorting after every sidecar id.
+          (xt/execute-tx node [[:put-docs :hyperedges (hx-doc "hx:~late" :probe/doc ["z"])]])
+          (let [r2 (loop [r (hx/backfill-hx-docs! (ds) node :page 10 :budget-ms 0) k 1]
+                     (if (or (:complete r) (> k 100))
+                       (assoc r :runs k)
+                       (recur (hx/backfill-hx-docs! (ds) node :page 10 :budget-ms 0)
+                              (inc k))))]
+            (check! "resumed zero-budget runs complete the walk and set the marker"
+                    (and (true? (:complete r2))
+                         (hx/doc-projection-ready?)
+                         (nil? (meta-of "hx-doc-backfill-after"))
+                         (zero? (nulls))))
+            (check! "the open-ended last range covers an id the sidecar never had"
+                    (= :probe/doc (:hx/type (read-string (or (doc-of "hx:~late") "nil")))))))
+
+        ;; through catch-up!: the per-run bound applies, and a backfill failure
+        ;; is recorded instead of taking the checkpoint legs down with it.
+        (let [dir3 (temp-dir)]
+          (text/init! {:path (str dir3 "/fts5-evidence.db")})
+          (hx/init!)
+          (hx/catch-up! node)
+          (let [r (hx/catch-up! node :force true :doc-page 10 :doc-budget-ms 0)]
+            (check! "catch-up! runs one bounded doc-backfill range, then its legs"
+                    (and (false? (get-in r [:hx-doc-backfill :complete]))
+                         (some? (meta-of "hx-doc-backfill-after"))
+                         (contains? r :changed))))
+          (let [stats-var (var-get (ns-resolve 'futon1b-hxindex '!stats))]
+            (swap! stats-var dissoc :last-doc-backfill-error)
+            (with-redefs [futon1b-hxindex/backfill-doc-range!
+                          (fn [& _] (throw (ex-info "probe: range scan refused" {})))]
+              (xt/execute-tx node [[:put-docs :hyperedges (hx-doc "hx:guard:1" :probe/doc ["g"])]])
+              (let [r (hx/catch-up! node :force true :doc-page 10 :doc-budget-ms 0)]
+                (check! "a failing doc backfill is recorded and the legs still repair"
+                        (and (= "probe: range scan refused"
+                                (get-in r [:hx-doc-backfill :error :message]))
+                             (= "probe: range scan refused"
+                                (get-in @stats-var [:last-doc-backfill-error :message]))
+                             (pos? (row-count "hx:guard:1"))
+                             (not (hx/doc-projection-ready?))))))
+            (let [r (loop [r (hx/catch-up! node :force true :doc-page 10 :doc-budget-ms 0) k 1]
+                      (if (or (hx/doc-projection-ready?) (> k 100))
+                        r
+                        (recur (hx/catch-up! node :force true :doc-page 10 :doc-budget-ms 0)
+                               (inc k))))]
+              (check! "once the scan works again the walk resumes to completion"
+                      (and (hx/doc-projection-ready?)
+                           (true? (get-in r [:hx-doc-backfill :complete]))
+                           (zero? (nulls)))))))))
     (println "HX INDEX: ALL PASS"))
   (shutdown-agents))

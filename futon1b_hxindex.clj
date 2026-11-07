@@ -516,6 +516,79 @@
 (defn clock-projection-ready? []
   (boolean (when-let [ds (ds*)] (meta-get ds "hx-clock-backfill"))))
 
+(def ^:private doc-backfill-page
+  "Sidecar ids per doc-backfill range. One range is one full-document scan
+   of the hyperedges table (50-80 s live, ~0.5 GB Arrow) whose result is
+   materialised server-side before pgwire sends it, so the range must stay
+   well under the Arrow budget: 40k docs is roughly 1/38 of the live table."
+  40000)
+
+(def ^:private doc-backfill-budget-ms
+  "Wall-clock budget for the doc backfill inside one catch-up run; the run
+   always completes at least one range. The periodic cadence is 15 min and
+   the run holds one of four expensive-read permits, so 4 min keeps three
+   quarters of the interval free for everyone else."
+  240000)
+
+(def ^:private doc-backfill-batch
+  "Rows per SQLite write transaction while a range streams in."
+  2000)
+
+(def ^:private doc-backfill-timeout-s
+  "Deadline for one range scan: the default 60 s is what a full-document
+   scan of the live table takes on a good day."
+  300)
+
+(defn- meta-del! [ds k]
+  (write-locked*
+   (fn [] (jdbc/execute! ds ["DELETE FROM hx_meta WHERE k = ?" k]))))
+
+(defn- doc-range-upper
+  "Upper bound of the next doc-backfill range: the PAGE-th sidecar id after
+   AFTER, or nil when fewer than PAGE remain - the final range is then
+   open-ended."
+  [ds after page]
+  (:hx_id (first (jdbc/execute! ds ["SELECT hx_id FROM hx_node WHERE hx_id > ?
+                                     ORDER BY hx_id LIMIT 1 OFFSET ?"
+                                    (str after) (dec (long page))]
+                                unqualified))))
+
+(defn- upsert-docs!
+  "hx_node rows (type + doc_edn) for full ROWS, one SQLite transaction."
+  [ds rows]
+  (when (seq rows)
+    (with-write-tx [tx ds]
+      (doseq [r rows
+              :let [id (str (:xt/id r))]]
+        (jdbc/execute! tx
+                       ["INSERT INTO hx_node(hx_id, type, doc_edn) VALUES (?,?,?)
+                         ON CONFLICT(hx_id) DO UPDATE
+                         SET type=excluded.type, doc_edn=excluded.doc_edn"
+                        id (str (:hx/type r))
+                        (pr-str (dissoc r :xt/id))]))))
+  (count rows))
+
+(defn- backfill-doc-range!
+  "Stream every current hyperedge with AFTER < _id (and _id <= HI when HI
+   is given) into hx_node.doc_edn, in batches, with NO ORDER BY: XTDB
+   filters while it scans and never holds more than this range's documents.
+   Returns the number of rows written."
+  [ds node after hi]
+  (let [q (if hi
+            ["SELECT * FROM hyperedges WHERE _id > ? AND _id <= ?" (str after) (str hi)]
+            ["SELECT * FROM hyperedges WHERE _id > ?" (str after)])
+        {:keys [batch n]}
+        (fxt/timed-reduce-q
+         node q
+         (fn [{:keys [batch n]} row]
+           (let [batch (conj batch row)]
+             (if (>= (count batch) doc-backfill-batch)
+               {:batch [] :n (+ n (upsert-docs! ds batch))}
+               {:batch batch :n n})))
+         {:batch [] :n 0}
+         doc-backfill-timeout-s)]
+    (+ n (upsert-docs! ds batch))))
+
 (defn backfill-hx-docs!
   "Fix C (M-ways-of-working finding 3, Joe 2026-11-06 \"OK to C\"): populate
    hx_node.doc_edn, the current-valid DOCUMENT projection, so the walk's
@@ -528,28 +601,49 @@
    (which reads full rows). Idempotent; the completion marker gates reads
    so an interrupted backfill is never served. Only run when a checkpoint
    exists (an empty index is filled first, then backfilled on the next
-   catch-up)."
-  [ds node & {:keys [page] :or {page 2000}}]
-  (let [started (System/currentTimeMillis)
-        n (loop [after "" n 0]
-            (let [rows (fxt/timed-q
-                        node
-                        ["SELECT * FROM hyperedges WHERE _id > ? ORDER BY _id LIMIT ?"
-                         (str after) (long page)])]
-              (if (empty? rows)
-                n
-                (do (with-write-tx [tx ds]
-                      (doseq [r rows
-                              :let [id (str (:xt/id r))]]
-                        (jdbc/execute! tx
-                                       ["INSERT INTO hx_node(hx_id, type, doc_edn) VALUES (?,?,?)
-                                         ON CONFLICT(hx_id) DO UPDATE
-                                         SET type=excluded.type, doc_edn=excluded.doc_edn"
-                                        id (str (:hx/type r))
-                                        (pr-str (dissoc r :xt/id))])))
-                  (recur (str (:xt/id (last rows))) (+ n (count rows)))))))]
-    (meta-set! ds "hx-doc-backfill" (str (Instant/now)))
-    {:doc-rows n :elapsed-ms (- (System/currentTimeMillis) started)}))
+   catch-up).
+
+   How it walks the table (2026-11-07, the allocator-burst fix): the first
+   version paged with `SELECT * ... ORDER BY _id LIMIT 2000`. XTDB 2.1.0 has
+   no index on _id order, so that query read every current row's full
+   document and SORTED all 1.5M of them to return 2,000 - measured on the
+   live store it reserved ~2.7 GB of the 2.9 GB Arrow budget and failed
+   (\"Unable to allocate buffer ... due to memory limit\"), and every write
+   that overlapped it failed the same way (50-190 refusals per burst, one
+   burst per catch-up, 14 h). Now the walk is a sequence of _id RANGES with
+   no ORDER BY: the range bounds come from the sidecar's own hx_node ids
+   (sorted in SQLite, free), each range is one filtered scan whose rows
+   stream into hx_node in batches, and the last range is open-ended so an id
+   the sidecar never saw is still covered. A full-document scan of the live
+   table costs 50-80 s whatever the filter (measured), so each run is
+   bounded by BUDGET-MS (at least one range per run), the cursor is saved in
+   hx_meta after every range, and the completion marker is set only when the
+   open-ended range has been written.
+
+   Range bounds need not even agree with XTDB's string order: consecutive
+   half-open ranges (after, hi] cover everything up to the largest bound
+   whatever their order, overlaps are idempotent upserts, and the open final
+   range covers the rest."
+  [ds node & {:keys [page budget-ms]}]
+  (let [page (long (or page doc-backfill-page))
+        budget-ms (long (or budget-ms doc-backfill-budget-ms))
+        started (System/currentTimeMillis)
+        elapsed #(- (System/currentTimeMillis) started)]
+    (loop [after (or (meta-get ds "hx-doc-backfill-after") "")
+           ranges 0
+           n 0]
+      (if (and (pos? ranges) (>= (elapsed) budget-ms))
+        {:doc-rows n :ranges ranges :resume-after after :complete false
+         :elapsed-ms (elapsed)}
+        (let [hi (doc-range-upper ds after page)
+              n (+ n (backfill-doc-range! ds node after hi))]
+          (if hi
+            (do (meta-set! ds "hx-doc-backfill-after" hi)
+                (recur hi (inc ranges) n))
+            (do (meta-set! ds "hx-doc-backfill" (str (Instant/now)))
+                (meta-del! ds "hx-doc-backfill-after")
+                {:doc-rows n :ranges (inc ranges) :complete true
+                 :elapsed-ms (elapsed)})))))))
 
 (defn doc-projection-ready?
   "Fix C gate: hx_node.doc_edn has been backfilled. False (the type-only
@@ -601,7 +695,7 @@
    exists ONLY for the bad-case test. Skipped as {:skipped :no-new-tx} when
    xt.txs shows no transaction newer than the last run (pass :force true to
    override, e.g. from rebuild!). Single-flight like the evidence catch-up."
-  [node & {:keys [page fill-page force tombstones?]
+  [node & {:keys [page fill-page force tombstones? doc-page doc-budget-ms]
            :or {page 1000 fill-page 20000 force false tombstones? true}}]
   (if-not (compare-and-set! !catch-up-running? false true)
     {:skipped :already-running}
@@ -623,9 +717,27 @@
                              (backfill-clock! ds node))
             ;; Fix C: only after a checkpoint exists — an empty index fills
             ;; first and backfills its doc projection on the NEXT catch-up.
+            ;; Bounded per run and resumable (see backfill-hx-docs!), and a
+            ;; failure here is recorded, not thrown: from 2026-11-07 00:01 to
+            ;; 15:00 every run died in this binding, so the checkpoint legs
+            ;; below never ran and the index fell 14 h behind.
             doc-backfill (when (and (nil? (meta-get ds "hx-doc-backfill"))
                                     (meta-get ds "checkpoint-ts"))
-                           (backfill-hx-docs! ds node))
+                           (try
+                             (let [r (backfill-hx-docs! ds node :page doc-page
+                                                        :budget-ms doc-budget-ms)]
+                               (println (str "[hxindex] doc backfill: " (pr-str r)))
+                               (flush)
+                               r)
+                             (catch Exception e
+                               (let [err {:at (str (Instant/now))
+                                          :class (.getSimpleName (class e))
+                                          :message (.getMessage e)}]
+                                 (swap! !stats assoc :last-doc-backfill-error err)
+                                 (println (str "[hxindex] doc backfill failed: "
+                                               (:class err) ": " (:message err)))
+                                 (flush)
+                                 {:error err}))))
             tx-id (latest-tx-id node)
             prior-tx (some-> (meta-get ds "last-tx-id") Long/parseLong)]
         (cond
