@@ -15,6 +15,24 @@
                (assoc stamp :basis :inferred) (assoc stamp :recorded-at "junk")
                (assoc stamp :attributed-author "someone-else") (dissoc stamp :writer)]]
     (is (= :invalid-origin (get-in (evidence/build-evidence-doc (assoc entry :origin bad)) [:invalid :error/code])))))
+
+(deftest retired-derived-families-are-bounced-at-the-evidence-boundary
+  (doseq [[type destination]
+          [[:artifact/weak-activation :derived/artifact-activation]
+           [:promise/ready-enqueued :hyperedge/promise-history]
+           [:promise/fulfilled :hyperedge/promise-history]]]
+    (let [[status body]
+          (evidence/write-evidence! nil
+                                    {:id (str "retired-" (name type))
+                                     :type type
+                                     :claim-type :observation
+                                     :author "test"})]
+      (is (= 422 status))
+      (is (= :wrong-store (:error/code body)))
+      (is (= destination (:destination body)))))
+  ;; This first defence is intentionally narrow: legitimate evidence types
+  ;; continue through the existing contract while the full registry is built.
+  (is (nil? (:invalid (evidence/build-evidence-doc entry)))))
 (deftest ^:slow roundtrip
   (with-open [node (xtn/start-node)]
     (is (= 201 (first (evidence/write-evidence! node entry))))

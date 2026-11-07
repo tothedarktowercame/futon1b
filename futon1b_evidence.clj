@@ -35,6 +35,18 @@
         (string? t) (keyword t)
         :else nil))
 
+(defn- retired-evidence-destination
+  "Return the store that owns a type which must no longer enter evidence.
+
+  This is deliberately a small closed stop-list, not the eventual evidence
+  contract registry.  These families have completed migrations and therefore
+  have no compatibility reason to accept another source row."
+  [etype]
+  (cond
+    (= etype :artifact/weak-activation) :derived/artifact-activation
+    (= "promise" (namespace etype)) :hyperedge/promise-history
+    :else nil))
+
 (defn build-evidence-doc
   "Validate + default the evidence payload. Returns {:doc m} or
   {:invalid <plain-400-body>} (the three required-field 400s are plain
@@ -47,12 +59,20 @@
         stamp (field payload :origin)
         harness-present? (or (contains? payload :evidence/harness) (contains? payload :harness))
         execution (field payload :harness)
-        harness-error (when harness-present? (harness/refusal execution))]
+        harness-error (when harness-present? (harness/refusal execution))
+        retired-destination (retired-evidence-destination etype)]
     (cond
       (nil? etype) {:invalid {:error "evidence/type required"}}
       (nil? claim-type) {:invalid {:error "evidence/claim-type required"}}
       (or (nil? author) (str/blank? (str author)))
       {:invalid {:error "evidence/author required"}}
+
+      retired-destination
+      {:invalid-status 422
+       :invalid {:error/code :wrong-store
+                 :error "This derived family is not evidence"
+                 :evidence/type etype
+                 :destination retired-destination}}
 
       (and origin-present?
            (or (not (origin/valid? stamp))
@@ -213,14 +233,14 @@
   "Build and validate an evidence write without mutating the node. Returns a
   transformed :doc or the exact :status/:body refusal used by write-evidence!."
   [node payload]
-  (let [{:keys [doc invalid]} (build-evidence-doc payload)
+  (let [{:keys [doc invalid invalid-status]} (build-evidence-doc payload)
         ;; Reshapes are recorded except the by-design stringification of the
         ;; JSON-keyed body; a string-keyed :evidence/subject leaves a record.
         prepared-doc (when doc (xf/transform-doc doc !shape-log
                                                  {:log-stringify? true
                                                   :log-except #{[:evidence/body]}}))]
     (cond
-      invalid {:status 400 :body invalid}
+      invalid {:status (or invalid-status 400) :body invalid}
 
       (and (:evidence/in-reply-to doc)
            (not (evidence-exists? node (:evidence/in-reply-to doc))))
