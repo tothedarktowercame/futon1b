@@ -121,6 +121,17 @@
                                record-id))
           :record/data edn/read-string))
 
+(defn record-by-id
+  "Public reserved-namespace read. The table search is bounded by the fixed
+  Formal Arxana record-kind set; it never scans records within a table."
+  [node record-id]
+  (or (clusion-by-id node record-id)
+      (evidence-by-id node record-id)
+      (assessment-by-id node record-id)
+      (attempt-by-id node record-id)
+      (external-reference-by-id node record-id)
+      (mark-occurrence-by-id node record-id)))
+
 (defn- stored-record [node table record-id]
   (case table
     :arxana_clusions (clusion-by-id node record-id)

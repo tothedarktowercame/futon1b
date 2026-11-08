@@ -1064,7 +1064,8 @@
                   (case (:query/type payload)
                     :role-reverse (arxana-index/query-edges idx @!node payload)
                     :attestations (arxana-index/attestations idx @!node
-                                                            (:subject-clusion-id payload)
+                                                            (or (:subject-id payload)
+                                                                (:subject-clusion-id payload))
                                                             (or (:limit payload) 50))
                     :assessments (arxana-index/assessments idx @!node
                                                           (:subject-id payload)
@@ -1076,6 +1077,10 @@
                     :pattern-score (arxana-index/pattern-score idx @!node
                                                               (:pattern-id payload)
                                                               (:window payload))
+                    :record-by-id
+                    (if-let [record (arxana/record-by-id @!node (:record-id payload))]
+                      {:status :ok :record record}
+                      {:status :missing :record-id (:record-id payload)})
                     :clusion-endpoints
                     (if-let [c (arxana/clusion-by-id @!node (:clusion-id payload))]
                       {:status :ok :watermark (arxana/source-sequence @!node)
