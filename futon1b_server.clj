@@ -1081,6 +1081,14 @@
                     (if-let [record (arxana/record-by-id @!node (:record-id payload))]
                       {:status :ok :record record}
                       {:status :missing :record-id (:record-id payload)})
+                    :artifact-head
+                    {:status :ok
+                     :artifact/id (:artifact-id payload)
+                     :head/revision-id (arxana/current-head @!node (:artifact-id payload))}
+                    :revision-by-id
+                    (if-let [revision (arxana/revision-by-id @!node (:revision-id payload))]
+                      (assoc revision :status :ok)
+                      {:status :missing :revision-id (:revision-id payload)})
                     :clusion-endpoints
                     (if-let [c (arxana/clusion-by-id @!node (:clusion-id payload))]
                       {:status :ok :watermark (arxana/source-sequence @!node)

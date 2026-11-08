@@ -76,6 +76,14 @@
                                target-id))
           :head/revision-id))
 
+(defn revision-by-id
+  "The immutable revision row, including canonical bytes, or nil."
+  [node revision-id]
+  (fxt/q1 node (fxt/pq '[p-id]
+                       '(-> (from :arxana_revisions [*])
+                            (where (= xt/id p-id)))
+                       revision-id)))
+
 (defn journal-entries
   "All journal rows for TARGET-ID (test/introspection aid)."
   [node target-id]
