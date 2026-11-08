@@ -23,6 +23,7 @@
 (ns futon1b-arxana
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
+            [clojure.walk :as walk]
             [futon1b-gates :as gates]
             [futon1b-xt :as fxt]
             [xtdb.api :as xt])
@@ -135,6 +136,19 @@
                                 '(-> (from :arxana_assessments [record/data subject/clusion-id])
                                      (where (= subject/clusion-id p-id)))
                                 clusion-id))))
+
+;; Immutability is checked by comparing stored record data as text, so the
+;; text must not depend on how an equal map was built: small Clojure maps
+;; print in insertion order. Sort map keys at every level before printing.
+(defn canonical-record-data
+  "Deterministic EDN text for RECORD: equal values give equal strings."
+  [record]
+  (pr-str (walk/postwalk
+           (fn [x]
+             (if (map? x)
+               (into (sorted-map-by (fn [a b] (compare (pr-str a) (pr-str b)))) x)
+               x))
+           record)))
 
 (defn source-sequence
   "O(1) authoritative freshness marker for the C3 sidecar. It advances in
@@ -442,7 +456,7 @@
                     :operation operation
                     :ok {:record/id record-id :subject-clusion-id subject-id
                          :created? (nil? existing)}}
-          doc (cond-> {:xt/id record-id :record/data (pr-str record)
+          doc (cond-> {:xt/id record-id :record/data (canonical-record-data record)
                        :record/operation operation}
                 subject-id (assoc :subject/clusion-id subject-id))
           table-name (name table)
@@ -462,7 +476,7 @@
                    (concat
                     [[:sql "ASSERT NOT EXISTS (SELECT 1 FROM arxana_outcomes WHERE _id = ?)"
                       [message-id]]
-                     [:sql immutable-assert [record-id record-id (pr-str record)]]]
+                     [:sql immutable-assert [record-id record-id (canonical-record-data record)]]]
                     (when subject-id
                       [[:sql "ASSERT EXISTS (SELECT 1 FROM arxana_clusions WHERE _id = ?)"
                         [subject-id]]])

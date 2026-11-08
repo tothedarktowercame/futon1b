@@ -32,6 +32,13 @@
         (check! "message-id replay returns first outcome" (:duplicate? dup))
         (check! "message-id replay writes nothing new"
                 (= claim (arxana/clusion-by-id node (:id claim)))))
+      ;; review (claude-13): an equal record whose keys were inserted in
+      ;; another order is the same record, not an immutability conflict
+      (let [reordered (into {} (reverse (seq claim)))
+            r (try (arxana/conditional-command! node (command "c-reordered" :clusion/assert reordered))
+                   (catch clojure.lang.ExceptionInfo e (get-in (ex-data e) [:error :reason])))]
+        (check! "equal record with reordered keys re-asserts without conflict"
+                (and (map? r) (false? (get-in r [:ok :created?])))))
       (arxana/conditional-command! node (command "e1" :evidence/append evidence-a))
       (arxana/conditional-command! node (command "e2" :evidence/append evidence-b))
       (check! "attest_keeps_claims" (= claim (arxana/clusion-by-id node (:id claim))))
