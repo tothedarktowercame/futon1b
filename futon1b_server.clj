@@ -1047,9 +1047,9 @@
       (when (and @!arxana-index
                  (#{:clusion/assert :evidence/append} (:operation payload))
                  (not (:duplicate? res)))
-        (try (arxana-index/rebuild! @!arxana-index @!node)
+        (try (arxana-index/catch-up! @!arxana-index @!node)
              (catch Throwable t
-               (println "[arxana-index] post-write rebuild failed:" (.getMessage t)))))
+               (println "[arxana-index] post-write catch-up failed:" (.getMessage t)))))
       (respond! ex 200 res))
     (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
 
@@ -1065,6 +1065,11 @@
                     :attestations (arxana-index/attestations idx @!node
                                                             (:subject-clusion-id payload)
                                                             (or (:limit payload) 50))
+                    :clusion-endpoints
+                    (if-let [c (arxana/clusion-by-id @!node (:clusion-id payload))]
+                      {:status :ok :watermark (arxana/source-sequence @!node)
+                       :endpoint-ids (mapv arxana-index/endpoint-id (:endpoints c))}
+                      {:status :missing :clusion-id (:clusion-id payload)})
                     :rebuild (arxana-index/rebuild! idx @!node)
                     {:status :unsupported :query/type (:query/type payload)}))
         (respond! ex 503 {:status :unavailable :reason :arxana-index-not-attached})))

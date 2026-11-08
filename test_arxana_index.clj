@@ -28,6 +28,16 @@
                                              :endpoint-id "hot" :limit 50})]
           (assert (= 50 (count (:edge-ids q))))
           (assert (= :ok (:status q)))
+          (with-redefs [index/source-records
+                        (fn [_] (throw (ex-info "full scan on read" {})))]
+            (assert (= :ok (:status (index/query-edges
+                                     idx node {:edge-type [:pattern/occurrence 1]
+                                               :endpoint-role :pattern
+                                               :endpoint-id "hot" :limit 50}))))
+            (assert (= :ok (:status (index/attestations
+                                     idx node
+                                     "arxana:clusion:sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                                     50)))))
           (let [query #(index/query-edges idx node {:edge-type [:pattern/occurrence 1]
                                                     :endpoint-role :pattern
                                                     :endpoint-id "hot" :limit 50})
@@ -49,20 +59,31 @@
                                               idx node {:edge-type [:pattern/occurrence 1]
                                                         :endpoint-role :pattern
                                                         :endpoint-id "hot" :limit 50}))))
-          (let [rebuilt (index/rebuild! idx node)
+          (let [caught-up (index/catch-up! idx node)
+                incremental (index/snapshot idx)
+                full-file (File/createTempFile "arxana-c3a-full-" ".db")
+                _ (.delete full-file)
+                full-index (index/open-index (.getPath full-file))
+                rebuilt (index/rebuild! full-index node)
+                full (index/snapshot full-index)
                 q2 (index/query-edges idx node {:edge-type [:pattern/occurrence 1]
                                                 :endpoint-role :pattern
                                                 :endpoint-id "hot" :limit 50})]
             (assert (= :ok (:status q2)))
+            (assert (= incremental full))
             (println (pr-str {:hot-key/count (count (:edge-ids q2))
                               :hot-key/query-limit 50
                               :initial-rebuild-ms (:elapsed-ms rebuild)
                               :prepared-rebuild-ms (:elapsed-ms rebuilt)
+                              :incremental-catch-up-ms (:elapsed-ms caught-up)
+                              :incremental-events (:events caught-up)
+                              :incremental-equals-full true
                               :hot-key-median-ms (nth timings 10)
                               :hot-key-p95-ms (nth timings 18)
                               :records (:records rebuilt)
                               :concurrent-read-count (count observed)
-                              :concurrent-read-statuses (frequencies observed)}))))))
+                              :concurrent-read-statuses (frequencies observed)}))
+            (.delete full-file)))))
       (println "C3a index checks PASS")
       (finally (.delete f))))
   (shutdown-agents))

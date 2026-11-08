@@ -122,6 +122,16 @@
                                      (where (= subject/clusion-id p-id)))
                                 clusion-id))))
 
+(defn source-sequence
+  "O(1) authoritative freshness marker for the C3 sidecar. It advances in
+  the same transaction as every indexed record."
+  [node]
+  (or (some-> (fxt/q1 node
+                       '(-> (from :arxana_index_state [xt/id source/sequence])
+                            (where (= xt/id "source"))))
+              :source/sequence)
+      0))
+
 ;; ---------------------------------------------------------------------------
 ;; Envelope + command validation (D3: unknown fields rejected in v1).
 ;; ---------------------------------------------------------------------------
@@ -422,28 +432,51 @@
           immutable-assert (format (str "ASSERT (NOT EXISTS (SELECT 1 FROM %s WHERE _id = ?) "
                                          "OR EXISTS (SELECT 1 FROM %s WHERE _id = ? AND record$data = ?))")
                                    table-name table-name)
-          ops (cond-> [[:sql "ASSERT NOT EXISTS (SELECT 1 FROM arxana_outcomes WHERE _id = ?)"
-                        [message-id]]
-                       [:sql immutable-assert [record-id record-id (pr-str record)]]]
-                subject-id (conj [:sql "ASSERT EXISTS (SELECT 1 FROM arxana_clusions WHERE _id = ?)"
-                                  [subject-id]])
-                true (conj [:put-docs table doc])
-                true (conj [:put-docs :arxana_outcomes
-                            {:xt/id message-id :outcome/result :committed
-                             :outcome/response (pr-str response)}]))]
-      (try
-        (xt/execute-tx node ops {:metadata {:arxana/message-id message-id
-                                            :arxana/record-id record-id}})
-        response
-        (catch Throwable t
-          (if (re-find #"(?i)assert" (str (.getMessage t)))
-            (if-let [outcome (outcome-by-message node message-id)]
-              (assoc (edn/read-string (:outcome/response outcome)) :duplicate? true)
-              (throw (gates/layered-error 4 :arxana-append-precondition
-                                          {:category (if subject-id :missing :conflict)
-                                           :record/id record-id
-                                           :subject-clusion-id subject-id})))
-            (throw t)))))))
+          indexed? (#{:clusion/assert :evidence/append} operation)]
+      (loop [attempt 0]
+        (let [counter (when indexed? (source-sequence node))
+              next-counter (some-> counter inc)
+              counter-assert (when indexed?
+                               (if (zero? counter)
+                                 [:sql "ASSERT NOT EXISTS (SELECT 1 FROM arxana_index_state WHERE _id='source')"]
+                                 [:sql "ASSERT EXISTS (SELECT 1 FROM arxana_index_state WHERE _id='source' AND source$sequence=?)"
+                                  [counter]]))
+              ops (vec
+                   (concat
+                    [[:sql "ASSERT NOT EXISTS (SELECT 1 FROM arxana_outcomes WHERE _id = ?)"
+                      [message-id]]
+                     [:sql immutable-assert [record-id record-id (pr-str record)]]]
+                    (when subject-id
+                      [[:sql "ASSERT EXISTS (SELECT 1 FROM arxana_clusions WHERE _id = ?)"
+                        [subject-id]]])
+                    (when indexed? [counter-assert])
+                    [[:put-docs table doc]]
+                    (when indexed?
+                      [[:put-docs :arxana_index_events
+                        {:xt/id next-counter :source/sequence next-counter
+                         :record/id record-id :record/table table}]
+                       [:put-docs :arxana_index_state
+                        {:xt/id "source" :source/sequence next-counter}]])
+                    [[:put-docs :arxana_outcomes
+                      {:xt/id message-id :outcome/result :committed
+                       :outcome/response (pr-str response)}]]))
+              result (try
+                       (xt/execute-tx node ops {:metadata {:arxana/message-id message-id
+                                                           :arxana/record-id record-id}})
+                       {:committed response}
+                       (catch Throwable t {:thrown t}))]
+          (if-let [t (:thrown result)]
+            (if (re-find #"(?i)assert" (str (.getMessage ^Throwable t)))
+              (if-let [outcome (outcome-by-message node message-id)]
+                (assoc (edn/read-string (:outcome/response outcome)) :duplicate? true)
+                (if (and indexed? (< attempt 32))
+                  (recur (inc attempt))
+                  (throw (gates/layered-error 4 :arxana-append-precondition
+                                              {:category :conflict
+                                               :record/id record-id
+                                               :subject-clusion-id subject-id}))))
+              (throw t))
+            (:committed result)))))))
 
 (defn conditional-command!
   "Execute one authenticated, validated reserved command. Revision ingestion
