@@ -53,6 +53,7 @@
             [futon1b-write-log :as write-log]
             [futon1b-request-executor :as request-executor]
             [futon1b-arxana :as arxana]
+            [futon1b-arxana-index :as arxana-index]
             [xtdb.api :as xt])
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
            [java.net InetSocketAddress URLDecoder]
@@ -63,6 +64,7 @@
   (:gen-class))
 
 (defonce !node (atom nil))
+(defonce !arxana-index (atom nil))
 
 (declare parse-instant)
 
@@ -1042,8 +1044,31 @@
           principal (.getFirst (.getRequestHeaders ex) "x-arxana-principal")
           _ (arxana/authenticate! principal)
           res (arxana/conditional-command! @!node payload)]
+      (when (and @!arxana-index
+                 (#{:clusion/assert :evidence/append} (:operation payload))
+                 (not (:duplicate? res)))
+        (try (arxana-index/rebuild! @!arxana-index @!node)
+             (catch Throwable t
+               (println "[arxana-index] post-write rebuild failed:" (.getMessage t)))))
       (respond! ex 200 res))
     (respond! ex 405 (pr-str {:ok false :error "POST only"}))))
+
+(defn- arxana-query-route [^HttpExchange ex]
+  (if (= "POST" (.getRequestMethod ex))
+    (let [payload (parse-payload ex)
+          principal (.getFirst (.getRequestHeaders ex) "x-arxana-principal")
+          _ (arxana/authenticate! principal)]
+      (if-let [idx @!arxana-index]
+        (respond! ex 200
+                  (case (:query/type payload)
+                    :role-reverse (arxana-index/query-edges idx @!node payload)
+                    :attestations (arxana-index/attestations idx @!node
+                                                            (:subject-clusion-id payload)
+                                                            (or (:limit payload) 50))
+                    :rebuild (arxana-index/rebuild! idx @!node)
+                    {:status :unsupported :query/type (:query/type payload)}))
+        (respond! ex 503 {:status :unavailable :reason :arxana-index-not-attached})))
+    (respond! ex 405 {:ok false :error "POST only"})))
 
 (defn- entity-route [^HttpExchange ex]
   (let [method (.getRequestMethod ex)
@@ -1534,9 +1559,15 @@
     (InetSocketAddress. ^String bind-host (int port))))
 
 (defn start-server! [{:keys [store-dir port health-port node bind-host
-                             write-log-path]}]
+                             write-log-path arxana-index-path]}]
   (gates/seed-mission-contract!)
   (reset! !node (or node (zm/open-store store-dir)))
+  (reset! !arxana-index
+          (when-let [path (or arxana-index-path
+                              (when store-dir (str store-dir "/arxana-index.db")))]
+            (let [idx (arxana-index/open-index path)]
+              (arxana-index/rebuild! idx @!node)
+              idx)))
   ;; Warrants describe the previous node's store, if any.
   (graph/invalidate-alias-warrants!)
   ;; Durable write log: every rescue and failed put appended beside the store.
@@ -1657,6 +1688,7 @@
     (.createContext server "/api/alpha/memory/assert" (handler memory-assert-route))
     ;; M-jvm-arxana increment 2: authenticated conditional command route.
     (.createContext server "/api/alpha/arxana/command" (handler #'arxana-command-route))
+    (.createContext server "/api/alpha/arxana/query" (handler #'arxana-query-route))
     ;; longer prefix wins (see NB above): text-search must out-rank /evidence
     ;; By var, so a reload of this ns reaches the live route (see /scopes).
     (.createContext server "/api/alpha/evidence/text-search" (handler #'text-search-route))
