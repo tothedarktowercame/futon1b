@@ -101,12 +101,26 @@
                                     (where (= xt/id p-id)))
                                record-id))
           :record/data edn/read-string))
+(defn attempt-by-id [node record-id]
+  (some-> (fxt/q1 node (fxt/pq '[p-id]
+                               '(-> (from :arxana_attempts [xt/id record/data])
+                                    (where (= xt/id p-id)))
+                               record-id))
+          :record/data edn/read-string))
+(defn external-reference-by-id [node record-id]
+  (some-> (fxt/q1 node (fxt/pq '[p-id]
+                               '(-> (from :arxana_external_refs [xt/id record/data])
+                                    (where (= xt/id p-id)))
+                               record-id))
+          :record/data edn/read-string))
 
 (defn- stored-record [node table record-id]
   (case table
     :arxana_clusions (clusion-by-id node record-id)
     :arxana_evidence (evidence-by-id node record-id)
-    :arxana_assessments (assessment-by-id node record-id)))
+    :arxana_assessments (assessment-by-id node record-id)
+    :arxana_attempts (attempt-by-id node record-id)
+    :arxana_external_refs (external-reference-by-id node record-id)))
 
 (defn evidence-for [node clusion-id]
   (mapv (comp edn/read-string :record/data)
@@ -264,7 +278,9 @@
 (def ^:private append-spec
   {:clusion/assert {:prefix "arxana:clusion:sha256:" :table :arxana_clusions}
    :evidence/append {:prefix "arxana:attestation:sha256:" :table :arxana_evidence}
-   :assessment/append {:prefix "arxana:record:sha256:" :table :arxana_assessments}})
+   :assessment/append {:prefix "arxana:record:sha256:" :table :arxana_assessments}
+   :attempt/append {:prefix "arxana:record:sha256:" :table :arxana_attempts}
+   :external-reference/assert {:prefix "arxana:record:sha256:" :table :arxana_external_refs}})
 
 (defn- validate-append-envelope [payload]
   (let [operation (:operation payload)
@@ -280,13 +296,14 @@
       (when-not (and (string? id) (str/starts-with? id (:prefix spec)))
         (throw (gates/layered-error 4 :arxana-invalid-record-id
                                     {:category :invalid :id id :operation operation})))
-      (when (and (not= operation :clusion/assert)
+      (when (and (#{:evidence/append :assessment/append} operation)
                  (not (string? (:subject-clusion-id record))))
         (throw (gates/layered-error 4 :missing-required
                                     {:required [:subject-clusion-id]})))
       {:message-id (:message/id payload) :operation operation
        :record record :record-id id :table (:table spec)
-       :subject-id (:subject-clusion-id record)})))
+       :subject-id (or (:subject-clusion-id record)
+                       (when (= operation :attempt/append) (:subject/id record)))})))
 
 (defn- validate-envelope [payload]
   (when-not (map? payload)
@@ -432,7 +449,7 @@
           immutable-assert (format (str "ASSERT (NOT EXISTS (SELECT 1 FROM %s WHERE _id = ?) "
                                          "OR EXISTS (SELECT 1 FROM %s WHERE _id = ? AND record$data = ?))")
                                    table-name table-name)
-          indexed? (#{:clusion/assert :evidence/append} operation)]
+          indexed? (#{:clusion/assert :evidence/append :attempt/append} operation)]
       (loop [attempt 0]
         (let [counter (when indexed? (source-sequence node))
               next-counter (some-> counter inc)

@@ -1045,7 +1045,7 @@
           _ (arxana/authenticate! principal)
           res (arxana/conditional-command! @!node payload)]
       (when (and @!arxana-index
-                 (#{:clusion/assert :evidence/append} (:operation payload))
+                 (#{:clusion/assert :evidence/append :attempt/append} (:operation payload))
                  (not (:duplicate? res)))
         (try (arxana-index/catch-up! @!arxana-index @!node)
              (catch Throwable t
@@ -1065,6 +1065,13 @@
                     :attestations (arxana-index/attestations idx @!node
                                                             (:subject-clusion-id payload)
                                                             (or (:limit payload) 50))
+                    :attempts (arxana-index/attempts idx @!node
+                                                    (:subject-id payload)
+                                                    (:interpreter-id payload)
+                                                    (or (:limit payload) 50))
+                    :pattern-score (arxana-index/pattern-score idx @!node
+                                                              (:pattern-id payload)
+                                                              (:window payload))
                     :clusion-endpoints
                     (if-let [c (arxana/clusion-by-id @!node (:clusion-id payload))]
                       {:status :ok :watermark (arxana/source-sequence @!node)
