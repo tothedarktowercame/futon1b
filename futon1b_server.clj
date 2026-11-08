@@ -1045,7 +1045,8 @@
           _ (arxana/authenticate! principal)
           res (arxana/conditional-command! @!node payload)]
       (when (and @!arxana-index
-                 (#{:clusion/assert :evidence/append :attempt/append} (:operation payload))
+                 (#{:clusion/assert :evidence/append :assessment/append
+                    :attempt/append} (:operation payload))
                  (not (:duplicate? res)))
         (try (arxana-index/catch-up! @!arxana-index @!node)
              (catch Throwable t
@@ -1065,6 +1066,9 @@
                     :attestations (arxana-index/attestations idx @!node
                                                             (:subject-clusion-id payload)
                                                             (or (:limit payload) 50))
+                    :assessments (arxana-index/assessments idx @!node
+                                                          (:subject-id payload)
+                                                          (or (:limit payload) 50))
                     :attempts (arxana-index/attempts idx @!node
                                                     (:subject-id payload)
                                                     (:interpreter-id payload)

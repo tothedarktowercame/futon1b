@@ -471,7 +471,8 @@
           immutable-assert (format (str "ASSERT (NOT EXISTS (SELECT 1 FROM %s WHERE _id = ?) "
                                          "OR EXISTS (SELECT 1 FROM %s WHERE _id = ? AND record$data = ?))")
                                    table-name table-name)
-          indexed? (#{:clusion/assert :evidence/append :attempt/append} operation)]
+          indexed? (#{:clusion/assert :evidence/append :assessment/append
+                       :attempt/append} operation)]
       (loop [attempt 0]
         (let [counter (when indexed? (source-sequence node))
               next-counter (some-> counter inc)
