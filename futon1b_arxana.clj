@@ -114,6 +114,12 @@
                                     (where (= xt/id p-id)))
                                record-id))
           :record/data edn/read-string))
+(defn mark-occurrence-by-id [node record-id]
+  (some-> (fxt/q1 node (fxt/pq '[p-id]
+                               '(-> (from :arxana_mark_occurrences [xt/id record/data])
+                                    (where (= xt/id p-id)))
+                               record-id))
+          :record/data edn/read-string))
 
 (defn- stored-record [node table record-id]
   (case table
@@ -121,7 +127,8 @@
     :arxana_evidence (evidence-by-id node record-id)
     :arxana_assessments (assessment-by-id node record-id)
     :arxana_attempts (attempt-by-id node record-id)
-    :arxana_external_refs (external-reference-by-id node record-id)))
+    :arxana_external_refs (external-reference-by-id node record-id)
+    :arxana_mark_occurrences (mark-occurrence-by-id node record-id)))
 
 (defn evidence-for [node clusion-id]
   (mapv (comp edn/read-string :record/data)
@@ -294,7 +301,8 @@
    :evidence/append {:prefix "arxana:attestation:sha256:" :table :arxana_evidence}
    :assessment/append {:prefix "arxana:record:sha256:" :table :arxana_assessments}
    :attempt/append {:prefix "arxana:record:sha256:" :table :arxana_attempts}
-   :external-reference/assert {:prefix "arxana:record:sha256:" :table :arxana_external_refs}})
+   :external-reference/assert {:prefix "arxana:record:sha256:" :table :arxana_external_refs}
+   :mark-occurrence/assert {:prefix "arxana:record:sha256:" :table :arxana_mark_occurrences}})
 
 (defn- validate-append-envelope [payload]
   (let [operation (:operation payload)
