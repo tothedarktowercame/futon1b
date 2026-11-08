@@ -28,7 +28,14 @@
                                              :endpoint-id "hot" :limit 50})]
           (assert (= 50 (count (:edge-ids q))))
           (assert (= :ok (:status q)))
-          (let [writer (future (doseq [n (range 60 100)] (put! node n "hot")))
+          (let [query #(index/query-edges idx node {:edge-type [:pattern/occurrence 1]
+                                                    :endpoint-role :pattern
+                                                    :endpoint-id "hot" :limit 50})
+                timings (sort (repeatedly 20
+                                          (fn [] (let [t (System/nanoTime)]
+                                                   (query)
+                                                   (/ (- (System/nanoTime) t) 1000000.0)))))
+                writer (future (doseq [n (range 60 100)] (put! node n "hot")))
                 observed (loop [xs []]
                            (if (realized? writer) xs
                                (recur (conj xs (:status (index/query-edges
@@ -36,11 +43,12 @@
                                                                   :endpoint-role :pattern
                                                                   :endpoint-id "hot" :limit 50}))))))]
             @writer
+            (assert (seq observed))
             (assert (every? #{:ok :stale-index} observed))
             (assert (= :stale-index (:status (index/query-edges
                                               idx node {:edge-type [:pattern/occurrence 1]
                                                         :endpoint-role :pattern
-                                                        :endpoint-id "hot" :limit 50})))))
+                                                        :endpoint-id "hot" :limit 50}))))
           (let [rebuilt (index/rebuild! idx node)
                 q2 (index/query-edges idx node {:edge-type [:pattern/occurrence 1]
                                                 :endpoint-role :pattern
@@ -50,8 +58,11 @@
                               :hot-key/query-limit 50
                               :initial-rebuild-ms (:elapsed-ms rebuild)
                               :prepared-rebuild-ms (:elapsed-ms rebuilt)
+                              :hot-key-median-ms (nth timings 10)
+                              :hot-key-p95-ms (nth timings 18)
                               :records (:records rebuilt)
-                              :concurrent-read-statuses [:ok :stale-index]})))))
+                              :concurrent-read-count (count observed)
+                              :concurrent-read-statuses (frequencies observed)}))))))
       (println "C3a index checks PASS")
       (finally (.delete f))))
   (shutdown-agents))
