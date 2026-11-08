@@ -143,7 +143,7 @@
                                       :weight (if (= :complete (:coverage a)) 1.0 0.5)})))))
         (doseq [receipt (:attempts records)] (index-attempt! tx receipt)))
       (jdbc/execute! tx ["INSERT INTO arxana_meta(k,v) VALUES('watermark',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v" after]))
-    {:watermark after :records (+ (count (:clusions records)) (count (:evidence records))
+    {:status :ok :watermark after :records (+ (count (:clusions records)) (count (:evidence records))
                                   (count (:attempts records)))
      :elapsed-ms (/ (- (System/nanoTime) started) 1000000.0)}))
 
