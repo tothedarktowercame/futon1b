@@ -83,6 +83,45 @@
                                 (where (= journal/target-id p-target)))
                            target-id)))
 
+(defn clusion-by-id [node record-id]
+  (some-> (fxt/q1 node (fxt/pq '[p-id]
+                               '(-> (from :arxana_clusions [xt/id record/data])
+                                    (where (= xt/id p-id)))
+                               record-id))
+          :record/data edn/read-string))
+(defn evidence-by-id [node record-id]
+  (some-> (fxt/q1 node (fxt/pq '[p-id]
+                               '(-> (from :arxana_evidence [xt/id record/data])
+                                    (where (= xt/id p-id)))
+                               record-id))
+          :record/data edn/read-string))
+(defn assessment-by-id [node record-id]
+  (some-> (fxt/q1 node (fxt/pq '[p-id]
+                               '(-> (from :arxana_assessments [xt/id record/data])
+                                    (where (= xt/id p-id)))
+                               record-id))
+          :record/data edn/read-string))
+
+(defn- stored-record [node table record-id]
+  (case table
+    :arxana_clusions (clusion-by-id node record-id)
+    :arxana_evidence (evidence-by-id node record-id)
+    :arxana_assessments (assessment-by-id node record-id)))
+
+(defn evidence-for [node clusion-id]
+  (mapv (comp edn/read-string :record/data)
+        (fxt/safe-q node (fxt/pq '[p-id]
+                                '(-> (from :arxana_evidence [record/data subject/clusion-id])
+                                     (where (= subject/clusion-id p-id)))
+                                clusion-id))))
+
+(defn assessments-for [node clusion-id]
+  (mapv (comp edn/read-string :record/data)
+        (fxt/safe-q node (fxt/pq '[p-id]
+                                '(-> (from :arxana_assessments [record/data subject/clusion-id])
+                                     (where (= subject/clusion-id p-id)))
+                                clusion-id))))
+
 ;; ---------------------------------------------------------------------------
 ;; Envelope + command validation (D3: unknown fields rejected in v1).
 ;; ---------------------------------------------------------------------------
@@ -97,6 +136,7 @@
 
 (def ^:private body-keys
   #{:target/id :expected/revision-id :command})
+(def ^:private append-body-keys #{:record})
 
 (def ^:private command-keys
   #{:revision/canonical-bytes :revision/media-type :entity-records :hyperedge-records})
@@ -162,7 +202,7 @@
                :hx/ends (mapv (fn [e] {:entity-id e}) endpoints)}
         (map? (:hx/props record)) (assoc :hx/props (:hx/props record))))))
 
-(defn- validate-envelope
+(defn- validate-revision-envelope
   "Validate the D3 v1 envelope and the revision/ingest body. Returns
   {:message-id :operation :target-id :expected (nil = :absent) :bytes
    :media-type :entity-docs :hyperedge-docs}."
@@ -180,10 +220,6 @@
         body (:body payload)]
     (when-not (and (string? message-id) (not (str/blank? message-id)))
       (throw (gates/layered-error 4 :missing-required {:required [:message/id]})))
-    (when-not (= :revision/ingest operation)
-      (throw (gates/layered-error 4 :arxana-unsupported-operation
-                                  {:category :unsupported :operation operation
-                                   :supported [:revision/ingest]})))
     (when-not (map? body)
       (throw (gates/layered-error 4 :missing-required {:required [:body]})))
     (check-no-unknown-keys! :body body-keys body)
@@ -215,6 +251,52 @@
            :entity-docs (mapv arxana-entity-doc (:entity-records command))
            :hyperedge-docs (mapv arxana-hyperedge-doc (:hyperedge-records command))})))))
 
+(def ^:private append-spec
+  {:clusion/assert {:prefix "arxana:clusion:sha256:" :table :arxana_clusions}
+   :evidence/append {:prefix "arxana:attestation:sha256:" :table :arxana_evidence}
+   :assessment/append {:prefix "arxana:record:sha256:" :table :arxana_assessments}})
+
+(defn- validate-append-envelope [payload]
+  (let [operation (:operation payload)
+        body (:body payload)
+        spec (get append-spec operation)]
+    (when-not (map? body)
+      (throw (gates/layered-error 4 :missing-required {:required [:body]})))
+    (check-no-unknown-keys! :body append-body-keys body)
+    (let [record (:record body)
+          id (:id record)]
+      (when-not (map? record)
+        (throw (gates/layered-error 4 :arxana-invalid-record {:category :invalid})))
+      (when-not (and (string? id) (str/starts-with? id (:prefix spec)))
+        (throw (gates/layered-error 4 :arxana-invalid-record-id
+                                    {:category :invalid :id id :operation operation})))
+      (when (and (not= operation :clusion/assert)
+                 (not (string? (:subject-clusion-id record))))
+        (throw (gates/layered-error 4 :missing-required
+                                    {:required [:subject-clusion-id]})))
+      {:message-id (:message/id payload) :operation operation
+       :record record :record-id id :table (:table spec)
+       :subject-id (:subject-clusion-id record)})))
+
+(defn- validate-envelope [payload]
+  (when-not (map? payload)
+    (throw (gates/layered-error 4 :arxana-invalid-envelope {:category :invalid})))
+  (check-no-unknown-keys! :envelope envelope-keys payload)
+  (when-not (= protocol-version (:protocol/version payload))
+    (throw (gates/layered-error 4 :arxana-unsupported-version
+                                {:category :unsupported :required protocol-version
+                                 :got (:protocol/version payload)})))
+  (when-not (and (string? (:message/id payload))
+                 (not (str/blank? (:message/id payload))))
+    (throw (gates/layered-error 4 :missing-required {:required [:message/id]})))
+  (cond
+    (= :revision/ingest (:operation payload)) (validate-revision-envelope payload)
+    (append-spec (:operation payload)) (validate-append-envelope payload)
+    :else (throw (gates/layered-error 4 :arxana-unsupported-operation
+                                     {:category :unsupported
+                                      :operation (:operation payload)
+                                      :supported (vec (cons :revision/ingest (keys append-spec)))}))))
+
 ;; ---------------------------------------------------------------------------
 ;; The conditional transaction (V3 S1 semantics).
 ;; ---------------------------------------------------------------------------
@@ -236,12 +318,12 @@
      :recoverable {:journal-ref [:arxana_journal message-id]
                    :choices [:refresh :rebase-and-resubmit :export-patch]}})))
 
-(defn conditional-command!
+(defn- conditional-revision-command!
   "Execute one authenticated conditional command. Returns the D3 response
   envelope; a duplicate message id returns the stored original outcome with
   :duplicate? true."
-  [node payload]
-  (let [{:keys [message-id operation] :as cmd} (validate-envelope payload)]
+  [node cmd]
+  (let [{:keys [message-id operation]} cmd]
     (if-let [outcome (outcome-by-message node message-id)]
       ;; Idempotent retry: return the original outcome, never reapply.
       (assoc (edn/read-string (:outcome/response outcome)) :duplicate? true)
@@ -316,3 +398,58 @@
                 (stale-refusal node message-id cmd))
               (throw t))))
         response))))
+
+(defn- conditional-append-command! [node {:keys [message-id operation record
+                                                  record-id table subject-id]}]
+  (if-let [outcome (outcome-by-message node message-id)]
+    (assoc (edn/read-string (:outcome/response outcome)) :duplicate? true)
+    (let [existing (stored-record node table record-id)
+          _ (when (and existing (not= existing record))
+              (throw (gates/layered-error 4 :arxana-immutable-record-conflict
+                                          {:category :conflict :record/id record-id})))
+          _ (when (and subject-id (nil? (clusion-by-id node subject-id)))
+              (throw (gates/layered-error 4 :arxana-unknown-clusion
+                                          {:category :missing
+                                           :subject-clusion-id subject-id})))
+          response {:protocol/version protocol-version :message/id message-id
+                    :operation operation
+                    :ok {:record/id record-id :subject-clusion-id subject-id
+                         :created? (nil? existing)}}
+          doc (cond-> {:xt/id record-id :record/data (pr-str record)
+                       :record/operation operation}
+                subject-id (assoc :subject/clusion-id subject-id))
+          table-name (name table)
+          immutable-assert (format (str "ASSERT (NOT EXISTS (SELECT 1 FROM %s WHERE _id = ?) "
+                                         "OR EXISTS (SELECT 1 FROM %s WHERE _id = ? AND record$data = ?))")
+                                   table-name table-name)
+          ops (cond-> [[:sql "ASSERT NOT EXISTS (SELECT 1 FROM arxana_outcomes WHERE _id = ?)"
+                        [message-id]]
+                       [:sql immutable-assert [record-id record-id (pr-str record)]]]
+                subject-id (conj [:sql "ASSERT EXISTS (SELECT 1 FROM arxana_clusions WHERE _id = ?)"
+                                  [subject-id]])
+                true (conj [:put-docs table doc])
+                true (conj [:put-docs :arxana_outcomes
+                            {:xt/id message-id :outcome/result :committed
+                             :outcome/response (pr-str response)}]))]
+      (try
+        (xt/execute-tx node ops {:metadata {:arxana/message-id message-id
+                                            :arxana/record-id record-id}})
+        response
+        (catch Throwable t
+          (if (re-find #"(?i)assert" (str (.getMessage t)))
+            (if-let [outcome (outcome-by-message node message-id)]
+              (assoc (edn/read-string (:outcome/response outcome)) :duplicate? true)
+              (throw (gates/layered-error 4 :arxana-append-precondition
+                                          {:category (if subject-id :missing :conflict)
+                                           :record/id record-id
+                                           :subject-clusion-id subject-id})))
+            (throw t)))))))
+
+(defn conditional-command!
+  "Execute one authenticated, validated reserved command. Revision ingestion
+  uses head CAS; Formal Arxana records use immutable append transactions."
+  [node payload]
+  (let [cmd (validate-envelope payload)]
+    (if (= :revision/ingest (:operation cmd))
+      (conditional-revision-command! node cmd)
+      (conditional-append-command! node cmd))))
