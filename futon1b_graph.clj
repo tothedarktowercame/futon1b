@@ -325,7 +325,9 @@
   `entity/external-id` equals V. Name matches sort before external-id
   matches; ties by id."
   [node v external?]
-  (let [rows (if external?
+  (if (ent/reads-usable?)
+    (ent/alias-ids v external?)
+    (let [rows (if external?
                (fxt/safe-q node (fxt/pq '[p-v]
                                         '(-> (from :entities [xt/id entity/name entity/external-id])
                                              (where (or (= entity/name p-v)
@@ -335,12 +337,12 @@
                                         '(-> (from :entities [xt/id entity/name])
                                              (where (= entity/name p-v)))
                                         v)))]
-    (->> rows
-         (sort-by (fn [r] [(if (= v (:entity/name r)) 0 1)
-                           (str (:xt/id r))]))
-         (map :xt/id)
-         distinct
-         vec)))
+      (->> rows
+           (sort-by (fn [r] [(if (= v (:entity/name r)) 0 1)
+                             (str (:xt/id r))]))
+           (map :xt/id)
+           distinct
+           vec))))
 
 (defn- alias-match? [v external? doc]
   (or (= v (:entity/name doc))
@@ -391,10 +393,12 @@
   ids, never names/external-ids, so the alias scan is skipped for them.
   Returns {:doc d} or, when the alias scan ran, {:doc d-or-nil :warrant w}."
   [node id]
-  (if-let [doc (fxt/q1 node (fxt/pq '[p-id]
-                                    '(-> (from :entities [*])
-                                         (where (= xt/id p-id)))
-                                    id))]
+  (if-let [doc (if (ent/reads-usable?)
+                 (ent/entity-by-id id)
+                 (fxt/q1 node (fxt/pq '[p-id]
+                                      '(-> (from :entities [*])
+                                           (where (= xt/id p-id)))
+                                      id)))]
     {:doc doc}
     (if (uuid-shaped? id)
       {:doc nil}

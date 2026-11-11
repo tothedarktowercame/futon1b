@@ -141,3 +141,56 @@ deployment should be a **futon1b JVM restart from master**, which runs sidecar
 initialisation/migration and loads `futon1b-entindex` and `futon1b-graph`
 coherently. A graph-only Drawbridge reload would leave the live sidecar schema
 and entindex Vars old. Restarting futon1b is Joe's call.
+
+## Implementation and deployment (2026-11-11)
+
+Implemented after review: `ent_node` now has nullable `name` and `external_id`
+columns and `(name,id)` / `(external_id,id)` indexes. Every hook, fill, and
+repair upsert writes them. `init!` detects the old DDL, adds missing columns,
+decodes the existing complete documents once, backfills both aliases in a
+transaction, creates the indexes, and is idempotent. Exact id and alias reads
+use this sidecar only while `reads-usable?` holds; otherwise the unchanged XTDB
+reads run. Alias ordering and warrants are unchanged.
+
+The recorded-shape acceptance corpus is
+`test-data/entity-sidecar-samples.edn`, sampled read-only from the live store
+and expanded to the live recorded size of 62,799 rows through the real
+`index-doc!` path. On this host, its absent alias lookup took **0.78–1.19 ms**
+(250 ms diagnostic threshold). Creating an old-schema 62,799-row sidecar and
+running `init!` took **0.64–1.03 s wall** (0.63–1.03 s reported). This copy has
+the live row count and real body shapes; Joe should expect roughly one second
+of added first-boot work, while treating the restart receipt as authoritative.
+
+Deploy only from canonical master, at Joe's quiet moment:
+
+```sh
+cd /home/joe/code/futon1b
+systemd-run --user --unit=futon1b-restart --collect \
+  /home/joe/code/futon1b/scripts/restart-futon1b-detached.sh
+tail -f /tmp/futon1b-restart-receipt.txt
+```
+
+Wait for the receipt's final `FINISHED` line and successful result. The normal
+restart script deliberately performs deep pre/post censuses; this note's
+read-only discovery rule against `/health?deep=true` does not replace that
+operator-owned restart safety protocol. On first boot, entity sidecar
+initialisation performs the one-time column backfill and index creation before
+serving indexed aliases. Subsequent boots detect both columns and skip the
+body scan.
+
+Post-restart, time one unique non-UUID cold miss and one known hit without
+requesting deep health:
+
+```sh
+curl -sS -o /dev/null -w 'cold-miss status=%{http_code} time=%{time_total}\n' \
+  http://127.0.0.1:7073/api/alpha/entity/post-restart-unique-absent
+curl -sS -o /dev/null -w 'hit status=%{http_code} time=%{time_total}\n' \
+  http://127.0.0.1:7073/api/alpha/entity/futon-theory%2Fmission-dependency
+curl -sS http://127.0.0.1:7073/health
+```
+
+Expect 404 then 200, both using sidecar point/index reads, and `/health` to
+show the entities sidecar `{:serving? true :why :complete}`. If the gate is
+not complete, the code intentionally falls back to XTDB and the cold miss may
+again take the corpus-scan time; investigate the checkpoint/hook failure
+rather than bypassing the gate.

@@ -82,13 +82,16 @@
     :tables {"ent_node" :current-entity-documents
              "ent_meta" :checkpoint}
     :declares {:entity/type "ent_node.type"
+               :entity/name "ent_node.name"
+               :entity/external-id "ent_node.external_id"
                :document "ent_node.doc (Transit)"}
     :maintained-by {:write-hook ['futon1b-entindex/on-put! 'futon1b-entindex/on-delete!]
                     :repair ['futon1b-entindex/catch-up! 'futon1b-entindex/fill!]
                     :cadence "on put/delete; catch-up every FUTON1B_ENT_CATCHUP_MS (15 min) after explicit fill"}
     :gate {:fn 'futon1b-entindex/reads-usable?
            :means "reads enabled, an explicit fill established a checkpoint, no hook has failed since catch-up"}
-    :serves ["GET /api/alpha/entities?type=…"
+    :serves ["GET /api/alpha/entity/{id-or-alias}"
+             "GET /api/alpha/entities?type=…"
              "GET /api/alpha/entities/latest?type=… (entity bodies; pattern/library sigil relation stays in XTDB)"]
     :fallback "the existing XTDB type-window scan and hydration path"
     :stands-in-for "xtdb#3663"}

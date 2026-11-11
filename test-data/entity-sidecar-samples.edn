@@ -1,0 +1,23 @@
+[{:xt/id "015d12eb-497a-47f6-a5e7-ec56cd422f37"
+  :entity/id "015d12eb-497a-47f6-a5e7-ec56cd422f37"
+  :entity/name "mission|M-wm-three-factor-mission-value"
+  :entity/external-id "M-wm-three-factor-mission-value"
+  :entity/type :mission
+  :entity/source "mission-doc-ingest"
+  :entity/props {:provenance/repo "futon2" :scope/role "mission"
+                 :mission/status-class "complete"}}
+ {:xt/id "C-cascade-real/source/117bc40"
+  :entity/id "C-cascade-real/source/117bc40"
+  :entity/name "RUN/DELIVER — land the data against the L1 gate"
+  :entity/external-id "C-cascade-real/source/117bc40"
+  :entity/type :scope/source-material
+  :entity/source "mission-scope-tree"
+  :entity/props {:anchor/state :anchored :scope/binder-type "source-material"
+                 :source/kind "commit"}}
+ {:xt/id "agency/bounded-lifecycle"
+  :entity/id "agency/bounded-lifecycle"
+  :entity/name "agency/bounded-lifecycle"
+  :entity/external-id "agency/bounded-lifecycle"
+  :entity/type :pattern/library
+  :entity/source "Every Resource Has a Bounded Lifecycle"
+  :entity/props {:pattern/cross-list []}}]

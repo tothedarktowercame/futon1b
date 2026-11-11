@@ -47,9 +47,14 @@
 
 (def ^:private ddl
   ["CREATE TABLE IF NOT EXISTS ent_node (
-      id TEXT PRIMARY KEY, type TEXT NOT NULL, doc BLOB NOT NULL)"
-   "CREATE INDEX IF NOT EXISTS ent_type_id ON ent_node(type, id)"
+      id TEXT PRIMARY KEY, type TEXT NOT NULL, doc BLOB NOT NULL,
+      name TEXT, external_id TEXT)"
    "CREATE TABLE IF NOT EXISTS ent_meta (k TEXT PRIMARY KEY, v TEXT)"])
+
+(def ^:private index-ddl
+  ["CREATE INDEX IF NOT EXISTS ent_type_id ON ent_node(type, id)"
+   "CREATE INDEX IF NOT EXISTS ent_name_id ON ent_node(name, id)"
+   "CREATE INDEX IF NOT EXISTS ent_external_id_id ON ent_node(external_id, id)"])
 
 (defn- ds* [] @text/!ds)
 
@@ -79,7 +84,33 @@
    (when-not ds
      (throw (ex-info "entindex: no sidecar datasource (text/init! first)" {})))
    (doseq [stmt ddl] (jdbc/execute! ds [stmt]))
-   {:ok true}))
+   (let [columns (set (map :name (jdbc/execute! ds ["PRAGMA table_info(ent_node)"]
+                                                unqualified)))
+         missing (remove columns ["name" "external_id"])
+         backfill? (not= "1" (meta-get ds "alias-columns-v1"))
+         started (System/nanoTime)]
+     (doseq [column missing]
+       (jdbc/execute! ds [(str "ALTER TABLE ent_node ADD COLUMN " column " TEXT")]))
+     ;; Old sidecars contain the complete Transit document. Populate both new
+     ;; columns and their completion marker in one transaction. The marker,
+     ;; rather than column presence, makes a crash after ALTER recoverable.
+     (when backfill?
+       (jdbc/with-transaction [tx ds]
+         (doseq [{:keys [id doc]} (jdbc/execute! tx ["SELECT id, doc FROM ent_node"]
+                                                 unqualified)
+                 :let [entity (text/decode-doc doc)]]
+           (jdbc/execute-one! tx
+                              ["UPDATE ent_node SET name = ?, external_id = ? WHERE id = ?"
+                               (some-> (:entity/name entity) str)
+                               (some-> (:entity/external-id entity) str)
+                               id]))
+         (jdbc/execute! tx ["INSERT INTO ent_meta(k,v) VALUES('alias-columns-v1','1')
+                             ON CONFLICT(k) DO UPDATE SET v=excluded.v"])))
+     (doseq [stmt index-ddl] (jdbc/execute! ds [stmt]))
+     {:ok true
+      :alias-migration {:columns-added (vec missing)
+                        :backfilled? backfill?
+                        :elapsed-ms (quot (- (System/nanoTime) started) 1000000)}})))
 
 (defn index-doc! [ds doc]
   (let [id (str (:xt/id doc))
@@ -90,10 +121,13 @@
     (when (str/blank? id)
       (throw (ex-info "entindex: entity requires xt/id" {:doc doc})))
     (write-locked*
-     #(jdbc/execute! ds ["INSERT INTO ent_node(id,type,doc) VALUES(?,?,?)
+     #(jdbc/execute! ds ["INSERT INTO ent_node(id,type,doc,name,external_id) VALUES(?,?,?,?,?)
                           ON CONFLICT(id) DO UPDATE SET
-                          type=excluded.type, doc=excluded.doc"
-                         id t (text/encode-doc doc)])))
+                          type=excluded.type, doc=excluded.doc,
+                          name=excluded.name, external_id=excluded.external_id"
+                         id t (text/encode-doc doc)
+                         (some-> (:entity/name doc) str)
+                         (some-> (:entity/external-id doc) str)])))
   doc)
 
 (defn delete-id! [ds id]
@@ -168,10 +202,13 @@
     (with-write-tx [tx ds]
       (doseq [id ids]
         (if-let [doc (get present id)]
-          (jdbc/execute! tx ["INSERT INTO ent_node(id,type,doc) VALUES(?,?,?)
+          (jdbc/execute! tx ["INSERT INTO ent_node(id,type,doc,name,external_id) VALUES(?,?,?,?,?)
                               ON CONFLICT(id) DO UPDATE SET
-                              type=excluded.type, doc=excluded.doc"
-                             id (str (:entity/type doc)) (text/encode-doc doc)])
+                              type=excluded.type, doc=excluded.doc,
+                              name=excluded.name, external_id=excluded.external_id"
+                             id (str (:entity/type doc)) (text/encode-doc doc)
+                             (some-> (:entity/name doc) str)
+                             (some-> (:entity/external-id doc) str)])
           (jdbc/execute! tx ["DELETE FROM ent_node WHERE id = ?" id]))))
   (count ids)))
 
@@ -318,11 +355,14 @@
                                             (fn [] (fxt/hydrate-by-ids node :entities (vec c)))))]
                     (with-write-tx [tx ds]
                       (doseq [doc docs]
-                        (jdbc/execute! tx ["INSERT INTO ent_node(id,type,doc) VALUES(?,?,?)
+                        (jdbc/execute! tx ["INSERT INTO ent_node(id,type,doc,name,external_id) VALUES(?,?,?,?,?)
                                            ON CONFLICT(id) DO UPDATE SET
-                                           type=excluded.type, doc=excluded.doc"
+                                           type=excluded.type, doc=excluded.doc,
+                                           name=excluded.name, external_id=excluded.external_id"
                                            (str (row-id doc)) (str (:entity/type doc))
-                                           (text/encode-doc doc)])))
+                                           (text/encode-doc doc)
+                                           (some-> (:entity/name doc) str)
+                                           (some-> (:entity/external-id doc) str)])))
                     (swap! !fill-progress assoc :done (inc i) :written (+ n (count docs))
                            :elapsed-ms (- (System/currentTimeMillis) started))
                     (when (and (seq more) (pos? (long pause-ms)))
@@ -434,6 +474,31 @@
   (let [ds (or (ds*) (throw (ex-info "entindex: no datasource" {})))]
     (:n (first (jdbc/execute! ds ["SELECT count(*) AS n FROM ent_node WHERE type = ?"
                                   (str type)] unqualified)))))
+
+(defn entity-by-id
+  "Complete current document for ID, or nil. Callers own reads-usable?."
+  [id]
+  (let [ds (or (ds*) (throw (ex-info "entindex: no datasource" {})))]
+    (some-> (jdbc/execute-one! ds ["SELECT doc FROM ent_node WHERE id = ?" (str id)]
+                               unqualified)
+            :doc text/decode-doc)))
+
+(defn alias-ids
+  "Ordered ids whose name, or when EXTERNAL?, external id, equals V.
+  Name matches precede external-only matches; ties are ordered by id. Callers
+  own reads-usable?."
+  [v external?]
+  (let [ds (or (ds*) (throw (ex-info "entindex: no datasource" {})))
+        v (str v)
+        query (if external?
+                ["SELECT id FROM (
+                    SELECT id, 0 AS rank FROM ent_node WHERE name = ?
+                    UNION ALL
+                    SELECT id, 1 AS rank FROM ent_node
+                     WHERE external_id = ? AND (name IS NULL OR name <> ?)
+                  ) ORDER BY rank, id" v v v]
+                ["SELECT id FROM ent_node WHERE name = ? ORDER BY id" v])]
+    (mapv :id (jdbc/execute! ds query unqualified))))
 
 (defn reads-usable? []
   (let [ds (ds*)]
