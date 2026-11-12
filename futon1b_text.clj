@@ -1170,9 +1170,21 @@
   (if-not (seq survivors)
     []
     (let [ids (mapv #(get-in % [:doc :xt/id]) survivors)
-          placeholders (str/join "," (repeat (count ids) "?"))
-          sql (str "SELECT * FROM evidence WHERE _id IN (" placeholders ")")
-          docs (fxt/safe-q node (into [sql] ids))
+          ;; One `_id = ?` statement per id, hydration-width in flight, not
+          ;; one `_id IN (…)`: XTDB 2.1 SQL serves `_id = ?` from the id
+          ;; index (0.3 s on 2026-11-12) but scans the table for `IN` at every
+          ;; size (23 s for ONE id on the 860k-row evidence table; 28 s for
+          ;; two). Survivors are at most the search limit, far below
+          ;; fxt/equality-hydrate-max-ids. claude-13, 2026-11-12: a memory
+          ;; text search took ~22 s, nearly all of it here.
+          docs (->> ids
+                    (partition-all hydration-width)
+                    (mapcat (fn [batch]
+                              (->> batch
+                                   (mapv #(future (fxt/safe-q
+                                                   node ["SELECT * FROM evidence WHERE _id = ?" %])))
+                                   (mapcat deref))))
+                    vec)
           by-id (into {} (map (juxt :xt/id identity)) docs)]
       (into []
             (keep (fn [{:keys [doc] :as survivor}]
