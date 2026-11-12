@@ -187,6 +187,121 @@
       0))
 
 ;; ---------------------------------------------------------------------------
+;; Flat derived columns (M-repl-circus; Joe, 2026-11-12: "I think we should
+;; sort out the Arxana storage. I like the analogy with missions").
+;;
+;; Each record's type and role endpoints are merged into the written doc as
+;; plain columns beside record/data, so XTQL can push filters down — the same
+;; precedent as the hyperedge prop/* columns (H4, build-hyperedge-doc). The
+;; columns are DERIVED from the record at write time: they never enter
+;; record/data, so the record id (a digest of record/data content) is
+;; unchanged, and the immutability ASSERT (which compares record$data only)
+;; is untouched. A re-put of an existing record re-derives the same columns
+;; deterministically, so the ASSERT's "same id, same record$data" arm still
+;; holds and the re-put is a no-op.
+;;
+;; Multi-valued roles: none in futon3c type-registry registry-v1 (a clusion's
+;; arity equals its declared role count; each role carries exactly one
+;; endpoint). If a future type revision admits several endpoints on one
+;; role, the column value becomes a vector of strings (endpoint-column-id
+;; handles a sequential target); no current role is multi-valued.
+;; ---------------------------------------------------------------------------
+
+(defn- target-id-string
+  "The plain string id of one endpoint target: an entity id, a clusion id,
+  an artifact revision id, or an external reference id. Anything richer is
+  printed (it cannot be indexed usefully as a scalar)."
+  [target]
+  (str (or (:entity/id target)
+           (:ref/id target)
+           (:artifact/revision-id target)
+           (:clusion/id target)
+           (pr-str target))))
+
+(defn- endpoint-column-id
+  [endpoint]
+  (let [target (:target endpoint)]
+    (if (sequential? target)
+      (mapv target-id-string target)
+      (target-id-string target))))
+
+(defn flat-columns
+  "The derived plain columns for [OPERATION RECORD], merged into the written
+  doc. Pure. Scalar keyword/string/number values only; nils are omitted.
+  Operations not listed get no columns."
+  [operation record]
+  (let [clean (fn [m] (into {} (filter (fn [[_ v]] (some? v))) m))]
+    (case operation
+      :clusion/assert
+      (let [[type-key type-version] (:type-revision record)]
+        (into {:clusion/type type-key
+               :clusion/type-version type-version}
+              (map (fn [endpoint]
+                     [(keyword "role" (name (:role endpoint)))
+                      (endpoint-column-id endpoint)]))
+              (:endpoints record)))
+      :evidence/append
+      (clean {:attest/basis (:basis record)
+              :attest/standing (:standing record)
+              :attest/coverage (:coverage record)
+              :attest/producer (some-> (:producer record) str)
+              :attest/method (some-> (get-in record [:method :id]) str)
+              :attest/kind (or (:attest/kind record) (:kind record))})
+      :assessment/append
+      (clean {:assess/verdict (:verdict record)
+              :assess/actor (some-> (:actor record) str)})
+      {})))
+
+;; ---------------------------------------------------------------------------
+;; Reads over the flat columns (not wired to a route yet).
+;; ---------------------------------------------------------------------------
+
+(defn clusions-by-type-and-role
+  "Clusions of TYPE whose ROLE endpoint is ENDPOINT-ID, bounded at LIMIT.
+  The role name becomes a column name, which XTQL cannot parameterise; role
+  names are few and closed (the type registry), so each role compiles one
+  plan, like one pq shape per role."
+  [node type role endpoint-id limit]
+  (let [role-col (symbol "role" (name role))]
+    (fxt/timed-q node
+                 (fxt/pq '[p-type p-endpoint p-limit]
+                         (list '->
+                               (list 'from :arxana_clusions
+                                     (vector 'xt/id 'clusion/type role-col))
+                               (list 'where
+                                     (list '= 'clusion/type 'p-type)
+                                     (list '= role-col 'p-endpoint))
+                               (list 'limit 'p-limit))
+                         type endpoint-id limit))))
+
+(defn newest-evidence
+  "The newest attestation on SUBJECT-ID, optionally restricted to KIND
+  (the attest/kind column; nil means any). Newest by valid time (the
+  append's system time), tie-broken by id."
+  ([node subject-id] (newest-evidence node subject-id nil))
+  ([node subject-id kind]
+   (let [where-clause (if (some? kind)
+                        (list 'where
+                              (list '= 'subject/clusion-id 'p-subject)
+                              (list '= 'attest/kind 'p-kind))
+                        (list 'where
+                              (list '= 'subject/clusion-id 'p-subject)))]
+     (first
+      (fxt/timed-q node
+                   (fxt/pq '[p-subject p-kind]
+                           (list '->
+                                 (list 'from :arxana_evidence
+                                       '[xt/id subject/clusion-id attest/kind
+                                         attest/basis attest/standing
+                                         xt/valid-from])
+                                 where-clause
+                                 (list 'order-by
+                                       {:val 'xt/valid-from :dir :desc}
+                                       {:val 'xt/id :dir :desc})
+                                 (list 'limit 1))
+                           subject-id kind))))))
+
+;; ---------------------------------------------------------------------------
 ;; Envelope + command validation (D3: unknown fields rejected in v1).
 ;; ---------------------------------------------------------------------------
 
@@ -483,8 +598,9 @@
                     :operation operation
                     :ok {:record/id record-id :subject-clusion-id subject-id
                          :created? (nil? existing)}}
-          doc (cond-> {:xt/id record-id :record/data (canonical-record-data record)
-                       :record/operation operation}
+          doc (cond-> (merge {:xt/id record-id :record/data (canonical-record-data record)
+                              :record/operation operation}
+                             (flat-columns operation record))
                 subject-id (assoc :subject/clusion-id subject-id))
           table-name (name table)
           immutable-assert (format (str "ASSERT (NOT EXISTS (SELECT 1 FROM %s WHERE _id = ?) "
