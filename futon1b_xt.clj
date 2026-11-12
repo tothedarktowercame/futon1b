@@ -15,7 +15,13 @@
            [java.util.concurrent Executors Semaphore ThreadFactory TimeUnit]
            [xtdb.api DataSource]))
 
-(def ^:private query-width 4)
+;; 4 -> 8 on 2026-11-12 (Joe's go; claude-13). The 4 dates from the
+;; 2026-07-22 brown-out on a 4 GB heap; futon1b now has 8 GB and Zone 32
+;; cores. With 4, the scope re-ingest, the hx catch-up and entity-write
+;; presence checks held every permit (free permits sampled 0,2,2,0,0) and a
+;; memory text search took ~20 s. The live JVM was widened the same day by
+;; releasing 4 extra permits on the defonce semaphore (no restart).
+(def ^:private query-width 8)
 
 (defonce ^:private query-permits
   ;; One process-wide budget for pgwire queries. Per-request futures otherwise
