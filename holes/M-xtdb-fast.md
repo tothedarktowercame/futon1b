@@ -41,6 +41,11 @@ skip them.
 - **Four query permits were the bottleneck under load** (now eight, futon1b
   `a59a349`); a permit held by a 14 s scan starves every other reader.
 
+- **Entity lookup by external id times out.** `GET /api/alpha/entity?external-id=M-formal-arxana&source=…`
+  took over 60 s for both sources on 2026-11-12 (and earlier 500s under
+  hydration, per kimi-1): `graph/entity-by-external` scans entities. A
+  sidecar column for `entity/external-id` would make it a point read.
+
 ## Leads
 
 - **Zone maps through the cascade** (Joe's idea above): let the pattern
