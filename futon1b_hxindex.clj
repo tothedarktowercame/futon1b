@@ -673,6 +673,36 @@
          (mapv (fn [{:keys [hx_id doc_edn]}]
                  (assoc (edn/read-string doc_edn) :xt/id hx_id))))))
 
+(defn type-mission-docs
+  "Fix C for type + mission: current-valid documents of TYPE whose
+   :prop/mission is MISSION, keyset-paged on hx_id > AFTER, from the hx_node
+   doc projection - no XTDB read. The mission-scope ingest asks one
+   mission's rows per binder; served by the scan path that cost ~14 s per
+   call on Zone (2026-11-12, claude-13), holding one of the four XTDB query
+   permits throughout. A LIKE on the quoted mission narrows the candidates;
+   the exact :prop/mission check drops false positives. Returns
+   {:docs [...] :last-candidate id-or-nil :full? bool}: a page can carry
+   fewer than LIMIT docs after the exact check, so the cursor is the last
+   CANDIDATE id and :full? says whether LIMIT candidates were read."
+  [{:keys [type mission after limit]}]
+  (when-let [ds (ds*)]
+    (let [rows (jdbc/execute! ds
+                              ["SELECT hx_id, doc_edn FROM hx_node
+                                WHERE type = ? AND hx_id > ? AND doc_edn IS NOT NULL
+                                  AND doc_edn LIKE ?
+                                ORDER BY hx_id LIMIT ?"
+                               (str type) (str (or after ""))
+                               (str "%" (pr-str (str mission)) "%") (long limit)]
+                              unqualified)
+          docs (into []
+                     (comp (map (fn [{:keys [hx_id doc_edn]}]
+                                  (assoc (edn/read-string doc_edn) :xt/id hx_id)))
+                           (filter #(= (str mission) (str (:prop/mission %)))))
+                     rows)]
+      {:docs docs
+       :last-candidate (some-> (peek (vec rows)) :hx_id)
+       :full? (= (long limit) (count rows))})))
+
 (defn clock-window
   "Current-valid clock documents from the materialized projection."
   [{:keys [after limit]}]

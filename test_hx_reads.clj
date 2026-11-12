@@ -345,9 +345,12 @@
               (not (contains? (query node {:type "probe/edits" :limit 2
                                            :repo "repo-a"})
                               :hx-index)))
-      (check! "type-only with a mission filter: scan path"
+      ;; Changed 2026-11-12 (claude-13): type + mission is now served from
+      ;; the doc projection when it is ready (see the "Fix C mission" checks
+      ;; below); with include-total it still takes the scan path.
+      (check! "type + mission with include-total: scan path"
               (not (contains? (query node {:type "probe/edits" :limit 2
-                                           :mission "m1"})
+                                           :mission "m1" :include-total? true})
                               :hx-index)))
       (check! "type-only latest: scan path"
               (not (contains? (query node {:type "probe/edits" :latest? true})
@@ -603,6 +606,53 @@
                 (and (= (hx/type-count :probe/edits) (:count r))
                      (true? (:count-exact? r))
                      (= 2 (count (:hyperedges r))))))
+
+      ;; ---- Fix C for type + mission (claude-13, 2026-11-12) ----------------
+      ;; The scope ingest's per-binder read (type + mission) took ~14 s per
+      ;; call on Zone via the scan path, holding an XTDB query permit. Rows:
+      ;; two of mission M-a, one of M-b, and a DECOY of M-b whose props
+      ;; mention "M-a" (the LIKE prefilter matches it; the exact check must
+      ;; drop it).
+      (xt/execute-tx
+       node
+       [[:put-docs :hyperedges (assoc (hx-doc "hx:m:1" :probe/scope ["S1"])
+                                      :hx/props {:mission "M-a"} :prop/mission "M-a")]
+        [:put-docs :hyperedges (assoc (hx-doc "hx:m:2" :probe/scope ["S2"])
+                                      :hx/props {:mission "M-b"} :prop/mission "M-b")]
+        [:put-docs :hyperedges (assoc (hx-doc "hx:m:3" :probe/scope ["S3"])
+                                      :hx/props {:mission "M-a"} :prop/mission "M-a")]
+        [:put-docs :hyperedges (assoc (hx-doc "hx:m:4" :probe/scope ["S4"])
+                                      :hx/props {:mission "M-b" :note "M-a"}
+                                      :prop/mission "M-b")]])
+      (hx/catch-up! node)
+      (let [opts {:type "probe/scope" :mission "M-a" :limit 10}
+            projected (query node opts)
+            _ (reset! reads-enabled false)
+            scanned (query node opts)
+            _ (reset! reads-enabled true)]
+        (check! "Fix C mission: the projection served type + mission"
+                (true? (get-in projected [:doc-projection :served?])))
+        (check! "Fix C mission: same rows as the scan path"
+                (= (map :hx/id (:hyperedges projected))
+                   (map :hx/id (:hyperedges scanned))
+                   ["hx:m:1" "hx:m:3"]))
+        (check! "Fix C mission: the decoy (other mission, mentions M-a) is dropped"
+                (not (some #{"hx:m:4"} (map :hx/id (:hyperedges projected))))))
+      (check! "Fix C mission: never calls the XTDB query-fn"
+              (do (graph/invalidate-hyperedge-query-cache!)
+                  (let [res (graph/hyperedges-query
+                             node {:type "probe/scope" :mission "M-a" :limit 10}
+                             (fn [& _] (throw (ex-info "XTDB entered" {}))))]
+                    (= 2 (:count res)))))
+      (check! "Fix C mission: paging with limit 1 walks both rows via the cursor"
+              (let [p1 (query node {:type "probe/scope" :mission "M-a" :limit 1})
+                    p2 (query node {:type "probe/scope" :mission "M-a" :limit 1
+                                    :after (:next-cursor p1)})]
+                (= ["hx:m:1" "hx:m:3"]
+                   (concat (map :hx/id (:hyperedges p1)) (map :hx/id (:hyperedges p2))))))
+      (check! "Fix C mission: include-total stays on the scan path"
+              (not (graph/type-projection-servable?
+                    {:type "probe/scope" :mission "M-a" :limit 10 :include-total? true})))
 
       ;; deletion maintenance: a tombstone repaired by catch-up leaves the
       ;; projection (the row is gone from hx_node entirely)

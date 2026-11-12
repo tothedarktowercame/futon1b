@@ -1405,14 +1405,22 @@
    other. Exact only up to the checkpoint plus hook repairs; :hx-index
    annotates the source like every indexed read, :doc-projection marks that
    XTDB was never entered."
-  [{:keys [t n after include-total? fields]}]
-  (let [docs (hx/type-docs {:type t :after after :limit n})
-        ids (mapv :xt/id docs)
+  [{:keys [t n after include-total? fields mission]}]
+  (let [{:keys [docs next-cursor]}
+        (if mission
+          ;; type + mission (the scope ingest's per-binder read): the cursor
+          ;; is the last candidate scanned, since the exact mission check
+          ;; can leave a page short of n.
+          (let [{:keys [docs last-candidate full?]}
+                (hx/type-mission-docs {:type t :mission mission :after after :limit n})]
+            {:docs docs :next-cursor (when full? last-candidate)})
+          (let [docs (hx/type-docs {:type t :after after :limit n})
+                ids (mapv :xt/id docs)]
+            {:docs docs :next-cursor (when (= n (count ids)) (peek ids))}))
         out (mapv #(if (seq fields)
                      (project-hyperedge-fields % fields)
                      (dissoc % :xt/id))
-                  docs)
-        next-cursor (when (= n (count ids)) (peek ids))]
+                  docs)]
     (cond-> {:hyperedges out
              :count (if include-total? (hx/type-count t) (count out))
              :count-exact? (boolean include-total?)
@@ -1428,10 +1436,13 @@
    expensive-read admission, exactly as the clock projection. Keep the
    conditions identical to the projection branch in hyperedges-query-uncached."
   [{:keys [type end end-prefix limit latest? repo source-file mission
-           valid-as-of system-as-of]}]
+           valid-as-of system-as-of include-total?]}]
   (and (some? type)
-       (not (or end end-prefix latest? repo source-file mission
+       (not (or end end-prefix latest? repo source-file
                 valid-as-of system-as-of))
+       ;; type + mission is served too (hx/type-mission-docs), except with
+       ;; include-total, whose exact mission count the projection lacks.
+       (not (and mission include-total?))
        (int? limit) (pos? limit)
        (hx/reads-usable?)
        (hx/node-index-ready?)
@@ -1591,7 +1602,7 @@
         (type-projection-servable? opts)
         (hyperedges-type-doc-projection
          {:t t :n (long limit) :after after
-          :include-total? include-total? :fields fields})
+          :include-total? include-total? :fields fields :mission mission})
 
         (and limited?
                (not (or repo source-file mission))
