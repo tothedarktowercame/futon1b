@@ -136,6 +136,17 @@
           (is (= (inc counter) (a/source-sequence node))))
         (is (every? #(= :ABSENT %) (vals (:records (edn/read-string (slurp (:backup first-run)))))))))))
 
+(deftest entity-preflight-does-not-exhaust-query-permits
+  (let [active (atom 0) peak (atom 0)]
+    (with-redefs [m/point-doc (fn [_ _ id]
+                              (let [n (swap! active inc)]
+                                (swap! peak max n)
+                                (try (Thread/sleep 20) {:xt/id id}
+                                     (finally (swap! active dec)))))]
+      (is (= (into {} (for [id (range 12)] [id {:xt/id id}]))
+             (m/point-docs nil :entities (range 12))))
+      (is (<= @peak 4)))))
+
 (let [result (run-tests 'test-migrate-workplan)]
   (shutdown-agents)
   (when (pos? (+ (:fail result) (:error result))) (System/exit 1)))

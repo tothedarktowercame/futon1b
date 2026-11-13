@@ -146,6 +146,15 @@
 
 (defn point-doc [node table id]
   (first (fxt/hydrate-by-ids node table [id])))
+(defn point-docs
+  "Full point reads in groups of four; never occupy all eight query permits."
+  [node table ids]
+  (into {}
+        (mapcat (fn [group]
+                  (let [jobs (mapv (fn [id] (future [id (point-doc node table id)])) group)]
+                    (mapv deref jobs))))
+        (partition-all 4 ids)))
+
 (defn record-doc [r]
   (cond-> (merge {:xt/id (:id r) :record/data (arx/canonical-record-data r)
                  :record/operation (operation r)} (arx/flat-columns (operation r) r))
@@ -167,7 +176,7 @@
     (throw (ex-info "Duplicate batch IDs" {})))
   (let [ids (set (map :id rs))
         before (into {} (map (fn [r] [(:id r) (point-doc node (tables (operation r)) (:id r))])) rs)
-        entities (into {} (map (fn [id] [id (point-doc node :entities id)])) (set (mapcat entity-deps rs)))
+        entities (point-docs node :entities (set (mapcat entity-deps rs)))
         by-entity (into {} (keep (fn [[_ m]] (when (:entity-id m) [(:entity-id m) m]))) item-map)]
     (doseq [r rs]
       (when-let [old (get before (:id r))]
