@@ -155,6 +155,22 @@
                     (mapv deref jobs))))
         (partition-all 4 ids)))
 
+(defn record-docs
+  "Bounded SQL reads of Arxana records; never scan the large entity table."
+  [node table ids]
+  (assert (contains? (set (vals tables)) table))
+  (merge (zipmap ids (repeat nil))
+         (into {} (mapcat (fn [batch]
+                           (map (juxt :xt/id identity)
+                                (fxt/safe-q node
+                                  (into [(str "SELECT * FROM " (name table) " WHERE _id IN ("
+                                              (str/join "," (repeat (count batch) "?")) ")")]
+                                        batch))))
+                         (partition-all 100 (distinct (seq ids)))))))
+(defn batch-record-docs [node rs]
+  (into {} (mapcat (fn [[op group]] (record-docs node (tables op) (mapv :id group)))
+                  (group-by operation rs))))
+
 (defn record-doc [r]
   (cond-> (merge {:xt/id (:id r) :record/data (arx/canonical-record-data r)
                  :record/operation (operation r)} (arx/flat-columns (operation r) r))
@@ -175,7 +191,7 @@
   (when-not (= (count rs) (count (set (map :id rs))))
     (throw (ex-info "Duplicate batch IDs" {})))
   (let [ids (set (map :id rs))
-        before (into {} (map (fn [r] [(:id r) (point-doc node (tables (operation r)) (:id r))])) rs)
+        before (batch-record-docs node rs)
         entities (point-docs node :entities (set (mapcat entity-deps rs)))
         by-entity (into {} (keep (fn [[_ m]] (when (:entity-id m) [(:entity-id m) m]))) item-map)]
     (doseq [r rs]
@@ -185,8 +201,9 @@
     (doseq [r rs, id (set/intersection ids (clusion-deps r))]
       (when-not (:type-revision (first (filter #(= id (:id %)) rs)))
         (throw (ex-info "Subject is not a clusion" {:id id}))))
-    (doseq [id (set/difference (set (mapcat clusion-deps rs)) ids)]
-      (when-not (arx/clusion-by-id node id)
+    (doseq [[id doc] (record-docs node :arxana_clusions
+                                 (set/difference (set (mapcat clusion-deps rs)) ids))]
+      (when-not doc
         (throw (ex-info "Missing clusion dependency" {:id id}))))
     (doseq [[id doc] entities]
       (let [m (by-entity id)]
@@ -267,9 +284,9 @@
       (when (seq new)
         (xt/execute-tx node (batch-ops new equal counter entities)
                        {:metadata {:workplan-migration transform-version}}))
-      (doseq [r rs]
-        (let [actual (point-doc node (tables (operation r)) (:id r))]
-          (when-not (= (record-doc r) actual)
+      (let [actual (batch-record-docs node rs)]
+        (doseq [r rs]
+          (when-not (= (record-doc r) (actual (:id r)))
             (throw (ex-info "Full record/flat-column readback mismatch" {:id (:id r) :backup backup})))))
       (let [caught-up (idx/catch-up! index node)]
         (when-not (= (idx/index-watermark index) (arx/source-sequence node))
