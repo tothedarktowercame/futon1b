@@ -16,6 +16,10 @@
             [futon1b-xt :as fxt]
             [xtdb.api :as xt]))
 
+(def excluded-xids
+  "Distinct documents under different watcher roots; never merge by external ID."
+  #{"M-coordination-rewrite" "M-u88-contextual-preferences"})
+
 (defn edge-key
   "Type plus ORDERED endpoints: direction is part of an edge (parent/child,
   from/to), so [a b] and [b a] are different edges."
@@ -40,6 +44,9 @@
   "Pure planner. All documents and edge metadata are retained. Existing winner
   values (including nil) take precedence; conflicting loser-only values refuse."
   [{:keys [winner ids] :as entry} entities edges]
+  (when (excluded-xids (:xid entry))
+    (throw (ex-info "Excluded: distinct documents under different watcher roots"
+                    {:xid (:xid entry)})))
   (let [by-id (into {} (map (juxt :xt/id identity) entities))
         existing-win (get by-id winner)
         base (first (sort-by :xt/id entities))
@@ -145,7 +152,8 @@
 
 (defn dry-run! [node entries output sidecar]
   (with-open [w (io/writer output)]
-    (doseq [entry entries]
+    (doseq [entry entries
+            :when (not (excluded-xids (:xid entry)))]
       (let [result (try (assoc (summary (if sidecar (sidecar-plan sidecar entry node)
                                            (read-plan node entry))) :mode :DRY-RUN)
                         (catch Exception e {:xid (:xid entry) :mode :DRY-RUN
@@ -153,7 +161,8 @@
                                             :error (.getMessage e) :data (ex-data e)}))]
         (.write w (str (pr-str result) "\n")) (.flush w)
         (prn result))))
-  {:dry-run output :count (count entries)})
+  {:dry-run output :count (count (remove #(excluded-xids (:xid %)) entries))
+   :excluded (mapv :xid (filter #(excluded-xids (:xid %)) entries))})
 
 (defn- backup! [root p]
   (let [dir (io/file root (str (java.util.UUID/randomUUID)))]

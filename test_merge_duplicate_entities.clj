@@ -23,6 +23,12 @@
    (edge "cluster" :cascade/cluster-member ["cluster" "fixture/loser"])
    (edge "code" (keyword "code" "v05-example") ["code" "fixture/loser"])])
 
+(deftest excluded-identity-cannot-be-merged
+  ;; Invented docs with an excluded external ID exercise the production guard.
+  (doseq [xid m/excluded-xids]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Excluded: distinct documents"
+                          (m/plan (assoc entry :xid xid) entities edges)))))
+
 (deftest invented-planner
   (let [p (m/plan entry entities edges)]
     (is (= #{"held" "clock" "cluster" "code"} (set (map :xt/id (:rewrite p)))))
