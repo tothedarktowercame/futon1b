@@ -190,9 +190,12 @@
 ;; ---------------------------------------------------------------------------
 
 (def mission-doc-repo-allow-list
-  ["futon0-d" "futon2-d" "futon3-d" "futon3a-d" "futon3b-d" "futon3c-d"
-   "futon4-d" "futon4-elisp-d" "futon5-d" "futon5a-d" "futon6-d" "futon6-py-d"
-   "futon7-d"])
+  ;; futon1b-d, futon5-d2, futon7a-d: labels the futon3c watcher uses
+  ;; (futon3c watcher/roots.clj) that were missing, so their mission entity
+  ;; writes were rejected :non-canonical-id (claude-13, 2026-11-13).
+  ["futon0-d" "futon1b-d" "futon2-d" "futon3-d" "futon3a-d" "futon3b-d" "futon3c-d"
+   "futon4-d" "futon4-elisp-d" "futon5-d" "futon5-d2" "futon5a-d" "futon6-d" "futon6-py-d"
+   "futon7-d" "futon7a-d"])
 
 (def mission-doc-id-pattern
   (str "^(" (str/join "|" mission-doc-repo-allow-list)
