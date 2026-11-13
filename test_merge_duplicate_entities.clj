@@ -39,6 +39,16 @@
     (is (= 5 (:expected p)))
     (is (every? #(= {:invented true} (:hx/props %)) (:rewrite p)))))
 
+(deftest invented-retired-id-name
+  (let [ds (assoc-in entities [0 :entity/name] "fixture/loser")]
+    (is (= "fixture/winner" (get-in (m/plan entry ds edges) [:winner-doc :entity/name])))
+    (is (= ds (:entities (m/plan entry ds edges))))
+    (is (= "A human title" (get-in (m/plan entry (assoc-in ds [0 :entity/name] "A human title") edges)
+                                   [:winner-doc :entity/name]))))
+  (let [ds (mapv #(assoc % :entity/name (:xt/id %)) entities)]
+    (is (= "fixture/new-winner"
+           (get-in (m/plan (assoc entry :winner "fixture/new-winner") ds edges) [:winner-doc :entity/name])))))
+
 (deftest invented-reviewed-property-resolution
   (let [ds (mapv (fn [d id origin]
                    (assoc d :entity/props (assoc (:entity/props d)

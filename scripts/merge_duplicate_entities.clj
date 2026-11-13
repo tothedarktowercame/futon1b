@@ -56,6 +56,9 @@
                 (when base (cond-> (assoc base :xt/id winner :entity/props {})
                              (contains? base :entity/id) (assoc :entity/id winner))))
         losers (vec (sort (remove #{winner} ids)))
+        ;; Entity GET also resolves names. Do not leave a retired ID as the
+        ;; winner's name, or GET loser would still resolve to the winner.
+        win (if ((set losers) (:entity/name win)) (assoc win :entity/name winner) win)
         _ (when-not (and winner win (every? by-id losers))
             (throw (ex-info "Missing entity; refresh worklist" {:entry entry})))
         _ (doseq [d entities]
