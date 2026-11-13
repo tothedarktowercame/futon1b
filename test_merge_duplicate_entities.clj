@@ -114,6 +114,25 @@
       (is (= "active" (get-in (first (fxt/hydrate-by-ids node :entities ["fixture/winner"]))
                               [:entity/props :mission/status]))))))
 
+(deftest invented-batch-continues-without-retry
+  (let [root (str (java.nio.file.Files/createTempDirectory
+                   "invented-batch-test" (make-array java.nio.file.attribute.FileAttribute 0)))
+        calls (atom [])
+        plans (mapv (fn [id] {:xid id :winner "fixture/winner" :losers ["fixture/loser"]})
+                    ["invented-fail" "invented-ok" "invented-held" "invented-done"])]
+    (with-redefs [m/execute-one! (fn [_ e _]
+                                 (swap! calls conj (:xid e))
+                                 (if (= "invented-fail" (:xid e))
+                                   (throw (ex-info "Invented failure" {}))
+                                   {:xid (:xid e) :status :OK}))]
+      (let [r (m/run-clear! nil plans {:exclude #{"invented-held"} :done #{"invented-done"}
+                                       :progress-path (str root "/progress.edn")
+                                       :log-path (str root "/log.edn")})]
+        (is (= ["invented-fail" "invented-ok"] @calls))
+        (is (= :complete (:status r)))
+        (is (= [1 1 2] (mapv #(count (get r %)) [:ok :fail :skipped])))
+        (is (re-find #"Invented failure" (slurp (str root "/log.edn"))))))))
+
 (let [r (run-tests 'test-merge-duplicate-entities)]
   (shutdown-agents)
   (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))

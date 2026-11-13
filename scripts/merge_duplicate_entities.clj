@@ -243,3 +243,45 @@
              (doseq [d (concat (:rewrite p) (:drop p))]
                (graph/invalidate-hyperedge-query-cache! (:hx/type d))
                (graph/refresh-memory-projection-component! node (:xt/id d)))))))))))
+
+(defn run-clear!
+  "Run the clear entries of a reviewed dry-run once. EXCLUDE is an explicit
+  set of held mission IDs; DONE contains previously completed mission IDs.
+  Every execution replans from live state. Failures are logged and never retried.
+  Persist progress after each mission so a detached eval remains observable."
+  [node plans {:keys [exclude done progress-path log-path] :as opts}]
+  (let [state (atom {:status :running :ok [] :fail [] :skipped []})
+        save! #(spit progress-path (pr-str @state))]
+    (save!)
+    (doseq [p plans]
+      (let [xid (:xid p)
+            reason (cond
+                     (excluded-xids xid) :distinct-documents
+                     (contains? exclude xid) :held
+                     (contains? done xid) :already-done
+                     (:error p) :dry-run-error
+                     (seq (:prop-conflicts p)) :property-conflict
+                     (seq (:missing-required-props p)) :missing-properties)]
+        (if reason
+          (swap! state update :skipped conj {:xid xid :reason reason})
+          (let [entry (assoc (select-keys p [:xid :winner])
+                             :ids (conj (vec (:losers p)) (:winner p)))
+                log-size (.length (io/file log-path))]
+            (swap! state assoc :current xid)
+            (save!)
+            (try
+              (let [receipt (execute-one! node entry opts)]
+                (swap! state update :ok conj receipt))
+              (catch Exception e
+                (let [failure {:xid xid :status :FAIL :error (.getMessage e)
+                               :data (ex-data e)}]
+                  ;; execute-one! logs post-backup failures itself. Cover its
+                  ;; preflight failures here without duplicating the log line.
+                  (when (= log-size (.length (io/file log-path)))
+                    (spit log-path (str (pr-str failure) "\n") :append true))
+                  (swap! state update :fail conj failure))))))
+        (swap! state dissoc :current)
+        (save!)))
+    (swap! state assoc :status :complete)
+    (save!)
+    @state))
