@@ -1405,15 +1405,21 @@
    other. Exact only up to the checkpoint plus hook repairs; :hx-index
    annotates the source like every indexed read, :doc-projection marks that
    XTDB was never entered."
-  [{:keys [t n after include-total? fields mission]}]
+  [{:keys [t n after include-total? fields mission repo source-file]}]
   (let [{:keys [docs next-cursor]}
-        (if mission
+        (cond
+          source-file
+          (let [docs (hx/type-source-file-docs {:type t :repo repo :source-file source-file
+                                               :after after :limit n})]
+            {:docs docs :next-cursor (when (= n (count docs)) (:xt/id (peek docs)))})
+          mission
           ;; type + mission (the scope ingest's per-binder read): the cursor
           ;; is the last candidate scanned, since the exact mission check
           ;; can leave a page short of n.
           (let [{:keys [docs last-candidate full?]}
                 (hx/type-mission-docs {:type t :mission mission :after after :limit n})]
             {:docs docs :next-cursor (when full? last-candidate)})
+          :else
           (let [docs (hx/type-docs {:type t :after after :limit n})
                 ids (mapv :xt/id docs)]
             {:docs docs :next-cursor (when (= n (count ids)) (peek ids))}))
@@ -1430,16 +1436,18 @@
       next-cursor (assoc :next-cursor next-cursor))))
 
 (defn type-projection-servable?
-  "Fix C: True when OPTS (a bounded type-only read - no end/end-prefix,
-   filters, latest or as-of) can be answered wholly from the current doc
+  "True when OPTS (bounded type-only, type+mission, or indexed
+   type+repo+source-file; no end/end-prefix, latest or as-of) fit the current doc
    projection, without entering XTDB. The HTTP route uses this to bypass
    expensive-read admission, exactly as the clock projection. Keep the
    conditions identical to the projection branch in hyperedges-query-uncached."
   [{:keys [type end end-prefix limit latest? repo source-file mission
            valid-as-of system-as-of include-total?]}]
   (and (some? type)
-       (not (or end end-prefix latest? repo source-file
-                valid-as-of system-as-of))
+       (not (or end end-prefix latest? valid-as-of system-as-of))
+       (or (not (or repo source-file))
+           (and (string? repo) (string? source-file) (not mission)
+                (not include-total?) (hx/source-file-projection-ready?)))
        ;; type + mission is served too (hx/type-mission-docs), except with
        ;; include-total, whose exact mission count the projection lacks.
        (not (and mission include-total?))
@@ -1602,7 +1610,8 @@
         (type-projection-servable? opts)
         (hyperedges-type-doc-projection
          {:t t :n (long limit) :after after
-          :include-total? include-total? :fields fields :mission mission})
+          :include-total? include-total? :fields fields :mission mission
+          :repo repo :source-file source-file})
 
         (and limited?
                (not (or repo source-file mission))
@@ -2040,7 +2049,7 @@
           (let [rows (hydrate-memory-components
                       node (mapv :xt/id selected+) {})
                 components (mapv hydrated-row->component rows)
-                observed-watermark (node-watermark node)
+                _observed-watermark (node-watermark node)
                 ;; Only a memory mutation invalidates the build. The global
                 ;; watermark moves on every evidence append, so gating on it
                 ;; livelocked: 80-250 s per hydrate, never quiet, 5 attempts.

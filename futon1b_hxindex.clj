@@ -200,11 +200,36 @@
    (when-not (some (comp #{"doc_edn"} :name)
                    (jdbc/execute! ds ["PRAGMA table_info(hx_node)"]))
      (jdbc/execute! ds ["ALTER TABLE hx_node ADD COLUMN doc_edn TEXT"]))
+   (write-locked*
+    (fn []
+      (let [columns (set (map :name (jdbc/execute! ds ["PRAGMA table_info(hx_node)"] unqualified)))]
+        (doseq [column ["repo" "source_file"] :when (not (columns column))]
+          (jdbc/execute! ds [(str "ALTER TABLE hx_node ADD COLUMN " column " TEXT")]))
+        (jdbc/execute! ds ["CREATE INDEX IF NOT EXISTS hx_node_source_file
+                            ON hx_node(type, repo, source_file, hx_id)
+                            WHERE source_file IS NOT NULL"]))))
    {:ok true}))
 
 ;; ---------------------------------------------------------------------------
 ;; Row upsert/delete.
 ;; ---------------------------------------------------------------------------
+
+(defn- source-column [doc k]
+  ;; XTQL compares the flat column to a string parameter, not to a stringified
+  ;; keyword/number or to a similarly named nested property.
+  (let [v (get doc k)] (when (string? v) v)))
+
+(defn- stored-doc [doc]
+  (binding [*print-length* nil *print-level* nil]
+    (pr-str (dissoc doc :xt/id))))
+
+(defn- upsert-node! [tx doc]
+  (jdbc/execute! tx
+                 ["INSERT INTO hx_node(hx_id,type,doc_edn,repo,source_file) VALUES (?,?,?,?,?)
+                   ON CONFLICT(hx_id) DO UPDATE SET type=excluded.type,
+                     doc_edn=excluded.doc_edn, repo=excluded.repo, source_file=excluded.source_file"
+                  (str (:xt/id doc)) (str (:hx/type doc)) (stored-doc doc)
+                  (source-column doc :prop/repo) (source-column doc :prop/source-file)]))
 
 (defn index-doc!
   "Delete any hx_edge rows for the doc's hx_id, insert one row per endpoint
@@ -220,10 +245,7 @@
       (doseq [[pos end] (map-indexed vector endpoints)]
         (jdbc/execute! tx ["INSERT INTO hx_edge(hx_id, type, pos, endpoint)
                             VALUES (?,?,?,?)" id t pos (str end)]))
-      (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type, doc_edn) VALUES (?,?,?)
-                          ON CONFLICT(hx_id) DO UPDATE
-                          SET type=excluded.type, doc_edn=excluded.doc_edn"
-                         id t (pr-str (dissoc doc :xt/id))])
+      (upsert-node! tx doc)
       (upsert-clock! tx id doc)))
   (count (:hx/endpoints doc)))
 
@@ -238,10 +260,7 @@
         (doseq [[pos end] (map-indexed vector (:hx/endpoints doc))]
           (jdbc/execute! tx ["INSERT INTO hx_edge(hx_id, type, pos, endpoint)
                               VALUES (?,?,?,?)" id t pos (str end)]))
-        (jdbc/execute! tx ["INSERT INTO hx_node(hx_id, type, doc_edn) VALUES (?,?,?)
-                            ON CONFLICT(hx_id) DO UPDATE
-                            SET type=excluded.type, doc_edn=excluded.doc_edn"
-                           id t (pr-str (dissoc doc :xt/id))])
+        (upsert-node! tx doc)
         (upsert-clock! tx id doc))))
   (count docs))
 
@@ -554,18 +573,11 @@
                                 unqualified))))
 
 (defn- upsert-docs!
-  "hx_node rows (type + doc_edn) for full ROWS, one SQLite transaction."
+  "hx_node rows and indexed columns for full ROWS, one SQLite transaction."
   [ds rows]
   (when (seq rows)
     (with-write-tx [tx ds]
-      (doseq [r rows
-              :let [id (str (:xt/id r))]]
-        (jdbc/execute! tx
-                       ["INSERT INTO hx_node(hx_id, type, doc_edn) VALUES (?,?,?)
-                         ON CONFLICT(hx_id) DO UPDATE
-                         SET type=excluded.type, doc_edn=excluded.doc_edn"
-                        id (str (:hx/type r))
-                        (pr-str (dissoc r :xt/id))]))))
+      (doseq [r rows] (upsert-node! tx r))))
   (count rows))
 
 (defn- backfill-doc-range!
@@ -651,6 +663,75 @@
    column existed, until the first catch-up! after the reload backfills it."
   []
   (boolean (when-let [ds (ds*)] (meta-get ds "hx-doc-backfill"))))
+
+(defn source-file-projection-ready? []
+  (boolean (when-let [ds (ds*)] (meta-get ds "source-columns-v1"))))
+
+(defn backfill-source-files!
+  "Populate the indexed flat source columns from cached documents in bounded
+  batches. No XTDB scan or long-held query permit. A malformed legacy cached
+  EDN document is hydrated by point ID outside the write lock. Compare-and-set
+  updates cannot overwrite a concurrent hook or resurrect a deleted row.
+  Resume cursor and page updates commit together; only completion enables reads."
+  [ds node & {:keys [page budget-ms] :or {page 250 budget-ms 1000}}]
+  (when-not (and (pos? page) (pos? budget-ms))
+    (throw (ex-info "Positive backfill page and budget required" {})))
+  (when-not (meta-get ds "hx-doc-backfill")
+    (throw (ex-info "Document projection must be complete first" {})))
+  (let [started (System/nanoTime)
+        elapsed #(quot (- (System/nanoTime) started) 1000000)]
+    (loop [after (or (meta-get ds "source-columns-after") "") n 0]
+      (cond
+        (meta-get ds "source-columns-v1") {:complete true :rows n :elapsed-ms (elapsed)}
+        (and (pos? n) (>= (elapsed) budget-ms)) {:complete false :rows n :elapsed-ms (elapsed)}
+        :else
+        (let [rows (jdbc/execute! ds
+                                 ["SELECT hx_id, doc_edn FROM hx_node
+                                   WHERE hx_id > ? AND doc_edn LIKE '%:prop/source-file%'
+                                   ORDER BY hx_id LIMIT ?" after (long page)] unqualified)
+              prepared (mapv (fn [{:keys [hx_id doc_edn] :as row}]
+                               (assoc row :doc
+                                      (try (edn/read-string doc_edn)
+                                           (catch Exception _
+                                             (first (fxt/hydrate-by-ids node :hyperedges [hx_id]))))))
+                             rows)
+              hi (:hx_id (peek rows))]
+          (with-write-tx [tx ds]
+            (doseq [{:keys [hx_id doc_edn doc]} prepared]
+              ;; A missing canonical doc is being retracted. Its hook removes
+              ;; the row; refuse to certify this backfill until that happens.
+              (if doc
+                (jdbc/execute! tx
+                               ["UPDATE hx_node SET repo=?, source_file=?, doc_edn=?
+                                 WHERE hx_id=? AND doc_edn=?"
+                                (source-column doc :prop/repo) (source-column doc :prop/source-file)
+                                (stored-doc doc) hx_id doc_edn])
+                (when (seq (jdbc/execute! tx ["SELECT hx_id FROM hx_node WHERE hx_id=? AND doc_edn=?"
+                                             hx_id doc_edn]))
+                  (throw (ex-info "Cached document missing from XTDB; await retraction repair"
+                                  {:id hx_id})))))
+            (if hi
+              (jdbc/execute! tx ["INSERT INTO hx_meta(k,v) VALUES('source-columns-after',?)
+                                 ON CONFLICT(k) DO UPDATE SET v=excluded.v" hi])
+              (do
+                (jdbc/execute! tx ["INSERT INTO hx_meta(k,v) VALUES('source-columns-v1','1')
+                                   ON CONFLICT(k) DO UPDATE SET v=excluded.v"])
+                (jdbc/execute! tx ["DELETE FROM hx_meta WHERE k='source-columns-after'"]))))
+          (if hi (recur hi (+ n (count rows)))
+              {:complete true :rows n :elapsed-ms (elapsed)}))))))
+
+(defn type-source-file-docs
+  "Indexed type + repo + flat source-file equality, ordered/keyset-paged like
+  the XTQL window. Includes zero-endpoint hyperedges; never scans doc text."
+  [{:keys [type repo source-file after limit]}]
+  (when-let [ds (ds*)]
+    (mapv (fn [{:keys [hx_id doc_edn]}]
+            (assoc (edn/read-string doc_edn) :xt/id hx_id))
+          (jdbc/execute! ds
+                         ["SELECT hx_id,doc_edn FROM hx_node
+                           WHERE type=? AND repo=? AND source_file=? AND hx_id>?
+                           ORDER BY hx_id LIMIT ?"
+                          (str type) repo source-file (or after "") (long limit)] unqualified))))
 
 (defn type-docs
   "Fix C: current-valid documents of TYPE (stored as `(str keyword)`, colon
@@ -768,6 +849,12 @@
                                                (:class err) ": " (:message err)))
                                  (flush)
                                  {:error err}))))
+            _source-backfill
+            (when (and (meta-get ds "hx-doc-backfill")
+                       (nil? (meta-get ds "source-columns-v1")))
+              (try (backfill-source-files! ds node :budget-ms 1000)
+                   (catch Exception e
+                     (swap! !stats assoc :last-source-backfill-error (.getMessage e)))))
             tx-id (latest-tx-id node)
             prior-tx (some-> (meta-get ds "last-tx-id") Long/parseLong)]
         (cond
@@ -853,7 +940,7 @@
       (jdbc/execute! tx ["DELETE FROM hx_edge"])
       (jdbc/execute! tx ["DELETE FROM hx_node"])
       (jdbc/execute! tx ["DELETE FROM hx_clock"])
-      (jdbc/execute! tx ["DELETE FROM hx_meta WHERE k IN ('checkpoint-ts','checkpoint-id','last-tx-id','hx-node-backfill','hx-clock-backfill','hx-doc-backfill')"]))
+      (jdbc/execute! tx ["DELETE FROM hx_meta WHERE k IN ('checkpoint-ts','checkpoint-id','last-tx-id','hx-node-backfill','hx-clock-backfill','hx-doc-backfill','source-columns-v1','source-columns-after')"]))
     (assoc (catch-up! node :page page :force true)
            :total-elapsed-ms (- (System/currentTimeMillis) started))))
 
