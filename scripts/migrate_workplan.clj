@@ -204,9 +204,17 @@
         [:sql "ASSERT NOT EXISTS (SELECT 1 FROM arxana_index_state WHERE _id='source')"]
         [:sql "ASSERT EXISTS (SELECT 1 FROM arxana_index_state WHERE _id='source' AND source$sequence=?)" [counter]])]
      (for [id external] [:sql "ASSERT EXISTS (SELECT 1 FROM arxana_clusions WHERE _id=?)" [id]])
-     (for [[id doc] entity-docs]
-       [:sql "ASSERT EXISTS (SELECT 1 FROM entities WHERE _id=? AND entity$type=? AND entity$external_id=?)"
-        [id (:entity/type doc) (:entity/external-id doc)]])
+     ;; One bounded entity predicate per transaction. Separate EXISTS assertions
+     ;; each scan the live entity columns in XTDB 2; 40 endpoints otherwise
+     ;; turn a small append into a minute-long indexer transaction.
+     (when (seq entity-docs)
+       [[:sql (str "ASSERT (SELECT COUNT(*) FROM entities WHERE "
+                   (str/join " OR " (repeat (count entity-docs)
+                                            "(_id=? AND entity$type=? AND entity$external_id=?)"))
+                   ") = ?")
+         (conj (vec (mapcat (fn [[id doc]] [id (:entity/type doc) (:entity/external-id doc)])
+                           (sort-by key entity-docs)))
+               (count entity-docs))]])
      (for [r existing]
        [:sql (str "ASSERT EXISTS (SELECT 1 FROM " (name (tables (operation r))) " WHERE _id=? AND record$data=?)")
         [(:id r) (arx/canonical-record-data r)]])

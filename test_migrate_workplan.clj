@@ -122,6 +122,18 @@
         (let [missing (evidence (cl [:lexicon/entity 1] [] {:entity/slug "absent"}) "invented" {})]
           (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Missing clusion dependency"
                 (m/append-batch! node index [missing] mapping (str dir)))))
+        (let [other (assoc entity :xt/id "fixture/mission/other" :entity/external-id "M-other")
+              new (cl [:lexicon/entity 1] [] {:entity/slug "invented-multi-entity-guard"})
+              entities {(:xt/id entity) entity (:xt/id other) other}
+              counter (a/source-sequence node)]
+          (xt/execute-tx node [[:put-docs :entities other]])
+          (is (thrown? Throwable
+                (xt/execute-tx node (m/batch-ops [new] [] counter
+                                    (assoc-in entities [(:xt/id other) :entity/external-id] "M-wrong")))))
+          (is (nil? (a/clusion-by-id node (:id new))))
+          (xt/execute-tx node (m/batch-ops [new] [] counter entities))
+          (is (= new (a/clusion-by-id node (:id new))))
+          (is (= (inc counter) (a/source-sequence node))))
         (is (every? #(= :ABSENT %) (vals (:records (edn/read-string (slurp (:backup first-run)))))))))))
 
 (let [result (run-tests 'test-migrate-workplan)]
