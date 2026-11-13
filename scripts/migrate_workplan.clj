@@ -249,10 +249,10 @@
                     (placeholders (count external)) ")) = ?")
           (conj external (count external))]])
       (when (seq entity-docs)
-        [[:sql (str "ASSERT (SELECT COUNT(*) FROM entities WHERE "
-                    (str/join " OR " (repeat (count entity-docs)
-                                             "(_id=? AND entity$type=? AND entity$external_id=?)"))
-                    ") = ?")
+        [[:sql (str "ASSERT (SELECT COUNT(*) FROM entities e JOIN (VALUES "
+                    (str/join "," (repeat (count entity-docs) "(?, ?, ?)"))
+                    ") AS expected(id, typ, xid) ON e._id=expected.id"
+                    " AND e.entity$type=expected.typ AND e.entity$external_id=expected.xid) = ?")
           (conj (vec (mapcat (fn [[id doc]] [id (:entity/type doc) (:entity/external-id doc)])
                             (sort-by key entity-docs)))
                 (count entity-docs))]])
