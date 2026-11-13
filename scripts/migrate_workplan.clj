@@ -201,44 +201,57 @@
      :new (filterv #(nil? (before (:id %))) (topo-sort rs))
      :equal (filterv #(some? (before (:id %))) rs)}))
 
+(defn- placeholders [n] (str/join "," (repeat n "?")))
+
 (defn batch-ops
-  "Atomic append protocol. In-batch subjects are validated/topologically ordered
-   before constructing ops; external subjects have transaction assertions."
+  "Atomic append protocol with grouped assertions and puts. In-batch subjects
+   are validated before writes; external subjects are asserted in the tx."
   [new existing counter entity-docs]
   (let [ids (set (map :id new))
-        outcomes (mapv (fn [r] (str "workplan-migration:" transform-version ":" (:id r))) new)
-        external (set/difference (set (mapcat clusion-deps new)) ids)]
-    (vec (concat
-     [(if (zero? counter)
-        [:sql "ASSERT NOT EXISTS (SELECT 1 FROM arxana_index_state WHERE _id='source')"]
-        [:sql "ASSERT EXISTS (SELECT 1 FROM arxana_index_state WHERE _id='source' AND source$sequence=?)" [counter]])]
-     (for [id external] [:sql "ASSERT EXISTS (SELECT 1 FROM arxana_clusions WHERE _id=?)" [id]])
-     ;; One bounded entity predicate per transaction. Separate EXISTS assertions
-     ;; each scan the live entity columns in XTDB 2; 40 endpoints otherwise
-     ;; turn a small append into a minute-long indexer transaction.
-     (when (seq entity-docs)
-       [[:sql (str "ASSERT (SELECT COUNT(*) FROM entities WHERE "
-                   (str/join " OR " (repeat (count entity-docs)
-                                            "(_id=? AND entity$type=? AND entity$external_id=?)"))
-                   ") = ?")
-         (conj (vec (mapcat (fn [[id doc]] [id (:entity/type doc) (:entity/external-id doc)])
-                           (sort-by key entity-docs)))
-               (count entity-docs))]])
-     (for [r existing]
-       [:sql (str "ASSERT EXISTS (SELECT 1 FROM " (name (tables (operation r))) " WHERE _id=? AND record$data=?)")
-        [(:id r) (arx/canonical-record-data r)]])
-     (mapcat (fn [r mid n]
-               [[:sql (str "ASSERT NOT EXISTS (SELECT 1 FROM " (name (tables (operation r))) " WHERE _id=?)") [(:id r)]]
-                [:sql "ASSERT NOT EXISTS (SELECT 1 FROM arxana_outcomes WHERE _id=?)" [mid]]
-                [:put-docs (tables (operation r)) (record-doc r)]
-                [:put-docs :arxana_index_events {:xt/id n :source/sequence n :record/id (:id r) :record/table (tables (operation r))}]
-                [:put-docs :arxana_outcomes
-                 {:xt/id mid :outcome/result :committed
-                  :outcome/response (pr-str {:protocol/version arx/protocol-version :message/id mid
-                                            :operation (operation r)
-                                            :ok {:record/id (:id r) :subject-clusion-id (:subject-clusion-id r) :created? true}})}]])
-             new outcomes (range (inc counter) (+ counter 1 (count new))))
-     [[:put-docs :arxana_index_state {:xt/id "source" :source/sequence (+ counter (count new))}]]))))
+        mids (mapv #(str "workplan-migration:" transform-version ":" (:id %)) new)
+        external (vec (sort (set/difference (set (mapcat clusion-deps new)) ids)))
+        groups (sort-by key (group-by operation new))
+        equal-groups (sort-by key (group-by operation existing))
+        events (mapv (fn [r n] {:xt/id n :source/sequence n :record/id (:id r)
+                                :record/table (tables (operation r))})
+                     new (range (inc counter) (+ counter 1 (count new))))
+        outcomes (mapv (fn [r mid]
+                         {:xt/id mid :outcome/result :committed
+                          :outcome/response (pr-str {:protocol/version arx/protocol-version :message/id mid
+                                                    :operation (operation r)
+                                                    :ok {:record/id (:id r)
+                                                         :subject-clusion-id (:subject-clusion-id r)
+                                                         :created? true}})}) new mids)]
+    (vec
+     (concat
+      [(if (zero? counter)
+         [:sql "ASSERT NOT EXISTS (SELECT 1 FROM arxana_index_state WHERE _id='source')"]
+         [:sql "ASSERT EXISTS (SELECT 1 FROM arxana_index_state WHERE _id='source' AND source$sequence=?)" [counter]])]
+      (when (seq external)
+        [[:sql (str "ASSERT (SELECT COUNT(*) FROM arxana_clusions WHERE _id IN ("
+                    (placeholders (count external)) ")) = ?")
+          (conj external (count external))]])
+      (when (seq entity-docs)
+        [[:sql (str "ASSERT (SELECT COUNT(*) FROM entities WHERE "
+                    (str/join " OR " (repeat (count entity-docs)
+                                             "(_id=? AND entity$type=? AND entity$external_id=?)"))
+                    ") = ?")
+          (conj (vec (mapcat (fn [[id doc]] [id (:entity/type doc) (:entity/external-id doc)])
+                            (sort-by key entity-docs)))
+                (count entity-docs))]])
+      (for [[op group] equal-groups]
+        [:sql (str "ASSERT (SELECT COUNT(*) FROM " (name (tables op)) " WHERE "
+                   (str/join " OR " (repeat (count group) "(_id=? AND record$data=?)")) ") = ?")
+         (conj (vec (mapcat #(vector (:id %) (arx/canonical-record-data %)) group)) (count group))])
+      (for [[op group] groups]
+        [:sql (str "ASSERT NOT EXISTS (SELECT 1 FROM " (name (tables op)) " WHERE _id IN ("
+                   (placeholders (count group)) "))") (mapv :id group)])
+      [[:sql (str "ASSERT NOT EXISTS (SELECT 1 FROM arxana_outcomes WHERE _id IN ("
+                  (placeholders (count mids)) "))") mids]]
+      (for [[op group] groups] (into [:put-docs (tables op)] (map record-doc group)))
+      [(into [:put-docs :arxana_index_events] events)
+       (into [:put-docs :arxana_outcomes] outcomes)
+       [:put-docs :arxana_index_state {:xt/id "source" :source/sequence (+ counter (count new))}]]))))
 
 (defn append-batch!
   "Review-gated caller supplies a bounded dependency group. No automatic retry:

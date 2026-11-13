@@ -122,6 +122,12 @@
         (let [missing (evidence (cl [:lexicon/entity 1] [] {:entity/slug "absent"}) "invented" {})]
           (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Missing clusion dependency"
                 (m/append-batch! node index [missing] mapping (str dir)))))
+        (let [new (cl [:lexicon/entity 1] [] {:entity/slug "invented-partial-batch"})
+              counter (a/source-sequence node)]
+          (is (thrown? Throwable
+                (xt/execute-tx node (m/batch-ops [new lexical] [] counter {}))))
+          (is (nil? (a/clusion-by-id node (:id new))))
+          (is (= counter (a/source-sequence node))))
         (let [other (assoc entity :xt/id "fixture/mission/other" :entity/external-id "M-other")
               new (cl [:lexicon/entity 1] [] {:entity/slug "invented-multi-entity-guard"})
               entities {(:xt/id entity) entity (:xt/id other) other}
