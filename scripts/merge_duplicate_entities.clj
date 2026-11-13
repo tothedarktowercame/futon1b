@@ -61,6 +61,15 @@
         win (if ((set losers) (:entity/name win)) (assoc win :entity/name winner) win)
         _ (when-not (and winner win (every? by-id losers))
             (throw (ex-info "Missing entity; refresh worklist" {:entry entry})))
+        stub? (= :excursion-stub (:merge-kind entry))
+        _ (if stub?
+            (when-not (and existing-win (= :excursion/doc (:entity/type win))
+                           (every? #(= :mission/doc (:entity/type (by-id %))) losers))
+              (throw (ex-info "Excursion stub plan requires existing excursion winner and mission losers" {})))
+            (when-not (every? #(= (:entity/type win) (:entity/type %)) entities)
+              (throw (ex-info "Cross-type merge requires explicit reviewed policy" {}))))
+        _ (when (and stub? (seq property-resolutions))
+            (throw (ex-info "Excursion stub inspection cannot resolve properties" {})))
         _ (doseq [d entities]
             (when-not (= (:entity/external-id win) (:entity/external-id d))
               (throw (ex-info "External IDs differ" {:id (:xt/id d)}))))
@@ -85,7 +94,12 @@
                         (reduce-kv (fn [p k v] (if (contains? p k) p (assoc p k v)))
                                    p (or (:entity/props (by-id id)) {})))
                       (or (:entity/props win) {}) losers)
-        props (merge props (update-vals property-resolutions :value))
+        props (if stub? (or (:entity/props win) {})
+                  (merge props (update-vals property-resolutions :value)))
+        withheld (when stub?
+                   (into {} (map (fn [id]
+                                   [id (apply dissoc (:entity/props (by-id id))
+                                              (keys (:entity/props win)))]) losers)))
         ls (set losers)
         affected (filter #(some ls (:hx/endpoints %)) edges)
         unchanged (remove #(some ls (:hx/endpoints %)) edges)
@@ -101,9 +115,10 @@
                       (-> r (update :rewrite conj rewritten) (update :seen conj k)))))
                 {:seen (set (map edge-key unchanged)) :rewrite [] :drop []}
                 (sort-by :xt/id affected))]
-    (merge (select-keys entry [:xid :winner :property-resolutions]) result
+    (merge (select-keys entry [:xid :winner :property-resolutions :merge-kind]) result
            {:losers losers :entities entities :edges edges
             :prop-conflicts prop-conflicts
+            :inspection-only? stub? :withheld-loser-props withheld
             :winner-created? (nil? existing-win)
             :winner-doc (assoc win :entity/props props)
             :props-to-merge (apply dissoc props (keys (:entity/props win)))
@@ -125,9 +140,11 @@
           (fxt/hydrate-by-ids node :entities ids) (incident node ids))))
 
 (defn summary [p]
-  (-> (select-keys p [:xid :winner :losers :winner-created? :prop-conflicts :props-to-merge :property-resolutions :before :expected])
+  (-> (select-keys p [:xid :winner :losers :winner-created? :prop-conflicts :props-to-merge :property-resolutions :before :expected :merge-kind :inspection-only? :withheld-loser-props])
       (assoc :missing-required-props (filterv #(not (get-in p [:winner-doc :entity/props %]))
-                                              [:mission/status :mission/path])
+                                              (if (= :excursion-stub (:merge-kind p))
+                                                [:excursion/status :provenance/path]
+                                                [:mission/status :mission/path]))
              :rewrite-by-type (frequencies (map :hx/type (:rewrite p)))
              :drop-by-type (frequencies (map :hx/type (:drop p))))))
 
@@ -226,8 +243,12 @@
                  (when (gates/arxana-id? id)
                    (throw (ex-info "Reserved arxana ID" {:id id}))))
              _ (when-not (every? #(get-in p [:winner-doc :entity/props %])
-                                 [:mission/status :mission/path])
+                                 (if (= :excursion-stub (:merge-kind p))
+                                                [:excursion/status :provenance/path]
+                                                [:mission/status :mission/path]))
                  (throw (ex-info "Merged winner lacks status/path" (summary p))))
+             _ (when (:inspection-only? p)
+                 (throw (ex-info "Excursion stub plan is inspection-only; property policy needs review" {})))
              _ (when (seq (:prop-conflicts p))
                  (throw (ex-info "Conflicting loser props; resolve before executing" (summary p))))
              backup (backup! backup-root p)]
@@ -274,6 +295,7 @@
                      (excluded-xids xid) :distinct-documents
                      (contains? exclude xid) :held
                      (contains? done xid) :already-done
+                     (:inspection-only? p) :inspection-only
                      (:error p) :dry-run-error
                      (seq (:prop-conflicts p)) :property-conflict
                      (seq (:missing-required-props p)) :missing-properties)]

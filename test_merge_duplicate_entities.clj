@@ -166,6 +166,24 @@
         (is (= [1 1 2] (mapv #(count (get r %)) [:ok :fail :skipped])))
         (is (re-find #"Invented failure" (slurp (str root "/log.edn"))))))))
 
+(deftest invented-excursion-stub-property-boundary
+  (let [docs [{:xt/id "excursion-uuid" :entity/type :excursion/doc
+               :entity/external-id "E-invented"
+               :entity/props {:excursion/status "open" :provenance/path "/invented/E-invented.md"}}
+              {:xt/id "stub" :entity/type :mission/doc :entity/external-id "E-invented"
+               :entity/props {:mission/status "closed" :mission/path "/old/path"}}]
+        entry {:winner "excursion-uuid" :ids ["excursion-uuid" "stub"] :xid "E-invented"}
+        p (m/plan (assoc entry :merge-kind :excursion-stub) docs
+                  [{:xt/id "held" :hx/type :held/on-mission :hx/endpoints ["agent" "stub"]}])]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Cross-type" (m/plan entry docs [])))
+    (is (= (first docs) (:winner-doc p)))
+    (is (empty? (:props-to-merge p)))
+    (is (:inspection-only? p))
+    (is (= {:mission/status "closed" :mission/path "/old/path"}
+           (get-in p [:withheld-loser-props "stub"])))
+    (is (= ["agent" "excursion-uuid"] (-> p :rewrite first :hx/endpoints)))
+    (is (empty? (:missing-required-props (m/summary p))))))
+
 (let [r (run-tests 'test-merge-duplicate-entities)]
   (shutdown-agents)
   (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))
