@@ -289,7 +289,8 @@
            (finally
              (doseq [d (concat (:rewrite p) (:drop p))]
                (graph/invalidate-hyperedge-query-cache! (:hx/type d))
-               (graph/refresh-memory-projection-component! node (:xt/id d)))))))))))
+               (when (= :memory/assert (:hx/type d))
+                 (graph/refresh-memory-projection-component! node (:xt/id d))))))))))))
 
 (defn run-clear!
   "Run the clear entries of a reviewed dry-run once. EXCLUDE is an explicit
