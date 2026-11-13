@@ -94,8 +94,19 @@
                         (reduce-kv (fn [p k v] (if (contains? p k) p (assoc p k v)))
                                    p (or (:entity/props (by-id id)) {})))
                       (or (:entity/props win) {}) losers)
+        approved-stub? (and stub? (= :copy-missing-provenance-path (:stub-path-policy entry)))
+        stub-paths (when approved-stub?
+                     (set (keep #(get-in (by-id %) [:entity/props :mission/path]) losers)))
+        _ (when (and approved-stub?
+                     (not (contains? (:entity/props win) :provenance/path))
+                     (not (and (= 1 (count stub-paths))
+                               (string? (first stub-paths))
+                               (seq (first stub-paths)))))
+            (throw (ex-info "Missing or conflicting stub paths" {:paths stub-paths})))
         props (if stub? (or (:entity/props win) {})
                   (merge props (update-vals property-resolutions :value)))
+        props (if (and approved-stub? (not (contains? props :provenance/path)))
+                (assoc props :provenance/path (first stub-paths)) props)
         withheld (when stub?
                    (into {} (map (fn [id]
                                    [id (apply dissoc (:entity/props (by-id id))
@@ -115,10 +126,10 @@
                       (-> r (update :rewrite conj rewritten) (update :seen conj k)))))
                 {:seen (set (map edge-key unchanged)) :rewrite [] :drop []}
                 (sort-by :xt/id affected))]
-    (merge (select-keys entry [:xid :winner :property-resolutions :merge-kind]) result
+    (merge (select-keys entry [:xid :winner :property-resolutions :merge-kind :stub-path-policy]) result
            {:losers losers :entities entities :edges edges
             :prop-conflicts prop-conflicts
-            :inspection-only? stub? :withheld-loser-props withheld
+            :inspection-only? (and stub? (not approved-stub?)) :withheld-loser-props withheld
             :winner-created? (nil? existing-win)
             :winner-doc (assoc win :entity/props props)
             :props-to-merge (apply dissoc props (keys (:entity/props win)))
@@ -140,7 +151,7 @@
           (fxt/hydrate-by-ids node :entities ids) (incident node ids))))
 
 (defn summary [p]
-  (-> (select-keys p [:xid :winner :losers :winner-created? :prop-conflicts :props-to-merge :property-resolutions :before :expected :merge-kind :inspection-only? :withheld-loser-props])
+  (-> (select-keys p [:xid :winner :losers :winner-created? :prop-conflicts :props-to-merge :property-resolutions :before :expected :merge-kind :stub-path-policy :inspection-only? :withheld-loser-props])
       (assoc :missing-required-props (filterv #(not (get-in p [:winner-doc :entity/props %]))
                                               (if (= :excursion-stub (:merge-kind p))
                                                 [:excursion/status :provenance/path]
@@ -301,7 +312,7 @@
                      (seq (:missing-required-props p)) :missing-properties)]
         (if reason
           (swap! state update :skipped conj {:xid xid :reason reason})
-          (let [entry (assoc (select-keys p [:xid :winner])
+          (let [entry (assoc (select-keys p [:xid :winner :merge-kind :stub-path-policy :property-resolutions])
                              :ids (conj (vec (:losers p)) (:winner p)))
                 log-size (.length (io/file log-path))]
             (swap! state assoc :current xid)

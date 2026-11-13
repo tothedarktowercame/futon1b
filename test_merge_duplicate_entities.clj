@@ -184,6 +184,23 @@
     (is (= ["agent" "excursion-uuid"] (-> p :rewrite first :hx/endpoints)))
     (is (empty? (:missing-required-props (m/summary p))))))
 
+(deftest invented-approved-excursion-path-translation
+  (let [entry {:xid "E-invented" :winner "uuid" :ids ["uuid" "stub"]
+               :merge-kind :excursion-stub :stub-path-policy :copy-missing-provenance-path}
+        docs [{:xt/id "uuid" :entity/type :excursion/doc :entity/external-id "E-invented"
+               :entity/props {:excursion/status "open"}}
+              {:xt/id "stub" :entity/type :mission/doc :entity/external-id "E-invented"
+               :entity/props {:mission/path "/invented.md" :mission/id "E-invented"
+                              :mission/status "closed"}}]
+        p (m/plan entry docs [])]
+    (is (= {:excursion/status "open" :provenance/path "/invented.md"}
+           (get-in p [:winner-doc :entity/props])))
+    (is (false? (:inspection-only? p)))
+    (is (= "/winner.md" (get-in (m/plan entry (assoc-in docs [0 :entity/props :provenance/path] "/winner.md") [])
+                                  [:winner-doc :entity/props :provenance/path])))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"stub paths"
+          (m/plan entry (update-in docs [1 :entity/props] dissoc :mission/path) [])))))
+
 (let [r (run-tests 'test-merge-duplicate-entities)]
   (shutdown-agents)
   (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))
