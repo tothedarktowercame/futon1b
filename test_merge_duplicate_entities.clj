@@ -35,9 +35,28 @@
 
 (deftest invented-rewrite-coalescence
   (let [p (m/plan entry entities [(edge "a" :held/on-mission ["x" "fixture/loser"])
+                                 (edge "a2" :held/on-mission ["x" "fixture/loser"])
                                  (edge "b" :held/on-mission ["fixture/loser" "x"])])]
-    (is (= 1 (count (:rewrite p))))
-    (is (= 1 (count (:drop p))))))
+    ;; same direction coalesces; reversed direction is a different edge
+    (is (= #{"a" "b"} (set (map :xt/id (:rewrite p)))))
+    (is (= ["a2"] (mapv :xt/id (:drop p))))))
+
+(deftest invented-references-beyond-endpoints
+  ;; claude-13 review: real edges also name the mission in :hx/ends and props
+  (let [d {:xt/id "hx|c|fixture/loser" :hx/id "hx|c|fixture/loser" :hx/type :cascade/cluster-member
+           :hx/endpoints ["cluster" "fixture/loser"]
+           :hx/ends [{:entity-id "cluster" :role :cluster} {:entity-id "fixture/loser" :role :mission}]
+           :prop/mission "fixture/loser" :hx/props {:mission "fixture/loser" :note "fixture/loser-ish"}}
+        r (first (:rewrite (m/plan entry entities [d])))]
+    (is (= "hx|c|fixture/loser" (:xt/id r) (:hx/id r)) "ids unchanged")
+    (is (= "fixture/winner" (get-in r [:hx/ends 1 :entity-id])))
+    (is (= "fixture/winner" (:prop/mission r) (get-in r [:hx/props :mission])))
+    (is (= "fixture/loser-ish" (get-in r [:hx/props :note])) "only exact matches")))
+
+(deftest invented-winner-loser-edge-is-dropped
+  (let [p (m/plan entry entities [(edge "nest" :mission-scope/nesting ["fixture/winner" "fixture/loser"])])]
+    (is (empty? (:rewrite p)))
+    (is (= ["nest"] (mapv :xt/id (:drop p))))))
 
 (deftest invented-missing-canonical-winner
   (let [p (m/plan (assoc entry :ids ["fixture/loser"])

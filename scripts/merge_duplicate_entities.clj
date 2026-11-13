@@ -16,7 +16,25 @@
             [futon1b-xt :as fxt]
             [xtdb.api :as xt]))
 
-(defn edge-key [d] [(:hx/type d) (set (:hx/endpoints d))])
+(defn edge-key
+  "Type plus ORDERED endpoints: direction is part of an edge (parent/child,
+  from/to), so [a b] and [b a] are different edges."
+  [d] [(:hx/type d) (vec (:hx/endpoints d))])
+
+(defn- repoint
+  "Rewrite every reference to a loser in edge doc D to WINNER: endpoints, and
+  any string value equal to a loser id anywhere else (:hx/ends entity-id,
+  :prop/*, :hx/props). Document ids stay unchanged."
+  [d ls winner]
+  (let [f (fn walk [x]
+            (cond (and (string? x) (ls x)) winner
+                  (map? x) (into (empty x) (map (fn [[k v]] [k (walk v)])) x)
+                  (vector? x) (mapv walk x)
+                  (sequential? x) (map walk x)
+                  (set? x) (into #{} (map walk) x)
+                  :else x))]
+    (reduce-kv (fn [m k v] (if (#{:xt/id :hx/id} k) (assoc m k v) (assoc m k (f v))))
+               (empty d) d)))
 
 (defn plan
   "Pure planner. All documents and edge metadata are retained. Existing winner
@@ -51,10 +69,12 @@
         unchanged (remove #(some ls (:hx/endpoints %)) edges)
         result (reduce
                 (fn [{:keys [seen] :as r} d]
-                  (let [rewritten (update d :hx/endpoints
-                                          #(mapv (fn [ep] (if (ls ep) winner ep)) %))
-                        k (edge-key rewritten)]
-                    (if (seen k)
+                  (let [rewritten (repoint d ls winner)
+                        k (edge-key rewritten)
+                        eps (:hx/endpoints rewritten)
+                        ;; an edge between winner and loser becomes a self-loop
+                        self-loop? (and (> (count eps) 1) (apply = eps))]
+                    (if (or (seen k) self-loop?)
                       (update r :drop conj d)
                       (-> r (update :rewrite conj rewritten) (update :seen conj k)))))
                 {:seen (set (map edge-key unchanged)) :rewrite [] :drop []}
