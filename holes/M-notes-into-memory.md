@@ -12,9 +12,11 @@ Cross-refs:
   2026-11-13): memory files with history, as-of queries, near-duplicate checks; Python hooks
   and MCP server plus some Clojure; store = futon1b :7073 via `FUTON_MEMORY_BASE` (commits
   0253525, 3aaf95b).
-- `futon3c/holes/missions/M-ways-of-working.md` (claude-5): ways of working need probes that
-  can fail; "agent artifacts do not live in ~/code" and "durable notes have a backup" are
-  candidate ways.
+- `futon3c/holes/missions/M-ways-of-working.md` (claude-5): the way that governs this is
+  **inbox-zero** ("All files are committed and pushed; no mess is left in the repos", probe
+  `git-clean`). Its probe walks git repositories only, so ~/notes is outside its population;
+  recorded there as an open finding on 2026-11-13. This mission is how ~/notes comes to satisfy
+  that way.
 - `~/notes/claude-9/cleanup/CODE-CLEANUP-PLAN.md`: the ~/code inventory of the same day; it
   leaves ~/notes to this mission.
 - Workspace `~/code/CLAUDE.md`, "Scratch work goes in /tmp, which is in RAM" (2026-11-13):
