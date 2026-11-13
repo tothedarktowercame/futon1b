@@ -201,6 +201,16 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"stub paths"
           (m/plan entry (update-in docs [1 :entity/props] dissoc :mission/path) [])))))
 
+(deftest invented-bounded-hydration-preserves-full-documents
+  (let [docs (mapv #(hash-map :xt/id (str %) :unusual/field {:keep %}) (range 9))
+        by-id (into {} (map (juxt :xt/id identity) docs))]
+    (with-redefs [futon1b-xt/hydrate-by-ids
+                  (fn [_ _ ids]
+                    (is (= 1 (count ids)))
+                    (vec (keep by-id ids)))]
+      (is (= docs (m/hydrate-docs nil :hyperedges (mapv :xt/id docs))))
+      (is (= [] (m/hydrate-docs nil :hyperedges []))))))
+
 (let [r (run-tests 'test-merge-duplicate-entities)]
   (shutdown-agents)
   (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))

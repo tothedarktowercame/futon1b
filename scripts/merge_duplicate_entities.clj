@@ -137,18 +137,27 @@
             :expected (count (filter #(some #{winner} (:hx/endpoints %))
                                      (concat unchanged (:rewrite result))))})))
 
+(defn hydrate-docs
+  "Full live documents in bounded groups of four point reads, matching the
+   graph indexed reader's concurrency. Never scan a whole table via IN."
+  [node table ids]
+  (vec (mapcat (fn [batch]
+                 (let [reads (mapv #(future (fxt/hydrate-by-ids node table [%])) batch)]
+                   (mapcat deref reads)))
+               (partition-all 4 ids))))
+
 (defn incident [node ids]
   (let [rows (mapcat #(fxt/timed-q
                       node (fxt/pq '[p-end]
                                    '(-> (from :hyperedges [xt/id hx/endpoints])
                                         (unnest {:ep hx/endpoints})
                                         (where (= ep p-end)) (return xt/id)) %)) ids)]
-    (fxt/hydrate-by-ids node :hyperedges (sort (set (map :xt/id rows))))))
+    (hydrate-docs node :hyperedges (sort (set (map :xt/id rows))))))
 
 (defn read-plan [node {:keys [ids winner] :as entry}]
   (let [ids (vec (distinct (conj ids winner)))]
     (plan (assoc entry :ids ids)
-          (fxt/hydrate-by-ids node :entities ids) (incident node ids))))
+          (hydrate-docs node :entities ids) (incident node ids))))
 
 (defn summary [p]
   (-> (select-keys p [:xid :winner :losers :winner-created? :prop-conflicts :props-to-merge :property-resolutions :before :expected :merge-kind :stub-path-policy :inspection-only? :withheld-loser-props])
@@ -177,7 +186,7 @@
                                                 (when-not doc_edn (throw (ex-info "Missing cached document" {})))
                                                 (assoc (edn/read-string doc_edn) :xt/id hx_id)
                                                 (catch Exception e
-                                                  (or (when node (first (fxt/hydrate-by-ids node :hyperedges [hx_id])))
+                                                  (or (when node (first (hydrate-docs node :hyperedges [hx_id])))
                                                       (throw (ex-info "Unreadable sidecar edge document" {:id hx_id} e)))))]) rows)))]
         (plan (assoc entry :ids ids) entities edges))))))
 
@@ -187,11 +196,11 @@
   (let [snapshot (sidecar-plan sidecar entry node)
         ids (conj (:losers snapshot) (:winner snapshot))
         edge-ids (mapv :xt/id (:edges snapshot))
-        edges (fxt/hydrate-by-ids node :hyperedges edge-ids)]
+        edges (hydrate-docs node :hyperedges edge-ids)]
     (when-not (= (set edge-ids) (set (map :xt/id edges)))
       (throw (ex-info "Sidecar changed; refresh before merging" {})))
     (plan (assoc entry :ids ids)
-          (fxt/hydrate-by-ids node :entities ids) edges)))
+          (hydrate-docs node :entities ids) edges)))
 
 (defn dry-run! [node entries output sidecar]
   (with-open [w (io/writer output)]
@@ -266,14 +275,17 @@
          (try
            (graph/with-entity-mutation
             #(xt/execute-tx node (mapv (fn [[table d]] [:put-docs table d]) puts)))
-           (doseq [[table d] puts]
-             (when-not (= d (first (fxt/hydrate-by-ids node table [(:xt/id d)])))
-               (throw (ex-info "Put readback mismatch; no deletions performed" {:id (:xt/id d)}))))
+           (doseq [[table rows] (group-by first puts)]
+             (let [expected (mapv second rows)
+                   actual (hydrate-docs node table (mapv :xt/id expected))]
+               (when-not (= expected actual)
+                 (throw (ex-info "Put readback mismatch; no deletions performed"
+                                 {:table table :ids (mapv :xt/id expected)})))))
            (ent/await-hook! (ent/on-put! (:winner-doc p)))
            (doseq [d (:rewrite p)] (when-let [f (hx/on-put! d)] @f))
            (graph/retract-documents! node {:documents (mapv (fn [[t id]] {:table t :id id}) deletes)})
            (let [after (if sidecar
-                         (fxt/hydrate-by-ids node :hyperedges (verify-sidecar! sidecar p))
+                         (hydrate-docs node :hyperedges (verify-sidecar! sidecar p))
                          (incident node (conj (:losers p) (:winner p))))]
              (when-not (and (= (:expected p) (count after))
                             (not-any? #(seq (set/intersection (set (:losers p))
