@@ -22,7 +22,7 @@ the server carries the live operational surface.
 ## Run
 
 ```
-clojure -M:node -m futon1b-server --store-dir migration-store --port 7073
+clojure -M:node -m futon1b-server --store-dir migration-store-21 --port 7073
 # lucy: --port 7074 (nginx owns :7073 there)
 ```
 

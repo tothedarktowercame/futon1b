@@ -30,7 +30,7 @@
 ;;        JVM (futon1b_drawbridge.clj); token in ./.admintoken; started by
 ;;        -main only.
 ;; Run: cd /home/joe/code/futon1b && \
-;;      clojure -M:node -m futon1b-server --store-dir migration-store --port 7073
+;;      clojure -M:node -m futon1b-server --store-dir migration-store-21 --port 7073
 ;;      (lucy: --port 7074 — nginx owns :7073 there)
 (ns futon1b-server
   (:require [cheshire.core :as json]
@@ -1765,7 +1765,7 @@
     server))
 
 (defn- parse-args [args]
-  (loop [args args opts {:store-dir "migration-store" :port 7073}]
+  (loop [args args opts {:store-dir "migration-store-21" :port 7073}]
     (if-not (seq args)
       opts
       (case (first args)
