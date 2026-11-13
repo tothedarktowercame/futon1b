@@ -39,6 +39,29 @@
     (is (= 5 (:expected p)))
     (is (every? #(= {:invented true} (:hx/props %)) (:rewrite p)))))
 
+(deftest invented-reviewed-property-resolution
+  (let [ds (mapv (fn [d id origin]
+                   (assoc d :entity/props (assoc (:entity/props d)
+                                                :mission/id id :migrated-from origin)))
+                 entities ["M-invented.v1" "invented.v1"] ["origin-a" "origin-b"])
+        resolutions {:mission/id {:expected #{"M-invented.v1" "invented.v1"} :value "invented.v1"}
+                     :migrated-from {:expected #{"origin-a" "origin-b"} :value ["origin-a" "origin-b"]}}
+        p (m/plan (assoc entry :property-resolutions resolutions) ds edges)]
+    (is (= "M-invented.v1" (get-in (m/plan entry ds edges) [:winner-doc :entity/props :mission/id])))
+    (is (= "invented.v1" (get-in p [:winner-doc :entity/props :mission/id])))
+    (is (= ["origin-a" "origin-b"] (get-in p [:winner-doc :entity/props :migrated-from])))
+    (is (= "M-invented" (get-in p [:winner-doc :entity/external-id])))
+    (is (= "active" (get-in p [:winner-doc :entity/props :mission/status])))
+    (is (= ds (:entities p)) "backups retain original unnormalized documents")
+    (is (= resolutions (:property-resolutions (m/summary p))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no longer matches"
+                          (m/plan (assoc entry :property-resolutions resolutions)
+                                  (assoc-in ds [1 :entity/props :mission/id] "changed") edges)))
+    (let [missing-winner (assoc entry :winner "fixture/new-winner")
+          ds (assoc-in ds [1 :entity/props :mission/status] "active")]
+      (is (seq (:prop-conflicts (m/plan missing-winner ds edges))))
+      (is (empty? (:prop-conflicts (m/plan (assoc missing-winner :property-resolutions resolutions) ds edges)))))))
+
 (deftest invented-rewrite-coalescence
   (let [p (m/plan entry entities [(edge "a" :held/on-mission ["x" "fixture/loser"])
                                  (edge "a2" :held/on-mission ["x" "fixture/loser"])

@@ -42,8 +42,10 @@
 
 (defn plan
   "Pure planner. All documents and edge metadata are retained. Existing winner
-  values (including nil) take precedence; conflicting loser-only values refuse."
-  [{:keys [winner ids] :as entry} entities edges]
+  values (including nil) take precedence; conflicting loser-only values refuse.
+  Explicit :property-resolutions {key {:expected #{old-values} :value new-value}}
+  apply only when all live values still match the reviewed expected set."
+  [{:keys [winner ids property-resolutions] :as entry} entities edges]
   (when (excluded-xids (:xid entry))
     (throw (ex-info "Excluded: distinct documents under different watcher roots"
                     {:xid (:xid entry)})))
@@ -59,6 +61,14 @@
         _ (doseq [d entities]
             (when-not (= (:entity/external-id win) (:entity/external-id d))
               (throw (ex-info "External IDs differ" {:id (:xt/id d)}))))
+        _ (doseq [[k {:keys [expected]}] property-resolutions]
+            (let [actual (set (keep (fn [d]
+                                      (let [p (:entity/props d)]
+                                        (when (contains? p k) [k (get p k)]))) entities))
+                  values (set (map second actual))]
+              (when-not (= expected values)
+                (throw (ex-info "Property resolution no longer matches live values"
+                                {:key k :expected expected :actual values})))))
         prop-conflicts (->> losers
                             (mapcat (fn [id] (seq (:entity/props (by-id id)))))
                             (remove (fn [[k _]] (contains? (:entity/props win) k)))
@@ -66,11 +76,13 @@
                             (keep (fn [[k pairs]]
                                     (let [values (set (map second pairs))]
                                       (when (> (count values) 1) {:key k :values values}))))
+                            (remove #(contains? property-resolutions (:key %)))
                             (sort-by (comp str :key)) vec)
         props (reduce (fn [p id]
                         (reduce-kv (fn [p k v] (if (contains? p k) p (assoc p k v)))
                                    p (or (:entity/props (by-id id)) {})))
                       (or (:entity/props win) {}) losers)
+        props (merge props (update-vals property-resolutions :value))
         ls (set losers)
         affected (filter #(some ls (:hx/endpoints %)) edges)
         unchanged (remove #(some ls (:hx/endpoints %)) edges)
@@ -86,7 +98,7 @@
                       (-> r (update :rewrite conj rewritten) (update :seen conj k)))))
                 {:seen (set (map edge-key unchanged)) :rewrite [] :drop []}
                 (sort-by :xt/id affected))]
-    (merge (select-keys entry [:xid :winner]) result
+    (merge (select-keys entry [:xid :winner :property-resolutions]) result
            {:losers losers :entities entities :edges edges
             :prop-conflicts prop-conflicts
             :winner-created? (nil? existing-win)
@@ -110,7 +122,7 @@
           (fxt/hydrate-by-ids node :entities ids) (incident node ids))))
 
 (defn summary [p]
-  (-> (select-keys p [:xid :winner :losers :winner-created? :prop-conflicts :props-to-merge :before :expected])
+  (-> (select-keys p [:xid :winner :losers :winner-created? :prop-conflicts :props-to-merge :property-resolutions :before :expected])
       (assoc :missing-required-props (filterv #(not (get-in p [:winner-doc :entity/props %]))
                                               [:mission/status :mission/path])
              :rewrite-by-type (frequencies (map :hx/type (:rewrite p)))
