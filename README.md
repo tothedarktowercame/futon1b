@@ -395,6 +395,48 @@ The restart script's pre-restart census counts every table. It took 24.2 s
 under load and aborted a safe restart at the old 20 s limit. The limit is now
 120 s (`FUTON1B_RESTART_CENSUS_TIMEOUT_S`).
 
+### Derived indexes and live ingest: rules from the 2026-11-14 collapse
+
+What happened (full record: `holes/E-xtdb-plan-cache-heap.md`): futon1b
+thrashed in GC because inlined as-of instants filled XTDB's plan cache
+(4.2 GB of 8 GB). During the overload, futon3c's commit watcher could not
+read its cursor, took "no answer" for "nothing ingested", and re-posted the
+whole history of futon0, futon1b and futon2 (226,700 single POSTs in 21 h).
+That bloated the hyperedges table until the sidecar's only repair (a replay
+of all history since a checkpoint) could not finish one page in its
+deadline. From then on, one hook failure would have taken index reads
+offline for good. Each rule below is a guard that now exists; keep it.
+
+1. **Query text carries no values.** Instants, ids, limits are parameters
+   (`fxt/pq`; as-of reads via `temporal-pq` in futon1b_graph.clj). Every
+   distinct query string is a ~1 MB cached plan. Guard:
+   `test_temporal` `as-of-reads-share-plans-across-instants`.
+2. **Repair cost scales with failures, not with the table.** A failed index
+   write is journaled (`hx_dirty`) and repaired by point read every minute;
+   the history replay is a bounded audit (per-leg checkpoints saved per
+   page, time budget, every 6 h). Do not make a whole-table replay the only
+   way back. Guard: `test_hx_index` journal/repair/audit checks.
+3. **Every write path to an indexed table calls the index hook.** Guard:
+   `test_hx_write_paths` (fails on any futon1b file that writes hyperedges
+   without `hx/on-put!`/`on-put-batch!`/`on-delete!`).
+4. **"Could not find out" is never "nothing there".** A cursor or state
+   lookup that times out must skip the cycle, not default to the empty
+   answer (futon3c `commit_ingest` `::lookup-failed`).
+5. **Live loops do bounded work and save progress as they go.** No pass whose
+   size is "the whole history"; a cursor saved only at the end makes an
+   interrupted pass start over. Persist cursors outside the JVM (futon3c
+   `~/storage/futon3c/commit-ingest-cursors.edn`).
+6. **Every long loop can be stopped** without restarting the JVM
+   (`commit-ingest/stop-running-batches!`).
+7. **Fallbacks must not multiply load.** A timed-out batch is reported as
+   failed, not re-sent as 200 single writes (it may have committed, and the
+   store was already overloaded).
+8. **An identical write is a no-op**, including one that carries a valid
+   time (`upsert-derived-hyperedge!`); a re-post must not add history.
+9. **A query that runs under a deadline must be re-measured as the data
+   grows.** The catch-up page went from fitting (55 s for a whole run) to
+   109 s per page without anyone looking.
+
 ### Heap OOM stops ingestion silently-ish; process survives (2026-07-11)
 
 After ~2h of serving-day load (`-Xmx1g`), the node hit

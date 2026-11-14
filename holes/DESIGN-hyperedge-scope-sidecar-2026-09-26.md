@@ -8,6 +8,16 @@ Builds on: `holes/M-evidence-landscape-index.md` (invariants I1 non-authoritativ
 candidates, I2 explicit watermark), `holes/SPIKE-attribute-index-2026-07-26.md`,
 `TN-xtdb-derived-secondary-index.md`.
 
+> **Revised 2026-11-14 — the sync contract below (§4 "catch-up owns the
+> checkpoint") is superseded.** Repairing only by replaying all history since
+> a checkpoint stopped working once a replay page outgrew its deadline (109 s
+> vs 60 s, 740k-row backlog, no run completed for a day). Now: a failed hook
+> is journaled in `hx_dirty` and repaired by point read every minute;
+> `reads-usable?` is false while the journal is non-empty; the replay is a
+> bounded audit with per-leg checkpoints (every 6 h, 10 min budget). Rules
+> and reasons: README "Derived indexes and live ingest: rules from the
+> 2026-11-14 collapse"; record: `holes/E-xtdb-plan-cache-heap.md`.
+
 ---
 
 ## 1. Query inventory

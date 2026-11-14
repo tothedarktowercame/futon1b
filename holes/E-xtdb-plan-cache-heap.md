@@ -341,3 +341,41 @@ diff touches, or none for files above a size); (b) how catch-up should scale
 (longer deadline and bigger pages still re-read each page with `_id IN`
 scans; or rebuild! from current rows instead of replaying 740k history
 rows).
+
+## 2026-11-14 evening: the five-step plan, landed (Claude Code seat; plan from an independent Fable review, greenlit by Joe)
+
+**Corrections to the section above.** The Fable review found that "hook
+failures 0, so current reads are correct" overstated it (Arxana's hyperedge
+puts and the batch route's index call bypassed the counter; the counter was
+in memory only), and that "every var in big files" did not explain the
+volume (31 commits in the window). Both were right. The volume came from
+commit-ingest re-posting whole repo histories: the cursor lookup is itself a
+scan that fails (500 after 61 s even on a healthy store), and a failed
+lookup meant "ingest everything" — futon0 (1,328 commits, from 11-13 19:45),
+futon1b (323), then futon2 (14,677, from 03:00 until stopped at 17:16), with
+each timed-out batch re-sent as 200 single posts.
+
+**Landed and live:**
+
+| Step | Change | Commits |
+|---|---|---|
+| 1 | commit-ingest: failed lookup skips the cycle; no cursor seeds at HEAD; ≤50 commits/cycle; cursor saved per cycle and persisted to `~/storage/futon3c/commit-ingest-cursors.edn`; cold start walks ≤100 recent commits by id; failed batches not re-sent singly; `stop-running-batches!` (used live to stop the futon2 pass) | futon3c 27da0dc0a, 2674ad8cb |
+| 1 | identical valid-time put is a no-op | futon1b 0d8eadc |
+| 2 | Arxana hyperedge commits call `hx/on-put!` (0 of 3,733 outcomes had ever carried hyperedges, so nothing was missing); batch route journals index failures instead of throwing | futon1b 346d38d |
+| 3 | failure journal `hx_dirty` + point-read `repair-dirty!` every minute; `reads-usable?` false while journaled; history replay is a bounded audit (per-leg checkpoints per page, 5,000-row pages, 300 s/page, 10 min budget, every 6 h) | futon1b 346d38d |
+| 4 | checkpoint advanced to 2026-11-14T18:04:40Z instead of replaying ~740k rows, justified by: 0 hook failures since the old checkpoint in a JVM continuously up since 11-11; 0 batch-route errors; 0 Arxana hyperedge writes. The reason is stored in `hx_meta` `checkpoint-advanced`. | live, 18:04Z |
+| 5 | edits edges only to vars whose top-level form a commit's diff touched (e.g. 27da0dc0a: 11 of 68 vars) | futon3c bb0b46f41 |
+
+**Guards against rebuilding this:** README "Derived indexes and live ingest:
+rules from the 2026-11-14 collapse" (nine rules, each with its guard);
+`test_hx_write_paths` fails on any futon1b file that writes hyperedges
+without an index hook (it flags the pre-fix futon1b_arxana.clj); the sidecar
+DESIGN doc carries a revision note superseding its §4 sync contract.
+
+**Still open:** H2 (IN-list arities; plans now grow ~2 per 10 min, so not
+urgent); Lucy runs futon3c from 08-14 and still caps federated turns at 600 s
+(fix is futon3c 8b4dfd0cc, deploy is Joe's call); pre-existing test failures
+noted in the commits (futon3c commit-ingest-test
+`doc-section-hook-without-a-live-backend-refuses`, futon1b test_a1a2
+"missing type -> plain 400", futon3c clock-decision tests creating dirs
+under read-only ~/code). No warrants were written for these runs.
