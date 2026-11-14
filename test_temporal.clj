@@ -181,6 +181,32 @@
           (by-id-at (.plusMillis base i)))
         (is (= before (plan-count *node*)))))))
 
+(defn- version-count [node id]
+  (count (xt/q node ['(fn [p-id] (-> (from :hyperedges {:bind [xt/id]
+                                                         :for-valid-time :all-time
+                                                         :for-system-time :all-time})
+                                     (where (= xt/id p-id))))
+                     id])))
+
+(deftest identical-valid-time-put-is-a-no-op
+  ;; 2026-11-14: every put carrying a valid time skipped the no-op guard, so a
+  ;; commit re-ingest wrote a new version of each unchanged edge.
+  (let [t1 (.minusSeconds (Instant/now) 3600)
+        edge {:hx/id "hx-vt-noop" :hx/type :test/vt-edge
+              :hx/endpoints ["sha-x" "repo/ns/var"]}
+        put! (fn [e] (server/upsert-hyperedge! *node* e))]
+    (is (:ok (put! (assoc edge :hx/valid-time (str t1)))))
+    (let [n (version-count *node* "hx-vt-noop")
+          again (put! (assoc edge :hx/valid-time (str t1)))]
+      (is (:no-op? again) "same content at the same valid time writes nothing")
+      (is (= n (version-count *node* "hx-vt-noop"))))
+    (testing "a different valid time or different content is still written"
+      (let [n (version-count *node* "hx-vt-noop")]
+        (is (not (:no-op? (put! (assoc edge :hx/valid-time (str (.plusSeconds t1 60)))))))
+        (is (< n (version-count *node* "hx-vt-noop")))
+        (is (not (:no-op? (put! (-> edge (assoc :hx/valid-time (str (.plusSeconds t1 60)))
+                                    (assoc :hx/props {:changed true}))))))))))
+
 (deftest temporal-input-is-strict
   (testing "bad temporal directives fail instead of degrading to current time"
     (is (thrown-with-msg?

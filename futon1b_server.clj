@@ -173,7 +173,7 @@
                          '[p-id]
                          (list '->
                                (list 'from :hyperedges
-                                     (into ['xt/id]
+                                     (into ['xt/id 'xt/valid-from]
                                            (comp
                                             (remove #{:xt/id})
                                             (map #(symbol (namespace %)
@@ -181,12 +181,24 @@
                                            (keys doc)))
                                '(where (= xt/id p-id)))
                          id)))
+                      stored-vf (some-> (:xt/valid-from stored) .toInstant)
                       ;; nil-valued keys are stored as absent (XTDB 2 semantics)
                       doc-cmp (into {} (filter (comp some? val)) doc)
                       stored-cmp
                       (when stored
-                        (into {} (filter (comp some? val)) stored))]
-                  (if (and (nil? valid-from) (= doc-cmp stored-cmp))
+                        (into {} (filter (comp some? val))
+                              (dissoc stored :xt/valid-from)))]
+                  ;; A put with a valid time is a no-op only when the current
+                  ;; version already starts at that instant with this content.
+                  ;; Until 2026-11-14 every valid-time put skipped the guard,
+                  ;; so a commit re-ingest wrote a new version of each
+                  ;; unchanged edge (futon1b holes/E-xtdb-plan-cache-heap.md).
+                  (if (and (= doc-cmp stored-cmp)
+                           (or (nil? valid-from)
+                               ;; XTDB keeps microseconds
+                               (= (.truncatedTo ^java.time.Instant valid-from
+                                                java.time.temporal.ChronoUnit/MICROS)
+                                  stored-vf)))
                     (do
                       ;; A concurrent identical put may still be indexing.
                       (when-let [indexed (hx/on-put! doc)] @indexed)
