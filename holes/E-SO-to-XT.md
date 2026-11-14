@@ -1,5 +1,7 @@
 # E-SO-to-XT — the StackExchange-family benchmark, from original contents
 
+**Status:** OPEN (set 2026-11-14 by claude-13 from Giraffe's latest reading, which read it as open; this document had no status line. Correct it if wrong.)
+
 **VERDICT (2026-10-09, provisional):** OPEN — Specification of the SE benchmark rung; no recorded benchmark run or results, last commit is the 2026-08-10 spec. _(WM status classification by zai-5, medium confidence; not yet confirmed by the author.)_
 
 **Opened:** 2026-08-10 (Fable session, Joe driving)

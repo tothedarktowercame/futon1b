@@ -1,5 +1,7 @@
 # E-xtdb-types-cleanup
 
+**Status:** OPEN (set 2026-11-14 by claude-13 from Giraffe's latest reading, which read it as open; this document had no status line. Correct it if wrong.)
+
 **VERDICT (2026-10-09, provisional):** OPEN — Outcome line states the cleanup was NOT performed; inventory and safety check done but a path decision remains. _(WM status classification by zai-1, medium confidence; not yet confirmed by the author.)_
 
 **Created 2026-08-17** at Joe's request: *"I think we should make a separate

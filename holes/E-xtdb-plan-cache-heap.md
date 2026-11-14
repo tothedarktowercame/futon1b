@@ -1,5 +1,7 @@
 # E-xtdb-plan-cache-heap — Zone's 4g heap filled with cached query plans
 
+**Status:** OPEN (set 2026-11-14 by claude-13 from Giraffe's latest reading, which read it as open; this document had no status line. Correct it if wrong.)
+
 Opened 2026-10-28 (claude, REPL-slowness session). Status: mechanism
 identified, size attribution not yet measured. Handoff below.
 
