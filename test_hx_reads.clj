@@ -358,9 +358,27 @@
       (check! "type-only without a limit: scan path"
               (not (contains? (query node {:type "probe/edits"})
                               :hx-index)))
-      (check! "end without type: scan path"
-              (not (contains? (query node {:end "E1" :limit 2})
-                              :hx-index)))
+      ;; 2026-11-14: end without type is served by the index too (it was
+      ;; a scan that hit the deadline live). Parity across types: E1 has
+      ;; probe/edits AND probe/commits rows.
+      (let [opts {:end "E1" :limit 10}
+            indexed (query node opts)
+            _ (reset! reads-enabled false)
+            scanned (query node opts)
+            _ (reset! reads-enabled true)]
+        (check! "end without type: the index served it"
+                (contains? indexed :hx-index))
+        (check! "end without type: same rows as the scan, across types"
+                (and (= (comparable indexed) (comparable scanned))
+                     (= #{:probe/edits :probe/commits}
+                        (set (map #(keyword (str/replace (str (:hx/type %)) #"^:" ""))
+                                  (:hyperedges indexed)))))))
+      (check! "end without type, limit 1: one row from the index"
+              (let [r (query node {:end "E1" :limit 1})]
+                (and (contains? r :hx-index) (= 1 (:count r)))))
+      (check! "end without type, absent endpoint: empty, from the index"
+              (let [r (query node {:end "NO-SUCH-END" :limit 1})]
+                (and (contains? r :hx-index) (= 0 (:count r)))))
       (check! "valid-as-of: scan path"
               (not (contains? (query node {:type "probe/edits" :end "E1" :limit 2
                                            :valid-as-of (Instant/now)})

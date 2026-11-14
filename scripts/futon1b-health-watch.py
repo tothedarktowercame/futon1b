@@ -40,10 +40,17 @@ NOTE = "Record: futon1b holes/E-xtdb-plan-cache-heap.md; rules: futon1b README."
 PROBE = r"""
 (let [node @futon1b-server/!node
       f (doto (.getDeclaredField (class node) "system") (.setAccessible true))
-      qs (get (.get f node) :xtdb.query/query-source)
+      sys (.get f node)
+      qs (get sys :xtdb.query/query-source)
+      mca (some (fn [^org.apache.arrow.memory.BufferAllocator c]
+                  (when (= "memory-cache" (.getName c)) c))
+                (.getChildAllocators ^org.apache.arrow.memory.BufferAllocator
+                                     (:allocator (:xtdb/allocator sys))))
       st @futon1b-hxindex/!stats
       ds @futon1b-text/!ds]
-  {:plans (.estimatedSize ^com.github.benmanes.caffeine.cache.Cache (:plan-cache qs))
+  {:mcache-used (some-> mca .getAllocatedMemory)
+   :mcache-limit (some-> mca .getLimit)
+   :plans (.estimatedSize ^com.github.benmanes.caffeine.cache.Cache (:plan-cache qs))
    :permits (futon1b-xt/query-permits-available)
    :reads-usable (futon1b-hxindex/reads-usable?)
    :dirty (when ds (futon1b-hxindex/dirty-count ds))
@@ -98,7 +105,7 @@ def collect():
         s["fgc"] = int(cols[8]) if len(cols) > 8 and cols[8].isdigit() else None
     rc, out = sh([str(EVAL), PROBE], 45)
     s["eval_ok"] = rc == 0 and ":ok true" in out
-    for k in ("plans", "permits", "reads-usable", "dirty", "hook-failures",
+    for k in ("mcache-used", "mcache-limit", "plans", "permits", "reads-usable", "dirty", "hook-failures",
               "audit-caught-up", "audit-at"):
         s[k] = edn_field(out, k) if s["eval_ok"] else None
     return s
@@ -134,6 +141,25 @@ def conditions(s, prev):
         out.append(("plans", ":warning", 1,
                     f"XTDB plan cache at {p} plans and rising; full GCs began near 2,800 on 11-14. "
                     "Some query is putting values in its text."))
+    # XTDB's in-memory Arrow page cache frees a page only when its last
+    # reader closes it. On 11-14 (19:23) it filled with 926 pages whose
+    # readers were gone (suspected: queries cancelled at the deadline), and
+    # every read then failed "Unable to allocate buffer". In normal use
+    # the cache drains between queries, so a high level that does not
+    # come down means leaked pages; a restart is the only clean fix.
+    u, lim = s.get("mcache-used"), s.get("mcache-limit")
+    if isinstance(u, int) and isinstance(lim, int) and lim > 0:
+        frac = u / lim
+        gb = f"{u / 1e9:.2f} of {lim / 1e9:.2f} GB"
+        if frac >= 0.85:
+            out.append(("mcache", ":error", 1,
+                        f"XTDB memory cache at {gb} ({frac:.0%}). At 100% every read fails "
+                        "with 'Unable to allocate buffer' (11-14 19:23). Pages are held by "
+                        "readers that never closed; plan a futon1b restart now."))
+        elif frac >= 0.5:
+            out.append(("mcache", ":warning", 3,
+                        f"XTDB memory cache has stayed at {gb} ({frac:.0%}) for 3 checks; "
+                        "it normally drains between queries, so pages are probably leaking."))
     if s.get("eval_ok") is False and s["http"] == 200:
         out.append(("drawbridge", ":warning", 2,
                     "futon1b answers HTTP but its :6769 drawbridge did not answer the health probe."))
@@ -198,11 +224,12 @@ def main():
         new = not LOG.exists()
         with LOG.open("a") as f:
             if new:
-                f.write("ts\thttp\thttp_s\tfgc\tplans\tpermits\treads_usable\tdirty\thook_failures\tactive\n")
+                f.write("ts\thttp\thttp_s\tfgc\tplans\tpermits\treads_usable\tdirty\thook_failures\tactive\tmcache_mb\n")
             f.write("\t".join(str(x) for x in [
                 time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), s["http"], f"{s['http_s']:.2f}",
                 s.get("fgc"), s.get("plans"), s.get("permits"), s.get("reads-usable"),
-                s.get("dirty"), s.get("hook-failures"), ",".join(sorted(active)) or "-"]) + "\n")
+                s.get("dirty"), s.get("hook-failures"), ",".join(sorted(active)) or "-",
+                (s["mcache-used"] // 1000000) if isinstance(s.get("mcache-used"), int) else None]) + "\n")
     else:
         print(json.dumps(s, indent=1, default=str))
         print("active:", sorted(active))

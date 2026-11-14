@@ -379,3 +379,45 @@ noted in the commits (futon3c commit-ingest-test
 `doc-section-hook-without-a-live-backend-refuses`, futon1b test_a1a2
 "missing type -> plain 400", futon3c clock-decision tests creating dirs
 under read-only ~/code). No warrants were written for these runs.
+
+## 2026-11-14 19:23Z: second collapse — XTDB's memory cache full of unreleased pages (Claude Code seat)
+
+**Symptom.** Every read and most writes failed fast (0.2–1.3 s) with HTTP 500
+"Unable to allocate buffer of size N due to memory limit. Current allocation:
+1613373368" — futon3c showed it as "futon1b refused the read". The JVM heap was
+fine (108 plans, no new full GCs), so the plan-cache watch saw nothing; the
+health watch went `http-down` from 19:25.
+
+**What was full.** Not the heap: the Arrow allocator child `memory-cache`
+(`xtdb.cache.MemoryCache`, the in-memory layer over the disk cache) at
+1,613,373,368 bytes, its limit. It held 926 slices, every one a `/data/` page
+of `entities` or `hyperedges`, each with refcount 1. From the 2.1.0 bytecode:
+a slice is freed (arena closed, removed from `openSlices`) only when its
+refcount reaches 0, and the cache keeps no idle slices, so every one of the
+926 was still referenced by some reader. With zero pgwire connections and no
+active pgwire threads, those readers were gone: leaked references. List:
+`~/storage/futon1b-health/open-slices-2026-11-14T1950.edn`.
+
+**Likely trigger (not proven).** From ~18:10 the log shows repeated reads cut
+off at the deadline: `GET /hyperedges?end=<mission>&limit=1` with no type
+(futon3c `mission_scope_ingest` `endpoint-exists?`), cancelled at 60 s every
+few minutes, and text searches errored at 15–99 s. The allocation failures
+began intermittently at 15:52 and 18:10, then became continuous at 19:23. A
+query cancelled while it holds or is fetching pages is the suspected leak;
+2.2.0-rc0's `MemoryCache` differs from 2.1.0's only by a lambda renumbering,
+so if the leak is real it is on the reader side and 2.2 is not known to fix it.
+
+**Fix.** Joe restarted futon1b-zone at 19:46 (no in-place release: some
+slices could have belonged to a live compaction, and releasing a page under a
+reader frees memory it is still reading).
+
+**Changes.**
+- Untyped `end` reads are now served by the hyperedge sidecar (seek on
+  `(endpoint, pos, hx_id)`, re-checked against XTDB as for type+end), so the
+  existence probe no longer scans or hits the deadline. `type-end-candidates`
+  takes a nil type; `test_hx_reads` now pins index service and parity across
+  types (it previously pinned "end without type: scan path", which was scope,
+  not a decision). The `futon1b_graph.clj` half of this landed inside
+  042fb8e (another seat's commit swept the working-tree hunk).
+- The health watch reads the `memory-cache` allocator: warning at ≥50% for
+  three checks in a row, error at ≥85%. The 19:23 level gives the error.

@@ -1166,17 +1166,28 @@
    colon included) at ANY of ENDPOINTS, keyset-paged on hx_id > AFTER
    (\"\" pages from the start), at most FETCH ids. One seek per endpoint on
    the (type, endpoint) index, merged and re-sorted in memory — the same
-   per-target fetch + merge the XTDB scan path does."
+   per-target fetch + merge the XTDB scan path does.
+
+   TYPE nil means any type: the seek uses the (endpoint, pos, hx_id) index
+   instead. Added 2026-11-14: the untyped `?end=…&limit=1` existence probe
+   (futon3c mission_scope_ingest endpoint-exists?) went to the XTDB scan,
+   hit the 60 s deadline every few minutes, and the cancelled scans are the
+   suspected leak that filled XTDB's memory cache
+   (holes/E-xtdb-plan-cache-heap.md, \"Second collapse\")."
   [{:keys [type endpoints after fetch]}]
   (when-let [ds (ds*)]
-    (let [t (str type)
-          per-target
+    (let [per-target
           (fn [e]
             (jdbc/execute! ds
-                           ["SELECT DISTINCT hx_id FROM hx_edge
-                             WHERE type = ? AND endpoint = ? AND hx_id > ?
-                             ORDER BY hx_id LIMIT ?"
-                            t (str e) (str (or after "")) (long fetch)]
+                           (if (some? type)
+                             ["SELECT DISTINCT hx_id FROM hx_edge
+                               WHERE type = ? AND endpoint = ? AND hx_id > ?
+                               ORDER BY hx_id LIMIT ?"
+                              (str type) (str e) (str (or after "")) (long fetch)]
+                             ["SELECT DISTINCT hx_id FROM hx_edge
+                               WHERE endpoint = ? AND hx_id > ?
+                               ORDER BY hx_id LIMIT ?"
+                              (str e) (str (or after "")) (long fetch)])
                            unqualified))]
       (->> endpoints
            (mapcat per-target)
