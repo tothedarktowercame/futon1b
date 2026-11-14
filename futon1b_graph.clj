@@ -67,25 +67,50 @@
 (defn put-verified!
   "Transform, put through the rescue ladder, verify by read-back.
   Returns the rescue stage keyword (:ok/:rescued-1/:rescued-2) or throws
-  the L0-shaped error (503) if the doc is absent after all stages."
+  the L0-shaped error (503) if the doc is absent after all stages.
+  For :entities while the sidecar serves, the read-back tries the sidecar
+  point read first (the index hook for this very write is awaited just
+  above); a miss or a throwing sidecar falls back to the XTDB read-back
+  (`fxt/present?`), which stays authoritative. The XTDB read-back is a
+  whole-table scan at today's store size (measured 2026-11-14: 5–7 s for
+  one id), which made every entity POST take seconds; the fallback keeps
+  verification correct when the sidecar is closed, broken or stale. A
+  closed sidecar gate skips the fast path entirely."
   [node table doc]
   (let [xdoc (xf/transform-doc doc !shape-log {:log-stringify? true})
         write! (fn []
                  (let [put! #(ingest/put-doc-with-rescue! node table xdoc !shape-log)
                        res (if (= :entities table)
                              (with-entity-docs-mutation [doc xdoc] put!)
-                             (put!))]
-                   (if (fxt/present? node table (:xt/id xdoc))
-                     (do
-                       (when (= :entities table)
-                         ;; A rescued write may have stringified nil-bearing/deep values.
-                         ;; Cache the actual stored document, not the pre-rescue input.
-                         (let [stored (if (= res :ok)
-                                        xdoc
-                                        (first (fxt/hydrate-by-ids
-                                                node :entities [(:xt/id xdoc)])))]
-                           (ent/await-hook! (ent/on-put! stored))))
-                       (if (keyword? res) res :ok))
+                             (put!))
+                       index! (fn []
+                                (let [stored (if (= res :ok)
+                                               xdoc
+                                               (first (fxt/hydrate-by-ids
+                                                       node :entities [(:xt/id xdoc)])))]
+                                  (ent/await-hook! (ent/on-put! stored))))
+                       sidecar-fast? (try
+                                       (and (= :entities table) (ent/reads-usable?))
+                                       (catch Throwable _ false))
+                       ok? (if sidecar-fast?
+                             ;; Fast path: the sidecar point read after
+                             ;; this write's index hook. Never
+                             ;; authoritative: a nil (or a throwing
+                             ;; sidecar) falls back to the XTDB read-back,
+                             ;; so verification does not depend on the
+                             ;; sidecar — a failed hook must not fail the
+                             ;; verified write.
+                             (do (index!)
+                                 (try
+                                   (or (some? (ent/entity-by-id (:xt/id xdoc)))
+                                       (fxt/present? node table (:xt/id xdoc)))
+                                   (catch Throwable _
+                                     (fxt/present? node table (:xt/id xdoc)))))
+                             (when (fxt/present? node table (:xt/id xdoc))
+                               (when (= :entities table) (index!))
+                               true))]
+                   (if ok?
+                     (if (keyword? res) res :ok)
                      (throw (gates/layered-error
                              0 :postcommit-missing-entities
                              {:xt/id (:xt/id xdoc) :table table})))))]
@@ -1308,7 +1333,7 @@
   [node {:keys [targets t n fields]} query-fn]
   (let [target-strs (set (map str targets))
         match? (fn [row]
-                 (and (= t (normalize-type (:hx/type row)))
+                 (and (or (nil? t) (= t (normalize-type (:hx/type row))))
                       (some target-strs (map str (:hx/endpoints row)))))
         ;; Candidate pages of n, keyset on hx_id: the re-check can drop stale
         ;; candidates, so a page may yield fewer than n live rows; keep
@@ -1593,8 +1618,9 @@
           targets (distinct [end end-id])
           n (long (or limit 100))
           t (some-> type normalize-type)]
-      (if (and t
-               (not (or (:valid-as-of temporal) (:system-as-of temporal)))
+      ;; Typed or not: an untyped end read is a seek on the sidecar's
+      ;; (endpoint, pos, hx_id) index (2026-11-14; see type-end-candidates).
+      (if (and (not (or (:valid-as-of temporal) (:system-as-of temporal)))
                (hx/reads-usable?))
         (hyperedges-indexed-type-end
          node {:targets targets :t t :n n :fields fields} query-fn)
