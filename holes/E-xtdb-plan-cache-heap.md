@@ -233,7 +233,7 @@ working set without them is about 3.7 GB. Afterwards :7073 answered
 zero arg-fields, so they are not the parameterised `_id IN (?…)` reads H2
 targets. XTDB's parse caches (`xtdb.query.SqlParser` static
 `singleQueryCache` 80 + `multiQueryCache` 2,857 strings, dumped to
-`~/notes/futon1b-heap/sql-strings-2026-11-14T1555Z.txt`) by shape:
+`~/notes/futon1b-heap/sql-strings-2026-11-14T1640Z.txt`; the 15:55 dump was overwritten by a 16:40 rerun of the same probe, which still holds all 1,862 of the strings counted here) by shape:
 
 | strings | shape |
 |---|---|
@@ -273,3 +273,39 @@ plans is ~3.7 GB.
 observed rate the cache reaches ~2,800 plans, where full GCs began on this
 run, in about two to three days; repeat `invalidateAll` (or restart) before
 then if the fix has not landed.
+
+### Fix landed (futon1b 6cf7f17, reloaded into the serving JVM ~16:13Z)
+
+`hyperedge-from` now emits `(at p-valid-as-of)` / `(at p-system-as-of)` and
+`temporal-pq` passes the instants as arguments at all six callers. Checked in
+a throwaway node first: XTDB 2.1 accepts a parameter in `at`, results match
+the literal form, 20 reads at 20 instants add 0 plans (literal: 19). Tests in
+`test_temporal.clj` (`as-of-reads-share-plans-across-instants`, and
+`historical-version-rows-count-once` now expects the parameter) fail on the
+old code.
+
+Live after the reload: the card query has one parameterised string in the
+parse cache and the literal ones stopped growing (1,862 at 15:55 → 1,875 at
+the reload → 1,875 at 16:40); plans grew 18 in the 20 min before the reload
+(39 → 57) and 4 in the 20 min after (57 → 61); full GCs flat at 13,045 since
+the flush. Card-query latency in the futon1b request log is unchanged:
+~10 s per successful call on 11-13 (literal) and ~9.7–10 s after the reload.
+
+### Separate, still open: the card query is a full scan
+
+Every as-of `GET /hyperedges?type=…&end=…` takes the scan path (the
+sidecar index serves only current reads), costs ~10 s, and under load hits
+the 60 s query timeout: 7 of 10 such calls timed out between the flush and
+the reload, 16 of 18 after it (10 of those were this seat's own probes, which
+kept running server-side after the client gave up — do not probe this path
+in a loop). futon3c's `pattern_card_provider/refresh-cards!` makes 1 + N of
+these calls per card refresh. Options: serve the card read as a current read
+(no as-of) from the sidecar, or give the as-of endpoint path an index. Not
+changed here.
+
+### Remaining from H2
+
+The IN-list arities (~650 distinct strings: hyperedges 434, entities 192,
+evidence 20, plus ~130 transaction-guard ASSERTs from the Arxana/migration
+bulk loads) still make new plans. With the as-of leak gone they should fill
+the cache far more slowly; the sampler will show whether H2 is needed.
