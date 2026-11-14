@@ -354,7 +354,16 @@
   the store; the warrant says which scan named them and under what basis."
   [node v external?]
   (let [k [v (boolean external?)]
-        hydrate #(if (seq %) (fxt/hydrate-by-ids node :entities % fxt/safe-q) [])
+        hydrate #(if (seq %)
+                   (if (ent/reads-usable?)
+                     ;; Point reads on the sidecar primary key. The XTDB
+                     ;; hydrate below is a per-id equality scan over the
+                     ;; whole table (seconds at 62k rows, measured live
+                     ;; 2026-11-14: 4.7 s for one id vs 2 ms here), so it
+                     ;; runs only when the sidecar gate is closed.
+                     (ent/docs-by-ids %)
+                     (fxt/hydrate-by-ids node :entities % fxt/safe-q))
+                   [])
         reused (current-warrant k)
         docs (when reused (hydrate (:warrant/ids reused)))]
     (if (and reused

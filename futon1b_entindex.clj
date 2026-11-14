@@ -483,6 +483,20 @@
                                unqualified)
             :doc text/decode-doc)))
 
+(defn docs-by-ids
+  "Complete current documents for IDS, in the order of IDS, dropping absent
+  ids — the sidecar analogue of fxt/hydrate-by-ids. Point reads on the
+  primary key; no XTDB query. Callers own reads-usable?."
+  [ids]
+  (let [ds (or (ds*) (throw (ex-info "entindex: no datasource" {})))]
+    (into []
+          (keep (fn [id]
+                  (some-> (jdbc/execute-one! ds ["SELECT doc FROM ent_node WHERE id = ?"
+                                                 (str id)]
+                                             unqualified)
+                          :doc text/decode-doc)))
+          ids)))
+
 (defn alias-ids
   "Ordered ids whose name, or when EXTERNAL?, external id, equals V.
   Name matches precede external-only matches; ties are ordered by id. Callers
