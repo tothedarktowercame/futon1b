@@ -63,9 +63,18 @@
                                                         '(-> (from :entities [xt/id entity/name])
                                                              (where (= entity/name p-v)))
                                                         "futon2-d/excursion/kimi-task-303"))))
-        ;; The alias hydration must not touch XTDB while the gate is open.
+        ;; The alias hydration and the :entities read-back must not touch
+        ;; XTDB while the gate is open. Other tables (type-catalog in
+        ;; register-types!) still use fxt/present?, so the redef delegates
+        ;; to the real one for them.
+        present?* fxt/present?
         second (with-redefs [fxt/hydrate-by-ids
-                             (fn [& _] (throw (ex-info "XTDB hydrate forbidden while sidecar serves" {})))]
+                             (fn [& _] (throw (ex-info "XTDB hydrate forbidden while sidecar serves" {})))
+                             fxt/present?
+                             (fn [node table id]
+                               (if (= table :entities)
+                                 (throw (ex-info "XTDB entities read-back forbidden while sidecar serves" {}))
+                                 (present?* node table id)))]
                  (graph/write-entity! node {:name "futon2-d/excursion/kimi-task-303"
                                             :type "excursion/doc"
                                             :external-id "E-kimi-task-303"
