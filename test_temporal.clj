@@ -128,6 +128,59 @@
     (is (nil? (state-at "pattern/retract" nil)))
     (is (= :current (state-at "pattern/retract" (.plusSeconds t1 1))))))
 
+(defn- plan-count
+  "Entries in XTDB's plan cache (xtdb.query/query-source :plan-cache)."
+  [node]
+  (let [f (doto (.getDeclaredField (class node) "system") (.setAccessible true))
+        qs (get (.get f node) :xtdb.query/query-source)]
+    (.estimatedSize ^com.github.benmanes.caffeine.cache.Cache (:plan-cache qs))))
+
+(deftest as-of-reads-share-plans-across-instants
+  ;; 2026-11-14: hyperedge-from inlined as-of instants, so every as-of read at
+  ;; a new instant compiled a new plan; futon3c's per-turn card refresh filled
+  ;; the 4096-plan cache and 4.2 GB of heap (E-xtdb-plan-cache-heap.md).
+  (let [t1 (.minusSeconds (Instant/now) 120)
+        t2 (.minusSeconds (Instant/now) 60)
+        edge {:hx/id "hx-plan-share"
+              :hx/type :memory/assert
+              :hx/endpoints ["e-plan-share" "pattern/plan-share"]
+              :hx/props {:state :current}}
+        ;; the card provider's call: end + type with both as-of instants;
+        ;; system time defaults to "now" because the rows were written now
+        read-at (fn read-at ([inst] (read-at inst inst))
+                  ([vt st]
+                   (graph/hyperedges-query
+                    *node* {:end "pattern/plan-share" :type :memory/assert :limit 10
+                            :valid-as-of vt :system-as-of st})))
+        by-id-at (fn by-id-at ([inst] (by-id-at inst inst))
+                   ([vt st]
+                    (graph/hyperedge-by-id
+                     *node* "hx-plan-share" {:valid-as-of vt :system-as-of st})))]
+    (is (:ok (server/upsert-hyperedge! *node* (assoc edge :hx/valid-time (str t1)))))
+    (is (:ok (server/upsert-hyperedge!
+              *node* (-> edge (assoc :hx/valid-time (str t2))
+                         (assoc-in [:hx/props :state] :superseded)))))
+    (testing "as-of results are unchanged by parameterising the instant"
+      (let [now (Instant/now)]
+        (is (= [:current] (mapv #(get-in % [:hx/props :state])
+                                (:hyperedges (read-at (.plusSeconds t1 1) now)))))
+        (is (= [:superseded] (mapv #(get-in % [:hx/props :state])
+                                   (:hyperedges (read-at now now)))))
+        (is (= :current (get-in (by-id-at (.plusSeconds t1 1) now) [:hx/props :state])))
+        (is (= [] (:hyperedges (read-at (.minusSeconds t1 60) now)))
+            "before the first valid time there is nothing")
+        (is (= [] (:hyperedges (read-at now (.minusSeconds t1 60))))
+            "before the rows were written (system time) there is nothing")))
+    (testing "twenty reads at twenty instants add no plans after the first"
+      (read-at (Instant/now))
+      (by-id-at (Instant/now))
+      (let [before (plan-count *node*)
+            base (Instant/now)]
+        (dotimes [i 20]
+          (read-at (.plusMillis base i))
+          (by-id-at (.plusMillis base i)))
+        (is (= before (plan-count *node*)))))))
+
 (deftest temporal-input-is-strict
   (testing "bad temporal directives fail instead of degrading to current time"
     (is (thrown-with-msg?
@@ -285,21 +338,27 @@
        (fn [_ edge-ids _]
          (mapv fake-hydrated-memory edge-ids))}
       (fn []
-        (let [result
+        (let [as-of (Instant/now)
+              result
               (graph/memory-projection-components
                ::versioned-node
                {:endpoints ["pattern/versioned"]
                 :limit 1
-                :system-as-of (Instant/now)})]
+                :system-as-of as-of})]
           (is (= ["hx-versioned-a"]
                  (mapv :hyperedge-id
                        (get-in result [:groups 0 :components]))))
           (is (= 1 (get-in result [:audit :selected-row-count])))
           ;; safe-q receives the parameterised vector `[(fn params body) & args]`
           ;; (fxt/pq): the endpoints ride as args, the shape is in `body`.
+          ;; The as-of instant is a parameter too (2026-11-14), never a
+          ;; literal in the body.
           (let [[[_ params body] & args] @captured]
-            (is (= '[p-ep0] params))
-            (is (= ["pattern/versioned"] (vec args)))
+            (is (= '[p-ep0 p-system-as-of] params))
+            (is (= ["pattern/versioned" as-of] (vec args)))
+            (is (= '(from :hyperedges {:bind [xt/id hx/type hx/endpoints]
+                                       :for-system-time (at p-system-as-of)})
+                   (nth body 1)))
             (is (= '(aggregate xt/id matched-endpoint)
                    (nth body 5)))
             (is (= '(limit 2) (last body)))))))))

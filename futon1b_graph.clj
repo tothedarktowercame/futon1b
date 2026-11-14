@@ -1045,17 +1045,19 @@
 ;; Hyperedge reads (A4) — §4.
 ;; ---------------------------------------------------------------------------
 
-(declare hyperedge-from)
+(declare hyperedge-from temporal-pq)
 
 (defn hyperedge-by-id
   "GET /api/alpha/hyperedge/{id} (id = URL-decoded URI tail)."
   ([node id] (hyperedge-by-id node id {}))
   ([node id temporal]
-   (when-let [doc (fxt/q1 node (fxt/pq '[p-id]
-                                       (list '->
-                                             (hyperedge-from '[*] temporal)
-                                             '(where (= xt/id p-id)))
-                                       id))]
+   (when-let [doc (fxt/q1 node (temporal-pq
+                                temporal
+                                (fxt/pq '[p-id]
+                                        (list '->
+                                              (hyperedge-from '[*] temporal)
+                                              '(where (= xt/id p-id)))
+                                        id)))]
      (when (:hx/id doc) (dissoc doc :xt/id)))))
 
 (def ^:private hyperedge-window-cols
@@ -1120,27 +1122,52 @@
          distinct
          (mapv column-symbol))))
 
-(defn- temporal-filter
-  [instant]
-  (when instant (list 'at instant)))
+;; As-of instants are query PARAMETERS, never literals in the form.
+;;
+;; Until 2026-11-14 `hyperedge-from` wrote `(at #xt/instant "…")` into the
+;; query, so every as-of read at a new instant compiled a new XTDB plan (the
+;; `pq` rule in futon1b_xt.clj). futon3c's pattern-card refresh reads as of
+;; "now" on every turn: 1,862 of the 2,937 cached query strings were this one
+;; shape, and the full plan cache held 4.2 GB of the 8 GB heap
+;; (holes/E-xtdb-plan-cache-heap.md, 2026-11-14 live measurement). With
+;; parameters, every as-of read of one shape shares one plan. The parameter
+;; names match futon1b_evidence's temporal specs.
+;;
+;; `hyperedge-from` emits the parameter symbols; every query built on it must
+;; pass through `temporal-pq`, which appends the parameters and their values.
+;; A query that skips it fails on an unbound symbol instead of leaking plans.
+
+(def ^:private temporal-params
+  [[:valid-as-of 'p-valid-as-of]
+   [:system-as-of 'p-system-as-of]])
 
 (defn- hyperedge-from
-  [bindings {:keys [valid-as-of system-as-of]}]
+  [bindings temporal]
   (let [opts (cond-> {:bind bindings}
-               valid-as-of (assoc :for-valid-time (temporal-filter valid-as-of))
-               system-as-of (assoc :for-system-time (temporal-filter system-as-of)))]
+               (:valid-as-of temporal) (assoc :for-valid-time '(at p-valid-as-of))
+               (:system-as-of temporal) (assoc :for-system-time '(at p-system-as-of)))]
     (if (> (count opts) 1)
       (list 'from :hyperedges opts)
       (list 'from :hyperedges bindings))))
+
+(defn- temporal-pq
+  "Add TEMPORAL's as-of instants to PQ, a `fxt/pq` vector
+   `[(fn params body) & args]` whose body uses `hyperedge-from`."
+  [temporal [[_fn params body] & args]]
+  (let [present (filter #(get temporal (first %)) temporal-params)]
+    (into [(list 'fn (into (vec params) (map second present)) body)]
+          (concat args (map #(get temporal (first %)) present)))))
 
 (defn- fetch-hyperedge-doc
   ([node id temporal]
    (fetch-hyperedge-doc node id temporal fxt/safe-q))
   ([node id temporal query-fn]
-   (first (query-fn node (fxt/pq '[p-id]
-                                 (list '-> (hyperedge-from '[*] temporal)
-                                       '(where (= xt/id p-id)))
-                                 id)))))
+   (first (query-fn node (temporal-pq
+                          temporal
+                          (fxt/pq '[p-id]
+                                  (list '-> (hyperedge-from '[*] temporal)
+                                        '(where (= xt/id p-id)))
+                                  id))))))
 
 ;; PER-DOC HYDRATION, deliberately. Restored 2026-08-02 after the batched form
 ;; measured as a large regression on the live store.
@@ -1571,16 +1598,18 @@
                                   args (cond-> [target n] t (conj t))]
                               (query-fn
                                node
-                               (apply fxt/pq params
-                                      (list '->
-                                            (hyperedge-from
-                                             '[xt/id hx/type hx/endpoints] temporal)
-                                            '(unnest {:ep hx/endpoints})
-                                            (cons 'where clauses)
-                                            '(return xt/id)
-                                            '(order-by {:val xt/id :dir :asc})
-                                            '(limit p-limit))
-                                      args)))))
+                               (temporal-pq
+                                temporal
+                                (apply fxt/pq params
+                                       (list '->
+                                             (hyperedge-from
+                                              '[xt/id hx/type hx/endpoints] temporal)
+                                             '(unnest {:ep hx/endpoints})
+                                             (cons 'where clauses)
+                                             '(return xt/id)
+                                             '(order-by {:val xt/id :dir :asc})
+                                             '(limit p-limit))
+                                       args))))))
                          (reduce (fn [by-id row]
                                    (assoc by-id (:xt/id row) row)) {})
                          vals
@@ -1655,15 +1684,17 @@
           bounded? (or latest? (and (int? limit) (pos? limit)))
           selected (query-fn
                     node
-                    (apply fxt/pq params
-                           (cons '->
-                                 (cons (hyperedge-from
-                                        (if bounded?
-                                          (hyperedge-window-columns opts)
-                                          '[*])
-                                        temporal)
-                                       query-tail))
-                           args))
+                    (temporal-pq
+                     temporal
+                     (apply fxt/pq params
+                            (cons '->
+                                  (cons (hyperedge-from
+                                         (if bounded?
+                                           (hyperedge-window-columns opts)
+                                           '[*])
+                                         temporal)
+                                        query-tail))
+                            args)))
           window-only? (and bounded? (fields-fit-hyperedge-window? fields))
           docs (if (and bounded? (not window-only?))
                  (hydrate-hyperedge-window node selected temporal query-fn)
@@ -1671,12 +1702,14 @@
           total (when include-total?
                   (if (or latest? repo source-file mission)
                     (count docs)
-                    (count (query-fn node (fxt/pq '[p-type]
-                                                  (list '->
-                                                        (hyperedge-from
-                                                         '[xt/id hx/type] temporal)
-                                                        '(where (= hx/type p-type)))
-                                                  t)))))
+                    (count (query-fn node (temporal-pq
+                                           temporal
+                                           (fxt/pq '[p-type]
+                                                   (list '->
+                                                         (hyperedge-from
+                                                          '[xt/id hx/type] temporal)
+                                                         '(where (= hx/type p-type)))
+                                                   t))))))
           prop-get (fn [d k kw-col]
                      (or (get d kw-col)
                          (get-in d [:hx/props (keyword k)])
@@ -2228,6 +2261,8 @@
         selected-rows+
         (fxt/safe-q
          node
+         (temporal-pq
+         temporal
          (apply fxt/pq endpoint-params
          (list '->
                (hyperedge-from '[xt/id hx/type hx/endpoints] temporal)
@@ -2245,7 +2280,7 @@
                      {:val 'matched-endpoint :dir :asc}
                      {:val 'xt/id :dir :asc})
                (list 'limit (inc raw-limit)))
-         endpoints))
+         endpoints)))
         ;; Keep the invariant explicit at the application boundary as well:
         ;; XTDB should already have grouped these rows, but repeated identical
         ;; projections must never consume the distinct-result budget.
