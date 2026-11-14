@@ -309,3 +309,35 @@ The IN-list arities (~650 distinct strings: hyperedges 434, entities 192,
 evidence 20, plus ~130 transaction-guard ASSERTs from the Arxana/migration
 bulk loads) still make new plans. With the as-of leak gone they should fill
 the cache far more slowly; the sampler will show whether H2 is needed.
+
+### Also found 11-14: the hyperedge sidecar catch-up cannot complete (latent)
+
+futon3c pattern cards now read current data (futon3c 48891df18); since 16:38
+every card read is a sidecar-served current read, 4–53 ms. But the sidecar's
+periodic catch-up has not completed since 2026-11-13 19:19: every run since
+20:42 was cancelled (`query cancelled during execution`) or skipped for
+permits. Measured 11-14 ~16:50Z:
+
+- one `changed-page` (1,000 rows, `FOR ALL SYSTEM_TIME`, whole-table scan)
+  takes **109 s**, over the 60 s `default-query-timeout-s`, so every run
+  dies on its first page; each page advances the checkpoint ~18 min;
+- backlog since the checkpoint: 399,216 `_system_from` and 337,831
+  `_system_to` rows; total hyperedge history 4,501,862 rows;
+- the writer: `:code/v05/edits` (6,761 of ~7,400 versions in the last 2 h);
+  futon3c `watcher/commit_ingest.clj` `ingest-edits-for-commit!` posts an
+  edge from each commit to EVERY var in every file it changed, so commits to
+  large files (transport/http.clj, futon1b_graph.clj) write hundreds to
+  thousands of edges each. ~226,700 single-hyperedge POSTs from 11-13 19:00
+  to 11-14 16:30, 10–17k/hour overnight.
+
+Why it matters: current reads stay correct while the write hooks succeed
+(hook failures 0). One hook failure flips `reads-usable?` false until a
+catch-up completes, and none can, so hyperedge reads would fall back to
+scans indefinitely.
+
+Decisions needed (not taken here): (a) whether commit→every-var-in-file
+edits edges are worth their volume (e.g. edges only to vars whose lines the
+diff touches, or none for files above a size); (b) how catch-up should scale
+(longer deadline and bigger pages still re-read each page with `_id IN`
+scans; or rebuild! from current rows instead of replaying 740k history
+rows).
