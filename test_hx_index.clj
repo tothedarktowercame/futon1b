@@ -307,12 +307,12 @@
             injected? (atom false)]
         (hx/catch-up! node :force true)
         (with-redefs [futon1b-hxindex/changed-page
-                      (fn [n col after page]
+                      (fn [n col after page & more]
                         (when (and (= col "_system_to") (compare-and-set! injected? false true))
                           (xt/execute-tx node [[:put-docs :hyperedges
                                                 (hx-doc "hx:gate:1" :probe/gate ["g"])]])
                           (swap! stats-var update :hook-failures inc))
-                        (real-page n col after page))]
+                        (apply real-page n col after page more))]
           (hx/catch-up! node :force true))
         (check! "a hook failure during catch-up keeps reads-usable? false"
                 (or (not (hx/reads-usable?)) (pos? (row-count "hx:gate:1"))))
@@ -330,16 +330,83 @@
         (xt/execute-tx node [[:delete-docs :hyperedges "hx:tomb:1"]])
         (xt/execute-tx node [[:put-docs :hyperedges (hx-doc "hx:tomb:2" :probe/tomb ["u"])]])
         (with-redefs [futon1b-hxindex/changed-page
-                      (fn [n col after page]
+                      (fn [n col after page & more]
                         (if (= col "_system_to")
                           (throw (ex-info "probe: tombstone leg fails" {}))
-                          (real-page n col after page)))]
+                          (apply real-page n col after page more)))]
           (try (hx/catch-up! node :force true) (catch clojure.lang.ExceptionInfo _ nil)))
         (hx/catch-up! node :force true)
         (check! "a delete survives a failed tombstone leg and is repaired next run"
                 (and (zero? (row-count "hx:tomb:1")) (pos? (row-count "hx:tomb:2")))))
 
-      ;; ---- Fix C doc backfill: id ranges, bounded per run, resumable ------
+;; ---- 2026-11-14: failure journal, point-read repair, bounded audit ---
+      ;; A failed hook used to bump only an in-memory counter (lost on
+      ;; restart) and wait for a full history replay, which by 11-14 could
+      ;; not complete. Now it is journaled durably and repaired by point read.
+      (let [stats-var (var-get (ns-resolve 'futon1b-hxindex '!stats))
+            real-index @#'futon1b-hxindex/index-doc!]
+        (hx/catch-up! node :force true)
+        (check! "journal: gate open before the failures" (hx/reads-usable?))
+        (xt/execute-tx node [[:put-docs :hyperedges (hx-doc "hx:jr:1" :probe/jr ["j1"])]
+                             [:put-docs :hyperedges (hx-doc "hx:jr:2" :probe/jr ["j2"])]])
+        (with-redefs [futon1b-hxindex/index-doc!
+                      (fn [& _] (throw (java.sql.SQLException. "probe: index write fails")))]
+          @(hx/on-put! (hx-doc "hx:jr:1" :probe/jr ["j1"])))
+        (let [counted (:hook-failures @stats-var)]
+          (check! "journal: a failed put is journaled, not counted"
+                  (and (= 1 (hx/dirty-count (ds)))
+                       (= 1 (:journaled-failures @stats-var))))
+          (check! "journal: a journaled id shuts the read gate" (not (hx/reads-usable?)))
+          (swap! stats-var assoc :hook-failures 0 :journaled-failures 0) ; "restart"
+          (check! "journal: a restart does not forget it" (not (hx/reads-usable?)))
+          (swap! stats-var assoc :hook-failures counted))
+        (check! "journal: a failed batch index is journaled and does not throw"
+                (with-redefs [futon1b-hxindex/index-docs!
+                              (fn [& _] (throw (java.sql.SQLException. "probe: batch index fails")))]
+                  (and (nil? (hx/on-put-batch! [(hx-doc "hx:jr:2" :probe/jr ["j2"])]))
+                       (= 2 (hx/dirty-count (ds))))))
+        (xt/execute-tx node [[:delete-docs :hyperedges "hx:jr:del"]])
+        (real-index (ds) (hx-doc "hx:jr:del" :probe/jr ["gone"]))  ; stale row
+        (with-redefs [futon1b-hxindex/delete-id!
+                      (fn [& _] (throw (java.sql.SQLException. "probe: delete fails")))]
+          @(hx/on-delete! "hx:jr:del"))
+        (let [r (hx/repair-dirty! node)]
+          (check! "repair: every journaled id re-read and cleared"
+                  (and (= 3 (:repaired r)) (zero? (:remaining r)) (zero? (hx/dirty-count (ds))))))
+        (check! "repair: the failed put is now indexed"
+                (and (pos? (row-count "hx:jr:1")) (pos? (row-count "hx:jr:2"))))
+        (check! "repair: the failed delete is now removed" (zero? (row-count "hx:jr:del")))
+        (check! "repair: the gate reopens without any history replay" (hx/reads-usable?))
+        (check! "repair: an id journaled again during repair stays journaled"
+                (do (with-redefs [futon1b-hxindex/index-doc!
+                                  (fn [& _] (throw (java.sql.SQLException. "probe")))]
+                      @(hx/on-put! (hx-doc "hx:jr:1" :probe/jr ["j1"])))
+                    (with-redefs [futon1b-hxindex/index-doc!
+                                  (fn [ds doc]
+                                    ;; a newer failure lands while repairing
+                                    (#'futon1b-hxindex/journal-dirty! ds "upsert" "hx:jr:1" "newer")
+                                    (real-index ds doc))]
+                      (hx/repair-dirty! node))
+                    (= 1 (hx/dirty-count (ds)))))
+        (hx/repair-dirty! node))
+
+      ;; A bounded audit run saves each leg's progress and resumes from it;
+      ;; it moves the no-new-tx guard only when both legs reached the present.
+      (let [ds* (ds)
+            meta (fn [k] (:v (jdbc/execute-one! ds* ["SELECT v FROM hx_meta WHERE k = ?" k] unqualified)))]
+        (hx/catch-up! node :force true)
+        (let [tx-before (meta "last-tx-id")]
+          (xt/execute-tx node [[:put-docs :hyperedges (hx-doc "hx:budget:1" :probe/budget ["b"])]])
+          (let [r (hx/catch-up! node :force true :budget-ms 0)]
+            (check! "audit: a zero budget stops before any page and says so"
+                    (and (false? (:caught-up? r)) (zero? (:changed r))
+                         (= tx-before (meta "last-tx-id")))))
+          (let [r (hx/catch-up! node :force true :page 1)]
+            (check! "audit: the next run resumes and reaches the present"
+                    (and (:caught-up? r) (pos? (row-count "hx:budget:1"))
+                         (not= tx-before (meta "last-tx-id")))))))
+
+            ;; ---- Fix C doc backfill: id ranges, bounded per run, resumable ------
       ;; 2026-11-07: the first backfill sorted every current document to
       ;; page 2,000 of them and took the live JVM's whole Arrow budget; now
       ;; it walks (after, hi] ranges bounded by sidecar ids, saves its

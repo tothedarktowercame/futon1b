@@ -283,8 +283,9 @@
                          (flush)
                          false)))]
     (when committed?
-      (when-let [ds @text/!ds]
-        (hx/index-docs! ds (mapv :doc batch)))
+      ;; Never throws: a SQLite failure is journaled for repair rather than
+      ;; answering 500 for a committed write (2026-11-14).
+      (hx/on-put-batch! (mapv :doc batch))
       (doseq [t (distinct (map (comp :hx/type :doc) batch))]
         (graph/invalidate-hyperedge-query-cache! t)))
     (mapv (fn [{:keys [doc payload single result]}]
@@ -853,24 +854,51 @@
 ;; writes (2026-09-30: fts + hx catch-ups held two permits during a 504 storm).
 (def ^:private catch-up-min-free-permits 2)
 
+;; Hyperedge sidecar upkeep (2026-11-14, holes/E-xtdb-plan-cache-heap.md).
+;; Every run repairs journaled ids by point read (cheap, no expensive-read
+;; permit). The history audit (hx/catch-up!: whole-table system-time scans)
+;; runs only every FUTON1B_HX_AUDIT_MS (default 6 h), within
+;; FUTON1B_HX_AUDIT_BUDGET_MS (default 10 min) per run, resuming from its
+;; per-leg checkpoints. It used to run every 15 min to completion under the
+;; 60 s query deadline, which it stopped meeting on 11-13: from then on no
+;; run completed and the index could not recover from any hook failure.
+
+(defn- env-ms [k default]
+  (or (some-> (System/getenv k) str/trim not-empty parse-long) default))
+
+(def ^:private hx-audit-interval-ms (env-ms "FUTON1B_HX_AUDIT_MS" (* 6 60 60 1000)))
+(def ^:private hx-audit-budget-ms (env-ms "FUTON1B_HX_AUDIT_BUDGET_MS" (* 10 60 1000)))
+(def ^:private hx-audit-page 5000)
+(def ^:private hx-audit-page-timeout-s 300)
+
+(defonce ^:private !hx-last-audit-at (atom 0))
+
 (defn- hx-catch-up-with-permit!
-  "Hyperedge catch-up takes an expensive-read permit like other table scans:
-   P0 measured that both of its system-time queries scan the whole
-   hyperedges table, so it must not pile onto the two census-class permits
-   unbudgeted. Runs at boot and then every FUTON1B_HX_CATCHUP_MS (default
-   15 min); a busy permit budget skips the run rather than queueing behind
-   serving reads."
+  "Repair journaled ids, then run the history audit if due. The audit takes
+   an expensive-read permit like other table scans (P0: both legs scan the
+   whole hyperedges table); a busy budget skips it rather than queueing
+   behind serving reads."
   []
-  (cond
-    (< (fxt/query-permits-available) catch-up-min-free-permits)
-    {:skipped :query-permits-busy}
+  (let [repair (hx/repair-dirty! @!node)
+        audit-due? (>= (- (System/currentTimeMillis) @!hx-last-audit-at)
+                       hx-audit-interval-ms)]
+    (cond
+      (not audit-due?)
+      {:changed 0 :repair repair :audit :not-due}
 
-    (.tryAcquire expensive-read-permit expensive-read-wait-ms TimeUnit/MILLISECONDS)
-    (try
-      (hx/catch-up! @!node)
-      (finally (.release expensive-read-permit)))
+      (< (fxt/query-permits-available) catch-up-min-free-permits)
+      {:skipped :query-permits-busy :repair repair}
 
-    :else {:skipped :expensive-read-busy}))
+      (.tryAcquire expensive-read-permit expensive-read-wait-ms TimeUnit/MILLISECONDS)
+      (try
+        (reset! !hx-last-audit-at (System/currentTimeMillis))
+        (assoc (hx/catch-up! @!node :page hx-audit-page
+                             :page-timeout-s hx-audit-page-timeout-s
+                             :budget-ms hx-audit-budget-ms)
+               :repair repair)
+        (finally (.release expensive-read-permit)))
+
+      :else {:skipped :expensive-read-busy :repair repair})))
 
 (defn- ent-page-with-permit!
   "Run one bounded entity-index store page under one expensive-read permit.
@@ -1693,6 +1721,9 @@
                        (try (println "[hxindex] periodic catch-up:"
                                      (pr-str (hx/start-periodic-catch-up!
                                               @!node
+                                              ;; each run is a cheap journal
+                                              ;; repair; the audit gates itself
+                                              :interval-ms (env-ms "FUTON1B_HX_REPAIR_MS" 60000)
                                               :catch-up-fn hx-catch-up-with-permit!)))
                             (catch Throwable t
                               (println "[hxindex] periodic catch-up not started:"

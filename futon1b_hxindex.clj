@@ -155,7 +155,12 @@
    "CREATE TABLE IF NOT EXISTS hx_clock (
       hx_id TEXT PRIMARY KEY, endpoints_edn TEXT NOT NULL,
       ends_edn TEXT NOT NULL, props_edn TEXT NOT NULL)"
-   "CREATE TABLE IF NOT EXISTS hx_meta (k TEXT PRIMARY KEY, v TEXT)"])
+   "CREATE TABLE IF NOT EXISTS hx_meta (k TEXT PRIMARY KEY, v TEXT)"
+   ;; 2026-11-14: ids whose index write failed. Durable (a restart keeps
+   ;; them), repaired by `repair-dirty!` with point reads, and reads are not
+   ;; served while any remain. See "Failure journal" below.
+   "CREATE TABLE IF NOT EXISTS hx_dirty (
+      hx_id TEXT PRIMARY KEY, op TEXT, at TEXT NOT NULL, error TEXT)"])
 
 (defn- ds* [] @text/!ds)
 
@@ -275,16 +280,53 @@
 ;; the checkpoint (catch-up! owns it — see futon1b-text/on-append! for why).
 ;; ---------------------------------------------------------------------------
 
+;; Failure journal (2026-11-14, futon1b holes/E-xtdb-plan-cache-heap.md).
+;;
+;; Until then a failed hook only bumped an in-memory counter, and the only
+;; repair was catch-up!'s replay of all history since the checkpoint: two
+;; whole-table FOR ALL SYSTEM_TIME scans, which by 11-14 took 109 s per
+;; 1,000-row page against a 60 s deadline with a 740k-row backlog, so no
+;; catch-up had completed for a day and one failure would have taken index
+;; reads offline with no way back. A restart also forgot the counter.
+;;
+;; Now a failed hook records the id in hx_dirty, durably; `repair-dirty!`
+;; re-reads just those ids by point lookup on every periodic run, and
+;; reads-usable? is false while any remain. Only a failure that cannot even
+;; be journaled (the SQLite file itself failing) falls back to the counter
+;; and the history audit. Do not go back to repairing by history replay
+;; alone: its cost grows with the table, not with the number of failures.
+
+(defn- journal-dirty!
+  "Record ID as needing repair. True when the journal took it."
+  [ds op id msg]
+  (try
+    (write-locked*
+     (fn []
+       (jdbc/execute! ds ["INSERT INTO hx_dirty(hx_id, op, at, error) VALUES (?,?,?,?)
+                           ON CONFLICT(hx_id) DO UPDATE
+                           SET op=excluded.op, at=excluded.at, error=excluded.error"
+                          (str id) op (str (Instant/now)) msg])))
+    true
+    (catch Throwable _ false)))
+
 (defn- hook-failure! [op id t]
-  (let [msg (str (.getSimpleName (class t)) ": " (.getMessage t))]
+  (let [msg (str (.getSimpleName (class t)) ": " (.getMessage t))
+        journaled? (when-let [ds (ds*)] (journal-dirty! ds op id msg))]
     (swap! !stats (fn [s]
                     (-> s
-                        (update :hook-failures inc)
-                        (assoc :last-hook-error {:op op :id id :error msg}))))
+                        (update (if journaled? :journaled-failures :hook-failures)
+                                (fnil inc 0))
+                        (assoc :last-hook-error {:op op :id id :error msg
+                                                 :journaled? (boolean journaled?)}))))
     (println (str "[hxindex] " op " failed id=" id " — " msg
-                  " (recoverable: checkpoint not advanced; the next"
-                  " catch-up repairs it)"))
+                  (if journaled?
+                    " (journaled; the next repair-dirty! re-reads it)"
+                    " (NOT journaled; reads fall back to scans until a history audit completes)")))
     (flush)))
+
+(defn dirty-count [ds]
+  (or (:n (first (jdbc/execute! ds ["SELECT COUNT(*) AS n FROM hx_dirty"] unqualified)))
+      0))
 
 (defn on-put!
   "Hook after a verified hyperedge put: upsert the doc's rows."
@@ -305,6 +347,49 @@
         (delete-id! ds id)
         (catch Throwable t
           (hook-failure! "delete" (str id) t))))))
+
+(defn on-put-batch!
+  "Hook after a committed batch of hyperedge puts: index them in one SQLite
+   transaction. Synchronous; never throws. Before 2026-11-14 the batch route
+   called index-docs! directly, so a SQLite failure answered 500 for a
+   committed write and was never counted or repaired."
+  [docs]
+  (when-let [ds (ds*)]
+    (try
+      (index-docs! ds docs)
+      (catch Throwable t
+        (doseq [d docs] (hook-failure! "batch-upsert" (str (:xt/id d)) t))
+        nil))))
+
+(defn repair-dirty!
+  "Re-read each journaled id's current row by point lookup (`_id = ?`, not
+   the `_id IN` scan) and upsert or delete its index rows, then clear it
+   from the journal unless it was journaled again meanwhile. At most LIMIT
+   ids per call; an id whose repair fails stays journaled."
+  [node & {:keys [limit] :or {limit 500}}]
+  (if-let [ds (ds*)]
+    (let [rows (jdbc/execute! ds ["SELECT hx_id, at FROM hx_dirty ORDER BY at LIMIT ?" (long limit)]
+                              unqualified)
+          result (reduce
+                  (fn [acc {:keys [hx_id at]}]
+                    (try
+                      (if-let [doc (first (fxt/timed-q
+                                           node ["SELECT * FROM hyperedges WHERE _id = ?" hx_id]))]
+                        (index-doc! ds doc)
+                        (delete-id! ds hx_id))
+                      (write-locked*
+                       (fn [] (jdbc/execute! ds ["DELETE FROM hx_dirty WHERE hx_id = ? AND at = ?"
+                                                 hx_id at])))
+                      (update acc :repaired inc)
+                      (catch Throwable t
+                        (-> acc (update :errors inc)
+                            (assoc :last-error (str (.getSimpleName (class t)) ": " (.getMessage t)))))))
+                  {:repaired 0 :errors 0}
+                  rows)
+          out (assoc result :remaining (dirty-count ds) :at (str (Instant/now)))]
+      (swap! !stats assoc :last-repair out)
+      out)
+    {:repaired 0 :errors 0 :remaining 0 :skipped :no-datasource}))
 
 ;; ---------------------------------------------------------------------------
 ;; Catch-up over system time (P0: nothing seeks on system time, every query
@@ -333,15 +418,17 @@
   "One keyset page of hyperedge ids whose system-time column (`_system_from`
    or `_system_to`) advanced past (TS, ID). P0 measured: both columns scan,
    cost is roughly constant in T."
-  [node col [ts id] page]
-  (fxt/timed-q
-   node
-   [(str "SELECT _id, " col " AS marker
-          FROM hyperedges FOR ALL SYSTEM_TIME
-          WHERE " col " > ? OR (" col " = ? AND _id > ?)
-          ORDER BY " col ", _id
-          LIMIT ?")
-    (->odt ts) (->odt ts) (str id) (long page)]))
+  ([node col after page] (changed-page node col after page fxt/default-query-timeout-s))
+  ([node col [ts id] page timeout-s]
+   (fxt/timed-q
+    node
+    [(str "SELECT _id, " col " AS marker
+           FROM hyperedges FOR ALL SYSTEM_TIME
+           WHERE " col " > ? OR (" col " = ? AND _id > ?)
+           ORDER BY " col ", _id
+           LIMIT ?")
+     (->odt ts) (->odt ts) (str id) (long page)]
+    timeout-s)))
 
 (defn- repair-ids!
   "Re-read each changed id's CURRENT row (or absence) and upsert/delete the
@@ -806,8 +893,10 @@
    exists ONLY for the bad-case test. Skipped as {:skipped :no-new-tx} when
    xt.txs shows no transaction newer than the last run (pass :force true to
    override, e.g. from rebuild!). Single-flight like the evidence catch-up."
-  [node & {:keys [page fill-page force tombstones? doc-page doc-budget-ms]
-           :or {page 1000 fill-page 20000 force false tombstones? true}}]
+  [node & {:keys [page fill-page force tombstones? doc-page doc-budget-ms
+                  page-timeout-s budget-ms]
+           :or {page 1000 fill-page 20000 force false tombstones? true
+                page-timeout-s fxt/default-query-timeout-s}}]
   (if-not (compare-and-set! !catch-up-running? false true)
     {:skipped :already-running}
     (try
@@ -881,51 +970,71 @@
               doc-backfill (assoc :hx-doc-backfill doc-backfill)))
 
           :else
-          (let [checkpoint [(or (meta-get ds "checkpoint-ts") (str epoch))
-                            (or (meta-get ds "checkpoint-id") "")]
-                ;; The upsert leg's position is saved only after BOTH legs
-                ;; finish. Saved page by page (as before 2026-09-30), a
-                ;; tombstone leg that then failed left the next run starting
-                ;; past deletes it never repaired: both legs start from the
-                ;; saved checkpoint.
-                [upserted upsert-hi]
-                (loop [after checkpoint changed 0]
-                  (let [rows (changed-page node "_system_from" after page)]
-                    (if (empty? rows)
-                      [changed after]
-                      (do (repair-ids! ds node (map row-id rows))
-                          (let [lst (last rows)]
-                            (recur [(str (row-marker lst)) (str (row-id lst))]
-                                   (+ changed (count rows))))))))
+          ;; Each leg keeps its OWN checkpoint and saves it after every page
+          ;; (2026-11-14). Before, both legs started from one checkpoint saved
+          ;; only when both had finished; once a page outgrew the query
+          ;; deadline (109 s vs 60 s on 11-14) no run ever finished and the
+          ;; checkpoint never moved. Separate checkpoints keep the 09-30
+          ;; guarantee (a tombstone leg that fails never skips deletes: its
+          ;; own checkpoint stays put) while letting each page count.
+          ;; BUDGET-MS bounds a run; the next run resumes from the saved
+          ;; checkpoints.
+          (let [deadline (when budget-ms (+ started (long budget-ms)))
+                ;; Read BOTH starting points before either leg runs: a
+                ;; tombstone leg without its own checkpoint starts from the
+                ;; shared one as it was, not as the upsert leg leaves it
+                ;; (else it starts past deletes in the same transaction).
+                base [(or (meta-get ds "checkpoint-ts") (str epoch))
+                      (or (meta-get ds "checkpoint-id") "")]
+                tomb-start (if-let [ts (meta-get ds "tomb-checkpoint-ts")]
+                             [ts (or (meta-get ds "tomb-checkpoint-id") "")]
+                             ;; first run with separate legs: the tombstone
+                             ;; leg gets its own checkpoint NOW, so a run that
+                             ;; fails in that leg after the upsert leg moved
+                             ;; can never make it start past a delete
+                             (do (meta-set! ds "tomb-checkpoint-ts" (first base))
+                                 (meta-set! ds "tomb-checkpoint-id" (second base))
+                                 base))
+                leg (fn [col start-at ts-key id-key]
+                        (loop [after start-at changed 0]
+                          (if (and deadline (>= (System/currentTimeMillis) deadline))
+                            {:changed changed :done? false}
+                            (let [rows (changed-page node col after page page-timeout-s)]
+                              (if (empty? rows)
+                                {:changed changed :done? true}
+                                (let [lst (last rows)
+                                      nxt [(str (row-marker lst)) (str (row-id lst))]]
+                                  (repair-ids! ds node (map row-id rows))
+                                  (meta-set! ds ts-key (first nxt))
+                                  (meta-set! ds id-key (second nxt))
+                                  (recur nxt (+ changed (count rows)))))))))
+                ups (leg "_system_from" base "checkpoint-ts" "checkpoint-id")
                 ;; ids superseded by an upsert are re-upserted by repair-ids!;
                 ;; the tombstone leg exists for DELETEs, which _system_from
                 ;; never sees (P0 §3).
-                deleted (if-not tombstones?
-                          0
-                          (loop [after checkpoint changed 0]
-                            (let [rows (changed-page node "_system_to" after page)]
-                              (if (empty? rows)
-                                changed
-                                (let [lst (last rows)]
-                                  (repair-ids! ds node (map row-id rows))
-                                  (recur [(str (row-marker lst)) (str (row-id lst))]
-                                         (+ changed (count rows))))))))]
-            (meta-set! ds "checkpoint-ts" (first upsert-hi))
-            (meta-set! ds "checkpoint-id" (second upsert-hi))
-            (meta-set! ds "last-tx-id" (str tx-id))
-            (meta-set! ds "hook-failures-at-catch-up" failures-at-start)
+                tombs (if tombstones?
+                        (leg "_system_to" tomb-start "tomb-checkpoint-ts" "tomb-checkpoint-id")
+                        {:changed 0 :done? true})
+                done? (and (:done? ups) (:done? tombs))]
+            ;; Only a run that reached the present on both legs has repaired
+            ;; everything before it started: only then may the no-new-tx guard
+            ;; and the unjournaled-failure count move.
+            (when done?
+              (meta-set! ds "last-tx-id" (str tx-id))
+              (meta-set! ds "hook-failures-at-catch-up" failures-at-start))
             (when clock-backfill
               (meta-set! ds "hx-clock-backfill" (str (Instant/now))))
             (let [elapsed (- (System/currentTimeMillis) started)
-                  res (cond-> {:changed (+ upserted deleted)
-                               :upsert-leg upserted :tombstone-leg deleted
+                  res (cond-> {:changed (+ (:changed ups) (:changed tombs))
+                               :upsert-leg (:changed ups) :tombstone-leg (:changed tombs)
+                               :caught-up? done?
                                :elapsed-ms elapsed :tx-id tx-id}
                         node-backfill (assoc :hx-node-backfill node-backfill)
                         clock-backfill (assoc :hx-clock-backfill clock-backfill)
                         doc-backfill (assoc :hx-doc-backfill doc-backfill))]
               (swap! !stats assoc :last-catch-up
                      {:at (str (Instant/now)) :elapsed-ms elapsed
-                      :changed (:changed res)})
+                      :changed (:changed res) :caught-up? done?})
               res))))
       (finally (reset! !catch-up-running? false)))))
 
@@ -940,7 +1049,8 @@
       (jdbc/execute! tx ["DELETE FROM hx_edge"])
       (jdbc/execute! tx ["DELETE FROM hx_node"])
       (jdbc/execute! tx ["DELETE FROM hx_clock"])
-      (jdbc/execute! tx ["DELETE FROM hx_meta WHERE k IN ('checkpoint-ts','checkpoint-id','last-tx-id','hx-node-backfill','hx-clock-backfill','hx-doc-backfill','source-columns-v1','source-columns-after')"]))
+      (jdbc/execute! tx ["DELETE FROM hx_dirty"])
+      (jdbc/execute! tx ["DELETE FROM hx_meta WHERE k IN ('checkpoint-ts','checkpoint-id','tomb-checkpoint-ts','tomb-checkpoint-id','last-tx-id','hx-node-backfill','hx-clock-backfill','hx-doc-backfill','source-columns-v1','source-columns-after')"]))
     (assoc (catch-up! node :page page :force true)
            :total-elapsed-ms (- (System/currentTimeMillis) started))))
 
@@ -1025,13 +1135,19 @@
    the last catch-up. A failed hook means a hyperedge written after the
    checkpoint may be missing from the candidates — which the XTDB re-check
    cannot see (it only drops stale positives) — so the read must fall back
-   to the scan path."
+   to the scan path.
+
+   Since 2026-11-14 a failed hook is journaled in hx_dirty and the counter
+   below counts only failures that could not be journaled; a journaled id
+   blocks reads until repair-dirty! has re-read it (seconds to minutes, not
+   a history replay)."
   []
   (let [ds (ds*)]
     (boolean
      (and @!reads-enabled
           ds
           (meta-get ds "checkpoint-ts")
+          (zero? (long (dirty-count ds)))
           (let [stored (meta-get ds "hook-failures-at-catch-up")]
             (or (nil? stored)
                 (= (try (Long/parseLong stored) (catch Exception _ -1))

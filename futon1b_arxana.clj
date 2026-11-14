@@ -25,6 +25,7 @@
             [clojure.string :as str]
             [clojure.walk :as walk]
             [futon1b-gates :as gates]
+            [futon1b-hxindex :as hx]
             [futon1b-xt :as fxt]
             [xtdb.api :as xt])
   (:import [java.nio.charset StandardCharsets]
@@ -501,6 +502,22 @@
      :recoverable {:journal-ref [:arxana_journal message-id]
                    :choices [:refresh :rebase-and-resubmit :export-patch]}})))
 
+
+(defn- index-committed-hyperedges!
+  "Index hyperedge docs an Arxana command has just committed, as every other
+   hyperedge write path does (hx/on-put! journals a failure for repair), and
+   drop cached type listings. Before 2026-11-14 these puts never reached the
+   hyperedge sidecar; no client sent :hyperedge-records then, so nothing was
+   missing (0 of 3,733 outcomes), but the next one would have been invisible
+   to index-served reads. Never throws: the command is already committed."
+  [docs]
+  (doseq [d docs]
+    (try
+      (when-let [f (hx/on-put! d)] @f)
+      (when-let [inv (requiring-resolve 'futon1b-graph/invalidate-hyperedge-query-cache!)]
+        (inv (:hx/type d)))
+      (catch Throwable _ nil))))
+
 (defn- conditional-revision-command!
   "Execute one authenticated conditional command. Returns the D3 response
   envelope; a duplicate message id returns the stored original outcome with
@@ -569,6 +586,7 @@
           ;; 503 even though the head/outcome become visible to the caller.
           (xt/execute-tx node ops {:metadata {:arxana/message-id message-id
                                               :arxana/target-id (:target-id cmd)}})
+          (index-committed-hyperedges! (:hyperedge-docs cmd))
           (catch Throwable t
             ;; V3 S1: an ASSERT failure aborts the whole transaction. Two
             ;; causes reach here: the head precondition (stale) or the

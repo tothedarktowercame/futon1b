@@ -15,6 +15,7 @@
             [clojure.string :as str]
             [futon1b-arxana :as arxana]
             [futon1b-gates :as gates]
+            [futon1b-hxindex :as hx]
             [futon1b-server :as srv]
             [xtdb.node :as xtn])
   (:import [java.net URI]
@@ -178,20 +179,28 @@
                 (= 404 (:status read-back)) read-back))
 
       ;; --- 7. conditional route commits attached arxana records atomically -
-      (let [r (post (command "m-with-records" "artifact:C" :absent "artifact-c-bytes"
+      (let [hx-seen (atom [])
+            r (with-redefs [hx/on-put! (fn [d] (swap! hx-seen conj d) nil)]
+               (post (command "m-with-records" "artifact:C" :absent "artifact-c-bytes"
                              {:entity-records [{:name "manifestation-1"
                                                 :type :arxana/manifestation
                                                 :external-id "arxana:m:1"
                                                 :source "t"}]
                               :hyperedge-records [{:hx/type :arxana/observed-in
                                                    :hx/endpoints ["m:1" "r:1"]}]})
-                    ah)
+                    ah))
             rev (get-in r [:body :ok :revision/id])
             read-ent (req "GET" (str ENT "?source=t&external-id=arxana:m:1") nil nil)]
         (check! "command with attached records commits (200)"
                 (= 200 (:status r)) r)
         (check! "attached arxana entity is durable after the atomic commit"
                 (= 200 (:status read-ent)) read-ent)
+        ;; 2026-11-14: Arxana's hyperedge puts never reached the hyperedge
+        ;; sidecar index; every other write path calls hx/on-put!.
+        (check! "attached arxana hyperedge goes to the hyperedge index hook"
+                (= [[:arxana/observed-in ["m:1" "r:1"]]]
+                   (mapv (juxt :hx/type :hx/endpoints) @hx-seen))
+                @hx-seen)
         (check! "revision id is content-addressed (sha256 of canonical bytes)"
                 (= rev (str "arxana:revision:sha256:"
                             (let [digest (java.security.MessageDigest/getInstance "SHA-256")]
