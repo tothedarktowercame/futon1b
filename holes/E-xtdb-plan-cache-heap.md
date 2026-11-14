@@ -209,3 +209,67 @@ call sites) has not been done and remains the fix; H3(b) (periodic
 `invalidateAll`) is the stop-gap. Rationale for 16g, if ever: only if, after
 H2, the sampler shows plans staying well under 4096 while heap use still
 climbs.
+
+## 2026-11-14 ~15:50Z: measured live — the plan cache holds 4.2 GB, and most plans come from one as-of query (Claude Code seat, taking over claude-1's remit)
+
+Joe chose to diagnose on the failing JVM before restarting it. At the start
+futon1b (pid 3382662) was refusing connections on :7073 (curl exit 56), all
+CPU was in GC threads, old gen stayed at 99.5% after each full GC (12,988 full
+GCs, 12,550 s of full-GC time), plans 4,044.
+
+**Heap dump** (before any change, for H1's dominator analysis later; no MAT on
+Zone): `~/storage/futon1b-heap-2026-11-14/futon1b-live-2026-11-14T1550Z.hprof`
+(13.1 GB, 78 s).
+
+**Retained size of the plan cache, measured by removing it** (H1's question,
+answered without the dump): `(.invalidateAll plan-cache)` then `System/gc`.
+Old gen 7,906 MB → 3,665 MB; used 7,953 → 3,677 MB; 2 s. So the 4,044 plans
+held about 4.2 GB, 54% of the heap, roughly 1.05 MB per plan, and futon1b's
+working set without them is about 3.7 GB. Afterwards :7073 answered
+`evidence?limit=1` in 10–15 ms. Record:
+`~/notes/futon1b-heap/invalidate-experiment-2026-11-14.edn`.
+
+**Which queries fill it.** `plan-key-probe.clj`: 3,921 of 4,044 plans have
+zero arg-fields, so they are not the parameterised `_id IN (?…)` reads H2
+targets. XTDB's parse caches (`xtdb.query.SqlParser` static
+`singleQueryCache` 80 + `multiQueryCache` 2,857 strings, dumped to
+`~/notes/futon1b-heap/sql-strings-2026-11-14T1555Z.txt`) by shape:
+
+| strings | shape |
+|---|---|
+| 1,862 | XTQL hyperedges-by-endpoint, `fn [p-target p-limit p-type]`, with `:for-valid-time (at #xt/instant "…")` and `:for-system-time (at …)` **inlined**, valid = system instant in all 1,862 |
+| 434 | `SELECT … FROM hyperedges WHERE _id IN ($1…)` (H2 site) |
+| 192 | `SELECT … FROM entities WHERE _id IN (…)` |
+| ~130 | transaction guards: `ASSERT [NOT EXISTS] … arxana_* / entities` with `IN`, `OR` chains or `VALUES` of varying length (migration/Arxana bulk loads) |
+| 20 | `SELECT * FROM evidence WHERE _id IN (…)` |
+| ~300 | everything else |
+
+The 1,862 instants spread evenly over the whole run, 20–70 an hour from
+11-11 02Z to 11-14 15Z, i.e. a steady per-turn leak, not the 11-13 bulk work.
+(Parse-cache shares stand in for plan-cache shares: plan keys print as
+`[N]`, so plans cannot be attributed to strings directly.)
+
+**Where the as-of query comes from.**
+- futon1b: `futon1b_graph.clj` `temporal-filter` / `hyperedge-from`
+  (l.1123–1134) put the as-of instant into the query form as a literal, the
+  practice `futon1b_xt.clj` `pq`'s docstring forbids. Six callers. Only
+  as-of reads take this path (current reads go to the sidecar).
+- futon3c: `agency/pattern_card_provider.clj` `default-card-query`, called
+  by `refresh-cards!` with `system-as-of (str (Instant/now))` as both
+  `valid-as-of` and `system-as-of`: one query for the session's
+  `:pattern-card/selection` edges, plus one `:act/withdrawal` query per
+  selection, on every card refresh. Present since b9924b391 (2026-09-28),
+  so it probably also drove the 10-28 fill at 4g.
+
+**Consequence for the plan.** H2 (fixed IN-list arities) addresses about a
+quarter of the distinct strings. The main fix is to make the as-of instants
+parameters in `hyperedge-from` (`(at p-valid-as-of)` with the instant passed
+as an argument, if XTDB 2.1 accepts a parameter there; test in a test JVM
+first), so every as-of read of one shape shares one plan. H2 then removes
+most of the rest. The 16 GB question does not arise: the working set without
+plans is ~3.7 GB.
+
+**State after the stop-gap.** Plans restart from 0 (23 a minute later). At the
+observed rate the cache reaches ~2,800 plans, where full GCs began on this
+run, in about two to three days; repeat `invalidateAll` (or restart) before
+then if the fix has not landed.
