@@ -1,0 +1,7 @@
+[Unit]
+Description=futon1b early-warning probe -> Emacs *Warnings* (holes/E-xtdb-plan-cache-heap.md)
+
+[Service]
+Type=oneshot
+ExecStart=/home/joe/code/futon1b/scripts/futon1b-health-watch.py
+TimeoutStartSec=110

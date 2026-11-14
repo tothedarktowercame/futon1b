@@ -1,0 +1,11 @@
+[Unit]
+Description=futon1b early-warning probe every 2 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=futon1b-health-watch.service
+
+[Install]
+WantedBy=timers.target
