@@ -406,8 +406,14 @@ began intermittently at 15:52 and 18:10, then became continuous at 19:23. A
 query cancelled while it holds or is fetching pages is the suspected leak;
 2.2.0-rc0's `MemoryCache` differs from 2.1.0's only by a lambda renumbering,
 so if the leak is real it is on the reader side and 2.2 is not known to fix it.
+After the restart, a dozen evidence scans were cancelled at the 60 s deadline
+while the text sidecar reconciled (20:05–20:21), and the cache afterwards read
+0 bytes: an ordinary cancellation does not leak. Whatever leaks is rarer, and
+it is still unidentified; the gauge below is what will show it next time.
 
-**Fix.** Joe restarted futon1b-zone at 19:46 (no in-place release: some
+**Fix.** Joe restarted futon1b-zone at 19:46; it served from ~20:10 and
+evidence reads were fast again at 20:21, when the text reconcile finished
+(the memory-projection hydration of 2,260 edges took ~20 min of that) (no in-place release: some
 slices could have belonged to a live compaction, and releasing a page under a
 reader frees memory it is still reading).
 
