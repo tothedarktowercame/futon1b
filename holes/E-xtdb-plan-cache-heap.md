@@ -180,3 +180,32 @@ its PID-change check compared the wrong process. It now reads the unit's
 - After H2, a day of sampler data on Zone shows plan count well under 4096 with heap stable — check: `/home/joe/notes/futon1b-heap/samples.tsv` plans column **Not started.**
 - Heap disposition settled: either the 8g drop-in is deleted (heap back to 4g) or 8g is folded into deps.edn :server and the README memory table — check: `~/.config/systemd/user/futon1b-zone.service.d/heap.conf` absent or README updated **Not met.**
 - The boot catch-up fix holds under live appends — check: `catch-up-drains-under-live-appends` at `/home/joe/code/futon1b/test_evidence_tag_index.clj:179` passes **Met.**
+
+## 2026-11-14: confirmed at 8g (claude-13, read-only)
+
+Joe asked for the cause before any move to 16g. Same mechanism, now measured
+over a full run at 8g (pid 3382662, up since 11-11 02:55Z):
+
+- The sampler (`~/notes/futon1b-heap/samples.tsv`, every 10 min) shows the
+  plan cache climbing steadily to its 4096 cap: 569 plans at 11-11 17:44Z,
+  1,587 at 11-12 05:44, 2,813 at 11-13 17:44, 3,704 at 11-13 23:45 (the bulk
+  dedup merges and retractions ran that evening), 4,026 at 11-14 15:05.
+  Emit entries 10,281. Heap 7.8 GB; old gen 99.3%.
+- Full GCs: 0 until plans passed ~2,800; 519 by 11-13 23:45; 6,805 by
+  11-14 11:45; 12,081 by 15:05 (about 400 per 10 min). Entity POSTs then
+  took 30 s+ and the futon3c watcher's writes timed out.
+- Class histogram 11-14 ~15:20Z
+  (`~/storage/futon1b-heap-2026-11-14/histo.txt`): 19.0M arrow `Field`
+  (455 MB) + 11.8M `FieldType` (378 MB) + 19.0M `UnmodifiableRandomAccessList`
+  (455 MB), 14.7M `Symbol` (472 MB), 7.0M `ProjectionSpec$Identity`,
+  777k `emit_rows_table…write_param` closures: about twice the 10-28 counts at
+  4g, i.e. the cache simply filled the bigger heap.
+
+So 8g is not too small for futon1b's data; it is too small for a full plan
+cache of this size (roughly 1.7 MB per plan at 4,000 plans). 16g would move
+the cliff, not remove it: the cache would still reach 4096 plans and grow
+again with any new SQL shapes. H2 above (fixed IN-list arities in the four
+call sites) has not been done and remains the fix; H3(b) (periodic
+`invalidateAll`) is the stop-gap. Rationale for 16g, if ever: only if, after
+H2, the sampler shows plans staying well under 4096 while heap use still
+climbs.
