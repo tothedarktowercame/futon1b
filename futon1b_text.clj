@@ -114,6 +114,14 @@
    "CREATE VIRTUAL TABLE IF NOT EXISTS ev_fts USING fts5(
       id UNINDEXED, author UNINDEXED, at UNINDEXED, session UNINDEXED,
       body, tokenize='unicode61')"
+   ;; 狗 recall's small authority-specific population. One row per cc:
+   ;; subject, newest (:at, :id) wins; the map makes replacement O(1).
+   "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+      id UNINDEXED, subject_id UNINDEXED, at UNINDEXED,
+      body, tokenize='unicode61')"
+   "CREATE TABLE IF NOT EXISTS memory_fts_map(
+      subject_id TEXT PRIMARY KEY, id TEXT NOT NULL, at TEXT NOT NULL,
+      fts_rowid INTEGER NOT NULL) WITHOUT ROWID;"
    "CREATE TABLE IF NOT EXISTS fts_meta (k TEXT PRIMARY KEY, v TEXT)"
    "CREATE TABLE IF NOT EXISTS ev_attr (
   id TEXT PRIMARY KEY, type TEXT, claim_type TEXT, author TEXT, at TEXT,
@@ -161,6 +169,8 @@
                           SELECT id, rowid FROM ev_fts"])
       (meta-set! tx "fts-map" "complete"))))
 
+(declare backfill-memory-fts!)
+
 (defn init!
   "Open (or create) the sidecar db beside the store. Idempotent."
   [{:keys [store-dir path]}]
@@ -172,6 +182,7 @@
     (doseq [stmt ddl] (jdbc/execute! ds [stmt]))
     (ensure-fts-map! ds)
     (reset! !ds ds)
+    (backfill-memory-fts! ds)
     (swap! !stats assoc :last-at (meta-get ds "last-at"))
     {:ok true :path file :last-at (meta-get ds "last-at")}))
 
@@ -231,6 +242,65 @@
   (let [b (:evidence/body doc)]
     (if (string? b) b (pr-str b))))
 
+(defn- memory-doc?
+  [doc]
+  (let [subject (:evidence/subject doc)
+        tags (set (map #(str/replace-first (str %) #"^:" "")
+                       (:evidence/tags doc)))]
+    (and (= "memory" (some-> (:ref/type subject) name))
+         (str/starts-with? (str (:ref/id subject)) "cc:")
+         (contains? tags "source/claude-code"))))
+
+(defn- newer-memory-row?
+  [at id existing]
+  (or (nil? existing)
+      (pos? (compare [(str at) (str id)]
+                     [(:at existing) (:id existing)]))))
+
+(defn- upsert-memory-fts-row!
+  [tx {:keys [id subject-id at body]}]
+  (let [existing (jdbc/execute-one!
+                  tx ["SELECT id, at, fts_rowid FROM memory_fts_map WHERE subject_id = ?"
+                      (str subject-id)] unqualified)]
+    (when (newer-memory-row? at id existing)
+      (when existing
+        (jdbc/execute! tx ["DELETE FROM memory_fts WHERE rowid = ?" (:fts_rowid existing)]))
+      (jdbc/execute! tx ["INSERT INTO memory_fts(id, subject_id, at, body) VALUES (?,?,?,?)"
+                         (str id) (str subject-id) (str at) (str body)])
+      (jdbc/execute! tx ["INSERT INTO memory_fts_map(subject_id,id,at,fts_rowid)
+                          VALUES (?,?,?,last_insert_rowid())
+                          ON CONFLICT(subject_id) DO UPDATE SET
+                            id=excluded.id, at=excluded.at, fts_rowid=excluded.fts_rowid"
+                         (str subject-id) (str id) (str at)]))))
+
+(defn backfill-memory-fts!
+  "Fill the memory-only FTS table from the bounded memory population already
+  present in ev_attr/ev_tags/ev_fts. One transaction makes an interrupted fill
+  all-or-nothing; a metadata checkpoint makes subsequent init calls O(1)."
+  [ds]
+  (if (= "complete" (meta-get ds "memory-fts-backfill"))
+    {:filled 0 :already :complete}
+    (let [rows (jdbc/execute!
+                ds
+                ["SELECT DISTINCT a.id, a.subject_id, a.at, f.body
+                  FROM ev_attr a
+                  JOIN ev_tags t ON t.id = a.id
+                  JOIN ev_fts_map fm ON fm.id = a.id
+                  JOIN ev_fts f ON f.rowid = fm.fts_rowid
+                  WHERE a.subject_type IN ('memory', ':memory')
+                    AND a.subject_id LIKE 'cc:%'
+                    AND t.tag IN ('source/claude-code', ':source/claude-code')"]
+                unqualified)
+          newest (->> rows
+                      (sort-by (juxt :at :id))
+                      (reduce (fn [m row] (assoc m (:subject_id row) row)) {}))]
+      (jdbc/with-transaction [tx ds]
+        (doseq [[subject-id {:keys [id at body]}] newest]
+          (upsert-memory-fts-row! tx {:id id :subject-id subject-id
+                                      :at at :body body}))
+        (meta-set! tx "memory-fts-backfill" "complete"))
+      {:filled (count newest) :already 0})))
+
 (defn- index-batch!
   "Upsert docs into all declared index tables. One transaction per batch."
   [ds docs]
@@ -275,7 +345,11 @@
         ;; boot, and every evidence read fell back to scanning (2026-10-11..14).
         (doseq [tag (distinct (map str (:evidence/tags d)))]
           (jdbc/execute! tx ["INSERT INTO ev_tags(id, tag) VALUES (?,?)"
-                             id tag])))))
+                             id tag]))
+        (when (memory-doc? d)
+          (upsert-memory-fts-row!
+           tx {:id id :subject-id (get-in d [:evidence/subject :ref/id])
+               :at (:evidence/at d) :body (body-text d)})))))
   (count docs))
 
 (def evidence-sidecar-tables
@@ -303,7 +377,7 @@
               evidence-sidecar-tables)))))
 
 (defn erase-evidence-sidecar!
-  "Delete IDS from all five evidence sidecar tables in one SQLite transaction
+  "Delete IDS from every evidence sidecar table in one SQLite transaction
    under the sidecar writer lock, then verify no row remains."
   [ids]
   (let [ids (mapv str ids)]
@@ -322,9 +396,13 @@
              (jdbc/execute! tx (into [(str "DELETE FROM ev_fts WHERE rowid IN
                                   (SELECT fts_rowid FROM ev_fts_map WHERE id IN " marks ")")]
                                      ids))
+             (jdbc/execute! tx (into [(str "DELETE FROM memory_fts WHERE rowid IN
+                                  (SELECT fts_rowid FROM memory_fts_map WHERE id IN " marks ")")]
+                                     ids))
              ;; The map was backfilled after the original FTS table. Delete by
              ;; id as well so a pre-backfill/unmapped legacy row cannot survive.
-             (doseq [table ["ev_fts" "ev_fts_map" "ev_attr" "ev_tags" "ev_doc"]]
+             (doseq [table ["ev_fts" "ev_fts_map" "ev_attr" "ev_tags" "ev_doc"
+                            "memory_fts_map"]]
                (jdbc/execute! tx (into [(str "DELETE FROM " table " WHERE id IN " marks)]
                                        ids)))))))
     (let [remaining (evidence-sidecar-counts ids)]
@@ -572,25 +650,7 @@
             (partition-all 500 (map str ids)))
       {})))
 
-(declare candidates)
-
-(defn- latest-memory-version-ids
-  "SUBJECT-IDS -> newest indexed evidence id by (:at, :id). SQLite only."
-  [ds subject-ids]
-  (if (seq subject-ids)
-    (->> (partition-all 100 subject-ids)
-         (mapcat (fn [chunk]
-                   (jdbc/execute!
-                    ds
-                    (into [(str "SELECT subject_id, id, at FROM ev_attr"
-                                " WHERE subject_id IN ("
-                                (str/join "," (repeat (count chunk) "?")) ")"
-                                " ORDER BY subject_id, at DESC, id DESC")]
-                          chunk)
-                    unqualified)))
-         (reduce (fn [m {:keys [subject_id id]}]
-                   (if (contains? m subject_id) m (assoc m subject_id id))) {}))
-    {}))
+(declare match-string)
 
 (defn memory-recall-search
   "Cheap advisory memory recall from the text sidecar only. The append index
@@ -601,8 +661,14 @@
   [{:keys [q limit]}]
   (let [ds @!ds
         k (min memory-recall-max-limit (max 1 (long (or limit 10))))
-        params {:q q :limit k :scope :all :tags ["source/claude-code"]}
-        cands (if ds (candidates ds params) [])
+        cands (if ds
+                (jdbc/execute!
+                 ds ["SELECT id, subject_id, at, bm25(memory_fts) AS score
+                      FROM memory_fts WHERE memory_fts MATCH ?
+                      ORDER BY bm25(memory_fts), at DESC, id DESC LIMIT ?"
+                     (match-string q) k]
+                 unqualified)
+                [])
         docs (cached-docs (mapv :id cands))
         valid (keep (fn [{:keys [id score]}]
                       (let [doc (get docs id)
@@ -616,9 +682,8 @@
                                    (not (str/blank? (str (:name body)))))
                           {:id id :score score :doc doc :subject-id subject-id})))
                     cands)
-        newest (latest-memory-version-ids ds (distinct (map :subject-id valid)))
         results (->> valid
-                     (filter #(= (:id %) (get newest (:subject-id %))))
+                     (take k)
                      (mapv (fn [{:keys [score doc]}]
                              (let [body (:evidence/body doc)]
                                {:score score

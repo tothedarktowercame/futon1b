@@ -214,7 +214,7 @@
     (check! "memory sidecar caps, ranks, and returns the public shape"
             (and (= :memory-sidecar (:source response))
                  (<= (:count response) text/memory-recall-max-limit)
-                 (= #{"mem-new" "mem-two"}
+                 (= #{"mem-new" "mem-two" "mem-ranked"}
                     (set (map #(get-in % [:entry :evidence/id]) results)))
                  (every? #(= #{:evidence/id :evidence/at :evidence/subject
                                :evidence/body}
@@ -223,6 +223,13 @@
                              (set (keys (get-in % [:entry :evidence/body])))) results)))
     (check! "newest indexed version suppresses the older matching version"
             (not (some #(= "mem-old" (get-in % [:entry :evidence/id])) results)))
+    (check! "memory-only FTS preserves bm25 rank order"
+            (= "mem-ranked" (get-in results [0 :entry :evidence/id])))
+    (check! "a memory appended after init through on-append is found"
+            (some #(= "mem-two" (get-in % [:entry :evidence/id])) results))
+    (check! "memory recall applies the requested limit after ranking"
+            (= 2 (:count (text/memory-recall-search
+                          {:q "orchid recall" :limit 2}))))
     (check! "a matching non-memory without the source tag is excluded"
             (not (some #(= "mem-decoy" (get-in % [:entry :evidence/id])) results)))
     (check! "memory sidecar response carries checkpoint and basis"
@@ -231,6 +238,33 @@
                    (contains? basis :basis-tx)
                    (contains? basis :basis-captured-at))))
     (println (format "  memory-sidecar in-test read %.3f ms" elapsed-ms))))
+
+(defn- test-memory-sidecar-backfill! [ds]
+  (let [bulk (mapv (fn [i]
+                     (doc (str "bulk-memory-" i) (format "2026-08-18T00:%02d:%02dZ"
+                                                         (quot i 60) (mod i 60))
+                          {:type :memory :author "minus40"
+                           :tags ["source/claude-code"]
+                           :subject {:ref/type :memory
+                                     :ref/id (str "cc:invented/bulk-" i)}
+                           :body {:source "claude-code" :project "invented"
+                                  :name (str "bulk-" i)
+                                  :hook (str "bulk fixture token " i)}}))
+                   (range 1500))]
+    (doseq [batch (partition-all 100 bulk)] ((priv 'index-batch!) ds batch))
+    (jdbc/with-transaction [tx ds]
+      (jdbc/execute! tx ["DELETE FROM memory_fts"])
+      (jdbc/execute! tx ["DELETE FROM memory_fts_map"])
+      (jdbc/execute! tx ["DELETE FROM fts_meta WHERE k = 'memory-fts-backfill'"]))
+    (let [t0 (System/nanoTime)
+          first-run (text/backfill-memory-fts! ds)
+          elapsed-ms (/ (- (System/nanoTime) t0) 1000000.0)
+          second-run (text/backfill-memory-fts! ds)]
+      (check! "bounded memory FTS backfill fills the 1500-row fixture"
+              (= 1503 (:filled first-run)))
+      (check! "memory FTS backfill checkpoint makes the second run a no-op"
+              (= {:filled 0 :already :complete} second-run))
+      (println (format "  memory-fts 1500-row backfill %.3f ms" elapsed-ms)))))
 
 (defn- test-http-surface! [node dir]
   (let [http-server (server/start-server! {:node node :store-dir dir
@@ -260,7 +294,7 @@
                        (string? (:basis-captured-at basis)))))
         (check! "HTTP memory-sidecar mode is capped and returns newest subjects"
                 (and (= 200 (:status memory-sidecar))
-                     (= #{"mem-new" "mem-two"}
+                     (= #{"mem-new" "mem-two" "mem-ranked"}
                         (set (map #(get-in % [:entry :evidence/id])
                                   (get-in memory-sidecar [:body :results]))))))
         (check! "HTTP stats exposes staleness, projection, and residual"
@@ -306,6 +340,12 @@
                     :subject {:ref/type :memory :ref/id "cc:invented/second"}
                     :body {:source "claude-code" :project "invented"
                            :name "second" :hook "orchid recall companion"}})
+              (doc "mem-ranked" "2026-08-17T03:06:30Z"
+                   {:type :memory :author "minus40" :tags ["source/claude-code"]
+                    :subject {:ref/type :memory :ref/id "cc:invented/ranked"}
+                    :body {:source "claude-code" :project "invented"
+                           :name "ranked"
+                           :hook "orchid orchid orchid recall recall recall"}})
               (doc "mem-decoy" "2026-08-17T03:07:00Z"
                    {:type :memory :author "other" :tags [:other]
                     :subject {:ref/type :memory :ref/id "cc:invented/decoy"}
@@ -327,11 +367,13 @@
           (text/on-append! d))
         (check! "normal append path fills ev_doc for memory fixtures"
                 (loop [n 0]
-                  (cond (= 4 (count (text/cached-docs
-                                     ["mem-old" "mem-new" "mem-two" "mem-decoy"]))) true
+                  (cond (= 5 (count (text/cached-docs
+                                     ["mem-old" "mem-new" "mem-two"
+                                      "mem-ranked" "mem-decoy"]))) true
                         (< 200 n) false
                         :else (do (Thread/sleep 10) (recur (inc n))))))
         (test-memory-sidecar-recall!)
+        (test-memory-sidecar-backfill! ds)
         (test-http-surface! node dir))))
   (println "CANDIDATE QUERY: ALL PASS")
   (shutdown-agents))
