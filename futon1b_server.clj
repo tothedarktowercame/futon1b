@@ -1560,6 +1560,18 @@
                     (pr-str (assoc (text/document-frequencies terms filters)
                                    :ok true)))))
 
+      (= "memory-sidecar" (p "source"))
+      ;; Advisory 狗 recall: ev_fts/ev_attr/ev_tags rank and filter, ev_doc
+      ;; supplies the public memory fields. It performs no XTDB read and does
+      ;; not consume an expensive-read permit; memory-recall-search caps the
+      ;; requested limit at 20.
+      (if (str/blank? (str (p "q")))
+        (respond! ex 400 (pr-str {:ok false :error "q required for memory-sidecar"}))
+        (respond! ex 200
+                  (pr-str (assoc (text/memory-recall-search
+                                  {:q (p "q") :limit (parse-limit p)})
+                                 :ok true))))
+
       :else
       (with-expensive-read!
         ex

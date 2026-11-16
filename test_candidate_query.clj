@@ -100,18 +100,20 @@
   (let [queries
         [{:name "content + author + claim + tag"
           :params {:q "outside signal" :author "joe"
-                   :claim-type :observation :tags [:user] :limit 100}}
+                   :claim-type :observation :tags [:user] :limit 100 :scope :all}}
          {:name "attribute-only type + tag"
-          :params {:type :note :tags [:memory] :limit 100}}
+          :params {:type :note :tags [:memory] :limit 100 :scope :all}}
          {:name "attribute-only subject + pattern"
           :params {:subject-type :thread :subject-id "thread-2"
-                   :pattern-id :agent/pause :limit 100}}
+                   :pattern-id :agent/pause :limit 100 :scope :all}}
          {:name "content + two-tag AND"
-          :params {:q "signal" :tags [:user :field] :limit 100}}]]
+          :params {:q "signal" :tags [:user :field] :limit 100 :scope :all}}]]
     (doseq [{:keys [name params]} queries]
-      (check! (str "store-scan oracle agrees for " name)
-              (= (oracle-ids docs params)
-                 (result-ids (text/search node params)))))
+      (let [expected (oracle-ids docs params)
+            response (text/search node params)
+            actual (result-ids response)]
+        (check! (str "store-scan oracle agrees for " name)
+                (= expected actual))))
 
     ;; Contaminate the candidate projection for the agent turn so both voices
     ;; are proposed. The store-side re-check must still certify only Joe's.
@@ -120,7 +122,7 @@
     (jdbc/execute! ds ["INSERT OR IGNORE INTO ev_tags(id, tag) VALUES (?,?)"
                        "voice-agent" ":user"])
     (let [params {:q "outside signal" :author "joe" :tags [:user]
-                  :limit 100}
+                  :limit 100 :scope :all}
           candidate-ids (set (map :id ((priv 'candidates) ds params)))
           response (text/search node params)]
       (check! "voice sweep candidate layer can include the doctored agent turn"
@@ -133,7 +135,7 @@
     ((priv 'index-batch!) ds [(first (filter #(= "voice-agent" (:xt/id %)) docs))])))
 
 (defn- test-attribute-only! [node]
-  (let [response (text/search node {:type :note :tags [:memory] :limit 10})
+  (let [response (text/search node {:type :note :tags [:memory] :limit 10 :scope :all})
         result (first (:results response))]
     (check! "attribute-only mode returns candidates without an FTS MATCH"
             (= #{"memory-note"} (result-ids response)))
@@ -153,7 +155,7 @@
     ((priv 'index-batch!) ds [fresh])
     (jdbc/execute! ds ["UPDATE ev_attr SET author = ? WHERE id = ?"
                        "ghost" "stale-target"])
-    (let [params {:author "ghost" :limit 10}
+    (let [params {:author "ghost" :limit 10 :scope :all}
           candidate-ids (set (map :id ((priv 'candidates) ds params)))
           before-rejections (:recheck-rejections (text/stats))
           response (text/search node params)]
@@ -167,7 +169,7 @@
                  (- (:checked response) (:count response)))))
     (text/catch-up! node :page 2)
     (check! "the next catch-up repairs the doctored candidate row"
-            (and (empty? ((priv 'candidates) ds {:author "ghost" :limit 10}))
+            (and (empty? ((priv 'candidates) ds {:author "ghost" :limit 10 :scope :all}))
                  (= "truth"
                     (:author (jdbc/execute-one!
                               ds ["SELECT author FROM ev_attr WHERE id = ?"
@@ -194,6 +196,42 @@
   (check! "tx staleness is a positive distance after a later store commit"
           (pos? (get-in (text/stats node) [:staleness :tx-lag]))))
 
+(defn- test-memory-sidecar-recall! []
+  (let [called (atom [])
+        run #(with-redefs-fn
+               {(priv 'fetch-doc) (fn [& _] (swap! called conj :recheck)
+                                    (throw (AssertionError. "XTDB recheck called")))
+                (priv 'hydrate-survivors) (fn [& _] (swap! called conj :hydrate)
+                                            (throw (AssertionError. "XTDB hydrate called")))}
+               (fn [] (text/memory-recall-search
+                       {:q "orchid recall" :limit 50})))
+        t0 (System/nanoTime)
+        response (run)
+        elapsed-ms (/ (- (System/nanoTime) t0) 1000000.0)
+        results (:results response)]
+    (check! "memory sidecar recall makes zero XTDB point reads"
+            (empty? @called))
+    (check! "memory sidecar caps, ranks, and returns the public shape"
+            (and (= :memory-sidecar (:source response))
+                 (<= (:count response) text/memory-recall-max-limit)
+                 (= #{"mem-new" "mem-two"}
+                    (set (map #(get-in % [:entry :evidence/id]) results)))
+                 (every? #(= #{:evidence/id :evidence/at :evidence/subject
+                               :evidence/body}
+                             (set (keys (:entry %)))) results)
+                 (every? #(= #{:source :project :name :hook}
+                             (set (keys (get-in % [:entry :evidence/body])))) results)))
+    (check! "newest indexed version suppresses the older matching version"
+            (not (some #(= "mem-old" (get-in % [:entry :evidence/id])) results)))
+    (check! "a matching non-memory without the source tag is excluded"
+            (not (some #(= "mem-decoy" (get-in % [:entry :evidence/id])) results)))
+    (check! "memory sidecar response carries checkpoint and basis"
+            (let [basis (:index-basis response)]
+              (and (= 2 (count (:checkpoint basis)))
+                   (contains? basis :basis-tx)
+                   (contains? basis :basis-captured-at))))
+    (println (format "  memory-sidecar in-test read %.3f ms" elapsed-ms))))
+
 (defn- test-http-surface! [node dir]
   (let [http-server (server/start-server! {:node node :store-dir dir
                                            :port 0 :health-port nil})
@@ -205,9 +243,11 @@
             composed (get-edn
                       (str base "?q=" q
                            "&author=joe&claim-type=observation"
-                           "&tags=user&tags=field&limit=10"))
+                           "&tags=user&tags=field&limit=10&scope=all"))
             attribute-only (get-edn
-                            (str base "?type=note&tags=memory&limit=10"))
+                            (str base "?type=note&tags=memory&limit=10&scope=all"))
+            memory-sidecar (get-edn
+                            (str base "?source=memory-sidecar&q=orchid%20recall&limit=50"))
             stats (get-edn (str base "?stats=true"))]
         (check! "HTTP accepts repeated tags on composed content queries"
                 (= #{"voice-operator"} (result-ids (:body composed))))
@@ -218,6 +258,11 @@
                   (and (= 2 (count (:checkpoint basis)))
                        (string? (:basis-tx basis))
                        (string? (:basis-captured-at basis)))))
+        (check! "HTTP memory-sidecar mode is capped and returns newest subjects"
+                (and (= 200 (:status memory-sidecar))
+                     (= #{"mem-new" "mem-two"}
+                        (set (map #(get-in % [:entry :evidence/id])
+                                  (get-in memory-sidecar [:body :results]))))))
         (check! "HTTP stats exposes staleness, projection, and residual"
                 (and (number? (get-in stats [:body :staleness :tx-lag]))
                      (seq (get-in stats [:body :projection]))
@@ -244,7 +289,28 @@
                    {:type :note :author "alice" :tags [:review :field]
                     :subject {:ref/type :thread :ref/id "thread-2"}
                     :pattern-id :agent/pause
-                    :body "review signal"})]]
+                    :body "review signal"})]
+        memory-docs
+        [(doc "mem-old" "2026-08-17T03:04:00Z"
+                   {:type :memory :author "minus40" :tags ["source/claude-code"]
+                    :subject {:ref/type :memory :ref/id "cc:invented/orchid"}
+                    :body {:source "claude-code" :project "invented"
+                           :name "orchid" :hook "orchid recall old"}})
+              (doc "mem-new" "2026-08-17T03:05:00Z"
+                   {:type :memory :author "minus40" :tags ["source/claude-code"]
+                    :subject {:ref/type :memory :ref/id "cc:invented/orchid"}
+                    :body {:source "claude-code" :project "invented"
+                           :name "orchid" :hook "orchid recall current"}})
+              (doc "mem-two" "2026-08-17T03:06:00Z"
+                   {:type :memory :author "minus40" :tags ["source/claude-code"]
+                    :subject {:ref/type :memory :ref/id "cc:invented/second"}
+                    :body {:source "claude-code" :project "invented"
+                           :name "second" :hook "orchid recall companion"}})
+              (doc "mem-decoy" "2026-08-17T03:07:00Z"
+                   {:type :memory :author "other" :tags [:other]
+                    :subject {:ref/type :memory :ref/id "cc:invented/decoy"}
+                    :body {:source "claude-code" :project "invented"
+                           :name "decoy" :hook "orchid recall decoy"}})]]
     (with-open [node (xtn/start-node)]
       (xt/execute-tx node (mapv (fn [d] [:put-docs :evidence d]) docs))
       (text/init! {:path (str dir "/fts5-evidence.db")})
@@ -254,6 +320,18 @@
         (test-attribute-only! node)
         (test-stale-read-and-repair! node ds)
         (test-basis-stats! node ds)
+        (xt/execute-tx node (mapv (fn [d] [:put-docs :evidence d]) memory-docs))
+        (text/reconcile! node)
+        ;; Exercise the normal live index hook: it indexes and queues ev_doc.
+        (doseq [d memory-docs]
+          (text/on-append! d))
+        (check! "normal append path fills ev_doc for memory fixtures"
+                (loop [n 0]
+                  (cond (= 4 (count (text/cached-docs
+                                     ["mem-old" "mem-new" "mem-two" "mem-decoy"]))) true
+                        (< 200 n) false
+                        :else (do (Thread/sleep 10) (recur (inc n))))))
+        (test-memory-sidecar-recall!)
         (test-http-surface! node dir))))
   (println "CANDIDATE QUERY: ALL PASS")
   (shutdown-agents))

@@ -43,6 +43,7 @@
 (def hydration-width 4)
 (def max-df-terms 32)
 (def max-offset 10000)
+(def memory-recall-max-limit 20)
 
 (def projection
   [{:store-field :evidence/body
@@ -570,6 +571,69 @@
                                           unqualified))))
             (partition-all 500 (map str ids)))
       {})))
+
+(declare candidates)
+
+(defn- latest-memory-version-ids
+  "SUBJECT-IDS -> newest indexed evidence id by (:at, :id). SQLite only."
+  [ds subject-ids]
+  (if (seq subject-ids)
+    (->> (partition-all 100 subject-ids)
+         (mapcat (fn [chunk]
+                   (jdbc/execute!
+                    ds
+                    (into [(str "SELECT subject_id, id, at FROM ev_attr"
+                                " WHERE subject_id IN ("
+                                (str/join "," (repeat (count chunk) "?")) ")"
+                                " ORDER BY subject_id, at DESC, id DESC")]
+                          chunk)
+                    unqualified)))
+         (reduce (fn [m {:keys [subject_id id]}]
+                   (if (contains? m subject_id) m (assoc m subject_id id))) {}))
+    {}))
+
+(defn memory-recall-search
+  "Cheap advisory memory recall from the text sidecar only. The append index
+  supplies ranked ids/attributes and ev_doc supplies the exact public memory
+  fields. No XTDB recheck or hydration occurs. A newer indexed version of the
+  same cc: subject suppresses every older candidate, even if the newer body no
+  longer matches. Missing ev_doc rows are cache misses and are omitted."
+  [{:keys [q limit]}]
+  (let [ds @!ds
+        k (min memory-recall-max-limit (max 1 (long (or limit 10))))
+        params {:q q :limit k :scope :all :tags ["source/claude-code"]}
+        cands (if ds (candidates ds params) [])
+        docs (cached-docs (mapv :id cands))
+        valid (keep (fn [{:keys [id score]}]
+                      (let [doc (get docs id)
+                            subject (:evidence/subject doc)
+                            body (:evidence/body doc)
+                            subject-id (some-> (:ref/id subject) str)]
+                        (when (and doc (= "memory" (some-> (:ref/type subject) name))
+                                   (str/starts-with? subject-id "cc:")
+                                   (map? body) (= "claude-code" (:source body))
+                                   (not (str/blank? (str (:project body))))
+                                   (not (str/blank? (str (:name body)))))
+                          {:id id :score score :doc doc :subject-id subject-id})))
+                    cands)
+        newest (latest-memory-version-ids ds (distinct (map :subject-id valid)))
+        results (->> valid
+                     (filter #(= (:id %) (get newest (:subject-id %))))
+                     (mapv (fn [{:keys [score doc]}]
+                             (let [body (:evidence/body doc)]
+                               {:score score
+                                :entry {:evidence/id (:evidence/id doc)
+                                        :evidence/at (:evidence/at doc)
+                                        :evidence/subject
+                                        (select-keys (:evidence/subject doc)
+                                                     [:ref/type :ref/id])
+                                        :evidence/body
+                                        (select-keys body [:source :project :name :hook])}}))))]
+    {:results results :count (count results) :source :memory-sidecar
+     :index-as-of (meta-get ds "last-at")
+     :index-basis {:checkpoint [(meta-get ds "last-at") (meta-get ds "last-id")]
+                   :basis-tx (meta-get ds "basis-tx")
+                   :basis-captured-at (meta-get ds "basis-captured-at")}}))
 
 (defn backfill-docs!
   "Fill ev_doc for every store row it lacks, in one streaming store read,
