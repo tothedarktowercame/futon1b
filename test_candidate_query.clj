@@ -340,7 +340,8 @@
                     :subject {:ref/type :memory :ref/id "cc:invented/second"}
                     :body {:source "claude-code" :project "invented"
                            :name "second" :hook "orchid recall companion"}})
-              (doc "mem-ranked" "2026-08-17T03:06:30Z"
+              ;; Oldest of the matching memories, so rank order cannot come from :at.
+              (doc "mem-ranked" "2026-08-17T03:03:30Z"
                    {:type :memory :author "minus40" :tags ["source/claude-code"]
                     :subject {:ref/type :memory :ref/id "cc:invented/ranked"}
                     :body {:source "claude-code" :project "invented"
