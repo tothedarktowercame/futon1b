@@ -34,8 +34,11 @@
                  (every? :created? (get-in result [:ok :records]))))
     (check! "batch journal committed with records"
             (seq (fxt/safe-q node ["SELECT _id FROM arxana_journal WHERE _id='batch-first'"])))
-    (check! "batch identical records succeed without creation"
-            (every? #(false? (:created? %)) (get-in (run (batch "batch-identical" rows)) [:ok :records])))
+    (let [seq-before (arxana/source-sequence node)]
+      (check! "batch identical records succeed without creation"
+              (every? #(false? (:created? %)) (get-in (run (batch "batch-identical" rows)) [:ok :records])))
+      (check! "batch identical records add no index events"
+              (= seq-before (arxana/source-sequence node))))
     (check! "batch message replay returns original outcome"
             (= (assoc result :duplicate? true) (run (batch "batch-first" rows))))
     (doseq [[label bad] [["conflict" (assoc-in (first rows) [:record :asserted-content] {:changed true})]

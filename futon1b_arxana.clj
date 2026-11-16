@@ -721,7 +721,11 @@
                                     (clusion-by-id node subject-id))))
                   (throw (gates/layered-error 4 :arxana-unknown-clusion
                                               {:category :missing})))
-              indexed? (#{:clusion/assert :evidence/append :assessment/append :attempt/append} operation)
+              ;; An identical existing record is a success with nothing to
+              ;; write: no new document version, no index event (claude-13,
+              ;; so idempotent re-runs of a backfill do not grow history).
+              indexed? (and (nil? existing)
+                            (#{:clusion/assert :evidence/append :assessment/append :attempt/append} operation))
               n (if indexed? (inc sequence) sequence)
               doc (cond-> (merge {:xt/id record-id :record/data (canonical-record-data record)
                                   :record/operation operation} (flat-columns operation record))
@@ -738,7 +742,7 @@
                       (concat [[:sql assertion [record-id record-id (canonical-record-data record)]]]
                               (when subject-id
                                 [[:sql "ASSERT EXISTS (SELECT 1 FROM arxana_clusions WHERE _id = ?)" [subject-id]]])
-                              [[:put-docs table doc]]
+                              (when (nil? existing) [[:put-docs table doc]])
                               (when indexed?
                                 [[:put-docs :arxana_index_events
                                   {:xt/id n :source/sequence n :record/id record-id :record/table table}]]))))))))
