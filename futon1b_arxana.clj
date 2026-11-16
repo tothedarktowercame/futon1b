@@ -462,6 +462,38 @@
        :subject-id (or (:subject-clusion-id record)
                        (when (= operation :attempt/append) (:subject/id record)))})))
 
+(def batch-limit 500)
+
+(defn- at-record [index id f]
+  (try (f)
+       (catch clojure.lang.ExceptionInfo e
+         (throw (ex-info (.getMessage e)
+                         (update-in (ex-data e) [:error :context]
+                                    merge {:record/index index :record/id id}) e)))))
+
+(defn- validate-batch [payload]
+  (let [body (:body payload) rows (:records body)]
+    (when-not (map? body)
+      (throw (gates/layered-error 4 :arxana-invalid-batch {:category :invalid})))
+    (check-no-unknown-keys! :body #{:records} body)
+    (when-not (and (vector? rows) (<= 1 (count rows) batch-limit))
+      (throw (gates/layered-error 4 :arxana-batch-size
+                                  {:category :invalid :limit batch-limit})))
+    {:message-id (:message/id payload) :operation :records/append
+     :records
+     (mapv (fn [i row]
+             (at-record i (get-in row [:record :id])
+                        #(do
+                           (when-not (map? row)
+                             (throw (gates/layered-error 4 :arxana-invalid-record {:category :invalid})))
+                           (check-no-unknown-keys! :batch-record #{:operation :record} row)
+                           (when-not (contains? append-spec (:operation row))
+                             (throw (gates/layered-error 4 :arxana-unsupported-operation
+                                                         {:category :invalid})))
+                           (validate-append-envelope
+                            {:operation (:operation row) :body {:record (:record row)}}))))
+           (range) rows)}))
+
 (defn- validate-envelope [payload]
   (when-not (map? payload)
     (throw (gates/layered-error 4 :arxana-invalid-envelope {:category :invalid})))
@@ -474,6 +506,7 @@
                  (not (str/blank? (:message/id payload))))
     (throw (gates/layered-error 4 :missing-required {:required [:message/id]})))
   (cond
+    (= :records/append (:operation payload)) (validate-batch payload)
     (= :revision/ingest (:operation payload)) (validate-revision-envelope payload)
     (append-spec (:operation payload)) (validate-append-envelope payload)
     :else (throw (gates/layered-error 4 :arxana-unsupported-operation
@@ -671,11 +704,84 @@
               (throw t))
             (:committed result)))))))
 
+(defn- batch-plan [node records counter]
+  ;; Validate against persisted content plus earlier batch entries. SQL
+  ;; assertions repeat these checks inside the transaction to close races.
+  (reduce
+   (fn [{:keys [seen sequence] :as plan} [i {:keys [record record-id table subject-id operation]}]]
+     (at-record
+      i record-id
+      (fn []
+        (let [existing (or (get seen [table record-id]) (stored-record node table record-id))
+              _ (when (and existing (not= existing record))
+                  (throw (gates/layered-error 4 :arxana-immutable-record-conflict
+                                              {:category :conflict})))
+              _ (when (and subject-id
+                           (not (or (get seen [:arxana_clusions subject-id])
+                                    (clusion-by-id node subject-id))))
+                  (throw (gates/layered-error 4 :arxana-unknown-clusion
+                                              {:category :missing})))
+              indexed? (#{:clusion/assert :evidence/append :assessment/append :attempt/append} operation)
+              n (if indexed? (inc sequence) sequence)
+              doc (cond-> (merge {:xt/id record-id :record/data (canonical-record-data record)
+                                  :record/operation operation} (flat-columns operation record))
+                    subject-id (assoc :subject/clusion-id subject-id))
+              assertion (format (str "ASSERT (NOT EXISTS (SELECT 1 FROM %s WHERE _id = ?) "
+                                     "OR EXISTS (SELECT 1 FROM %s WHERE _id = ? AND record$data = ?))")
+                                (name table) (name table))]
+          (-> plan
+              (assoc :sequence n)
+              (assoc-in [:seen [table record-id]] record)
+              (update :results conj {:record/id record-id :subject-clusion-id subject-id
+                                     :created? (nil? existing)})
+              (update :ops into
+                      (concat [[:sql assertion [record-id record-id (canonical-record-data record)]]]
+                              (when subject-id
+                                [[:sql "ASSERT EXISTS (SELECT 1 FROM arxana_clusions WHERE _id = ?)" [subject-id]]])
+                              [[:put-docs table doc]]
+                              (when indexed?
+                                [[:put-docs :arxana_index_events
+                                  {:xt/id n :source/sequence n :record/id record-id :record/table table}]]))))))))
+   {:seen {} :sequence counter :results [] :ops []} (map-indexed vector records)))
+
+(defn- conditional-batch-command! [node {:keys [message-id operation records]}]
+  (loop [attempt 0]
+    (if-let [outcome (outcome-by-message node message-id)]
+      (assoc (edn/read-string (:outcome/response outcome)) :duplicate? true)
+      (let [counter (source-sequence node)
+            plan (batch-plan node records counter)
+            response {:protocol/version protocol-version :message/id message-id
+                      :operation operation :ok {:records (:results plan)}}
+            ops (vec (concat
+                      [[:sql "ASSERT NOT EXISTS (SELECT 1 FROM arxana_outcomes WHERE _id = ?)" [message-id]]
+                       (if (zero? counter)
+                         [:sql "ASSERT NOT EXISTS (SELECT 1 FROM arxana_index_state WHERE _id='source')"]
+                         [:sql "ASSERT EXISTS (SELECT 1 FROM arxana_index_state WHERE _id='source' AND source$sequence=?)" [counter]])]
+                      (:ops plan)
+                      (when (> (:sequence plan) counter)
+                        [[:put-docs :arxana_index_state {:xt/id "source" :source/sequence (:sequence plan)}]])
+                      [[:put-docs :arxana_journal
+                        {:xt/id message-id :journal/message-id message-id :journal/operation operation
+                         :journal/record-ids (mapv :record-id records)
+                         :journal/committed-at (str (Instant/now))}]
+                       [:put-docs :arxana_outcomes {:xt/id message-id :outcome/result :committed
+                                                   :outcome/response (pr-str response)}]]))
+            error (try (xt/execute-tx node ops {:metadata {:arxana/message-id message-id}}) nil
+                       (catch Throwable t t))]
+        (if error
+          (if (and (< attempt 32) (re-find #"(?i)assert" (str (.getMessage ^Throwable error))))
+            ;; Rebuild the plan: an immutable conflict now names its index;
+            ;; a racing identical message returns its committed outcome.
+            (recur (inc attempt))
+            (throw error))
+          response)))))
+
 (defn conditional-command!
   "Execute one authenticated, validated reserved command. Revision ingestion
   uses head CAS; Formal Arxana records use immutable append transactions."
   [node payload]
   (let [cmd (validate-envelope payload)]
-    (if (= :revision/ingest (:operation cmd))
-      (conditional-revision-command! node cmd)
+    (case (:operation cmd)
+      :revision/ingest (conditional-revision-command! node cmd)
+      :records/append (conditional-batch-command! node cmd)
       (conditional-append-command! node cmd))))

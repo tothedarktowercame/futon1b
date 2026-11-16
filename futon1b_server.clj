@@ -1086,7 +1086,7 @@
           res (arxana/conditional-command! @!node payload)]
       (when (and @!arxana-index
                  (#{:clusion/assert :evidence/append :assessment/append
-                    :attempt/append} (:operation payload))
+                    :attempt/append :records/append} (:operation payload))
                  (not (:duplicate? res)))
         (try (arxana-index/catch-up! @!arxana-index @!node)
              (catch Throwable t

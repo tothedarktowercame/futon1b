@@ -13,8 +13,59 @@
 (defn thrown-reason [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e (get-in (ex-data e) [:error :reason]))))
 
+(defn batch-tests! [node]
+  (let [c {:id "arxana:clusion:sha256:batch-c" :type-revision [:workplan/item 1]
+           :endpoints [] :asserted-content {:item/id "M-toy"}}
+        ref {:id "arxana:record:sha256:batch-ref" :record/id "toy-turn"}
+        att {:id "arxana:attestation:sha256:batch-a" :subject-clusion-id (:id c)
+             :basis :exact :producer "toy"}
+        rows [{:operation :clusion/assert :record c}
+              {:operation :external-reference/assert :record ref}
+              {:operation :evidence/append :record att}]
+        batch (fn [mid rs] {:protocol/version "arxana.v1" :message/id mid
+                            :operation :records/append :body {:records rs}})
+        run #(arxana/conditional-command! node %)
+        result (run (batch "batch-first" rows))
+        error #(try (run %) nil (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+    (check! "batch stores clusion, external reference, same-batch attestation"
+            (and (= c (arxana/clusion-by-id node (:id c)))
+                 (= ref (arxana/external-reference-by-id node (:id ref)))
+                 (= att (arxana/evidence-by-id node (:id att)))
+                 (every? :created? (get-in result [:ok :records]))))
+    (check! "batch journal committed with records"
+            (seq (fxt/safe-q node ["SELECT _id FROM arxana_journal WHERE _id='batch-first'"])))
+    (check! "batch identical records succeed without creation"
+            (every? #(false? (:created? %)) (get-in (run (batch "batch-identical" rows)) [:ok :records])))
+    (check! "batch message replay returns original outcome"
+            (= (assoc result :duplicate? true) (run (batch "batch-first" rows))))
+    (doseq [[label bad] [["conflict" (assoc-in (first rows) [:record :asserted-content] {:changed true})]
+                         ["invalid" {:operation :clusion/assert :record {:id "invalid"}}]
+                         ["unknown-subject" {:operation :evidence/append
+                                             :record (assoc att :id "arxana:attestation:sha256:missing"
+                                                           :subject-clusion-id "arxana:clusion:sha256:absent")}]]]
+      (let [mid (str "batch-" label)
+            fresh (assoc c :id (str "arxana:clusion:sha256:" label))
+            refusal (error (batch mid [{:operation :clusion/assert :record fresh} bad]))]
+        (check! (str "batch " label " names index/id and writes nothing")
+                (and (= 1 (get-in refusal [:error :context :record/index]))
+                     (= (get-in bad [:record :id]) (get-in refusal [:error :context :record/id]))
+                     (nil? (arxana/clusion-by-id node (:id fresh)))
+                     (nil? (arxana/outcome-by-message node mid))))))
+    (check! "batch cap refused"
+            (= :arxana-batch-size (get-in (error (batch "batch-cap" (vec (repeat 501 (first rows)))))
+                                         [:error :reason])))
+    (check! "empty batch refused"
+            (= :arxana-batch-size (get-in (error (batch "batch-empty" [])) [:error :reason])))
+    (check! "duplicate inside batch is not newly created twice"
+            (= [true false]
+               (mapv :created? (get-in (run (batch "batch-repeat"
+                                                 (vec (repeat 2 {:operation :clusion/assert
+                                                                 :record (assoc c :id "arxana:clusion:sha256:twice")}))))
+                                      [:ok :records]))))))
+
 (defn -main [& _]
   (with-open [node (xtn/start-node)]
+    (batch-tests! node)
     (let [claim {:id "arxana:clusion:sha256:claim1"
                  :type-revision [:interpretation 1]
                  :endpoints [] :asserted-content {}}
