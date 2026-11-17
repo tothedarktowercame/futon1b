@@ -1103,6 +1103,8 @@
         (respond! ex 200
                   (case (:query/type payload)
                     :role-reverse (arxana-index/query-edges idx @!node payload)
+                    :edge-join (with-expensive-read!
+                                 ex #(arxana/edge-join @!node payload))
                     :attestations (arxana-index/attestations idx @!node
                                                             (or (:subject-id payload)
                                                                 (:subject-clusion-id payload))

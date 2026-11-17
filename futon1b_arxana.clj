@@ -275,6 +275,148 @@
                                (list 'limit 'p-limit))
                          type endpoint-id limit))))
 
+(def edge-join-shapes
+  "Closed Circus clusion vocabulary admitted by `edge-join`.  The route never
+  accepts column names or XTQL from its caller; a type revision selects its
+  exact role set here."
+  {[:pattern/proposal 1] #{:turn :pattern}
+   [:pattern/occurrence 1] #{:turn :pattern}
+   [:memory/recall 1] #{:turn :memory}
+   [:memory/use 1] #{:turn :memory}
+   [:memory/burial 1] #{:turn :memory}
+   [:memory/repetition 1] #{:turn :memory}
+   [:interpretation 1] #{:source :intent :target}
+   [:workplan/mention 2] #{:item :evidence}
+   [:hou/focus 1] #{:evidence}
+   [:hou/focus-relation 1] #{:focus :item}
+   [:needs 1] #{:needing :supplier}
+   [:supersedes 1] #{:successor :predecessor}})
+
+(def ^:private edge-join-keys #{:query/type :patterns :where :limit})
+(def ^:private logic-var-pattern #"[A-Za-z][A-Za-z0-9_-]{0,63}")
+
+(defn- edge-join-error [reason context]
+  (throw (gates/layered-error 4 reason context)))
+
+(defn- logic-var-name [x]
+  (let [s (cond (symbol? x) (name x)
+                (string? x) x
+                :else nil)]
+    (when-not (and s (re-matches logic-var-pattern s))
+      (edge-join-error :edge-join-invalid-variable {:provided (pr-str x)}))
+    s))
+
+(defn- normalize-edge-join
+  [{:keys [patterns where limit] :as request}]
+  (let [unknown (seq (remove edge-join-keys (keys request)))
+        limit (if (nil? limit) 100 limit)]
+    (when unknown
+      (edge-join-error :edge-join-unknown-field {:fields (vec unknown)}))
+    (when-not (and (vector? patterns) (<= 2 (count patterns) 4))
+      (edge-join-error :edge-join-pattern-count
+                       {:minimum 2 :maximum 4 :provided (if (sequential? patterns)
+                                                         (count patterns) patterns)}))
+    (when-not (and (integer? limit) (<= 1 limit 500))
+      (edge-join-error :edge-join-invalid-limit
+                       {:minimum 1 :maximum 500 :provided limit}))
+    (let [normalized
+          (mapv
+           (fn [i pattern]
+             (when-not (and (map? pattern) (= #{:edge-type :bind} (set (keys pattern))))
+               (edge-join-error :edge-join-invalid-pattern
+                                {:pattern i :fields (when (map? pattern) (vec (keys pattern)))}))
+             (let [edge-type (:edge-type pattern)
+                   roles (get edge-join-shapes edge-type)
+                   bind (:bind pattern)]
+               (when-not roles
+                 (edge-join-error :edge-join-unknown-edge-type
+                                  {:pattern i :edge-type edge-type}))
+               (when-not (and (map? bind) (seq bind))
+                 (edge-join-error :edge-join-invalid-bind {:pattern i}))
+               (doseq [role (keys bind)]
+                 (when-not (contains? roles role)
+                   (edge-join-error :edge-join-unknown-role
+                                    {:pattern i :edge-type edge-type :role role
+                                     :allowed (vec (sort roles))})))
+               {:edge-type edge-type
+                :bind (into {} (map (fn [[role var]] [role (logic-var-name var)])) bind)}))
+           (range) patterns)
+          vars (set (mapcat (comp vals :bind) normalized))
+          where (or where {})]
+      (when-not (map? where)
+        (edge-join-error :edge-join-invalid-where {:provided (pr-str where)}))
+      (let [where (into {}
+                        (map (fn [[var value]]
+                               (let [var (logic-var-name var)]
+                                 (when-not (contains? vars var)
+                                   (edge-join-error :edge-join-unknown-variable
+                                                    {:variable var}))
+                                 (when-not (string? value)
+                                   (edge-join-error :edge-join-invalid-constant
+                                                    {:variable var :provided (pr-str value)}))
+                                 [var value])))
+                        where)]
+        {:patterns normalized :where where :limit limit}))))
+
+(defn- compile-edge-join
+  "Compile validated patterns into one parameterised XTQL `unify`.  Caller
+  variable spellings are canonicalised to v0, v1, ... so arbitrary names do
+  not create an unbounded XTDB compiled-plan cache."
+  [{:keys [patterns where limit]}]
+  (let [user-vars (vec (distinct (mapcat (comp vals :bind) patterns)))
+        canonical (zipmap user-vars (map #(symbol (str "v" %)) (range)))
+        edge-vars (mapv #(symbol (str "edge" %)) (range (count patterns)))
+        type-params (mapv #(symbol (str "type" %)) (range (count patterns)))
+        version-params (mapv #(symbol (str "version" %)) (range (count patterns)))
+        where-vars (vec (sort (keys where)))
+        where-params (mapv #(symbol (str "constant" %)) (range (count where-vars)))
+        limit-param 'result-limit
+        froms (mapv
+               (fn [i {:keys [bind]}]
+                 (list 'from :arxana_clusions
+                       (vec (concat [{:xt/id (nth edge-vars i)}
+                                     {:clusion/type (nth type-params i)}
+                                     {:clusion/type-version (nth version-params i)}]
+                                    (map (fn [[role var]]
+                                           {(keyword "role" (name role)) (get canonical var)})
+                                         (sort-by (comp name key) bind))))))
+               (range) patterns)
+        wheres (mapv (fn [var param]
+                       (list 'where (list '= (get canonical var) param)))
+                     where-vars where-params)
+        body (list '->
+                   (apply list 'unify (concat froms wheres))
+                   (apply list 'return (concat (vals canonical) edge-vars))
+                   (list 'limit limit-param))
+        params (vec (concat type-params version-params where-params [limit-param]))
+        args (vec (concat (map (comp first :edge-type) patterns)
+                          (map (comp second :edge-type) patterns)
+                          (map where where-vars)
+                          [(inc limit)]))]
+    {:query (apply fxt/pq params body args)
+     :canonical canonical :edge-vars edge-vars :limit limit}))
+
+(defn edge-join
+  "Run a bounded 2..4-pattern equality join over flat Arxana clusion columns.
+  Shared caller variable names are equality joins.  Returns normalized keyword
+  bindings plus the contributing clusion ids; no submitted query text is ever
+  evaluated."
+  [node request]
+  (let [{:keys [query canonical edge-vars limit]} (compile-edge-join
+                                                   (normalize-edge-join request))
+        started (System/nanoTime)
+        rows+ (fxt/timed-q node query)
+        ms (long (/ (- (System/nanoTime) started) 1000000))
+        truncated? (> (count rows+) limit)
+        rows (mapv (fn [row]
+                     (assoc (into {} (map (fn [[user-var query-var]]
+                                           [(keyword user-var) (get row (keyword (name query-var)))])
+                                         canonical))
+                            :edges (mapv #(get row (keyword (name %))) edge-vars)))
+                   (take limit rows+))]
+    {:status :ok :rows rows :row-count (count rows)
+     :truncated? truncated? :limit limit :ms ms}))
+
 (defn newest-evidence
   "The newest attestation on SUBJECT-ID, optionally restricted to KIND
   (the attest/kind column; nil means any). Newest by valid time (the
