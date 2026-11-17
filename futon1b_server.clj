@@ -1648,6 +1648,34 @@
     (InetSocketAddress. (int port))
     (InetSocketAddress. ^String bind-host (int port))))
 
+(defn- await-log-replay!
+  "Block until the node has processed every message submitted to its log
+  (per database), or until timeout-ms passes. Returns the final status keys."
+  ([node] (await-log-replay! node 600000))
+  ([node timeout-ms]
+   (let [deadline (+ (System/currentTimeMillis) timeout-ms)
+         caught-up? (fn [{:keys [latest-submitted-msg-ids latest-processed-msg-ids]}]
+                      ;; XTDB 2.1: {db-name [msg-id-per-partition ...]}
+                      (every? (fn [[db submitted]]
+                                (let [processed (vec (get latest-processed-msg-ids db))]
+                                  (every? (fn [[i s]]
+                                            (or (nil? s)
+                                                (let [p (get processed i)]
+                                                  (and (some? p) (>= p s)))))
+                                          (map-indexed vector submitted))))
+                              latest-submitted-msg-ids))]
+     (loop []
+       (let [status (select-keys (xt/status node)
+                                 [:latest-submitted-msg-ids :latest-processed-msg-ids])]
+         (cond
+           (caught-up? status)
+           (do (println "[startup] log replay complete" (pr-str status)) status)
+
+           (> (System/currentTimeMillis) deadline)
+           (throw (ex-info "log replay did not finish before Arxana rebuild" status))
+
+           :else (do (Thread/sleep 500) (recur))))))))
+
 (defn start-server! [{:keys [store-dir port health-port node bind-host
                              write-log-path arxana-index-path]}]
   (gates/seed-mission-contract!)
@@ -1656,6 +1684,11 @@
           (when-let [path (or arxana-index-path
                               (when store-dir (str store-dir "/arxana-index.db")))]
             (let [idx (arxana-index/open-index path)]
+              ;; A freshly opened node replays its log tail in the background,
+              ;; so the Arxana source sequence advances for the first seconds
+              ;; after open and rebuild! (correctly) refuses a moving source.
+              ;; Wait for replay to reach the submitted log head first.
+              (await-log-replay! @!node)
               (arxana-index/rebuild! idx @!node)
               idx)))
   ;; Warrants describe the previous node's store, if any.
