@@ -108,10 +108,19 @@ if [ "$RC" -ne 0 ]; then
 fi
 
 # ---- WAIT ------------------------------------------------------------------
+# A healthy boot is log replay + Arxana rebuild + a memory projection that took
+# 124 s on 2026-11-17, so 300 s left too little margin: a slow but healthy boot
+# would be reported as failed. Wait longer, but stop early if systemd has given
+# up on the unit (crash loop exhausted) -- waiting longer for that buys nothing.
+UP_BUDGET_S="${FUTON1B_RESTART_UP_BUDGET_S:-600}"
 UP=""
-for i in $(seq 1 150); do
+UNIT_FAILED=""
+for i in $(seq 1 $((UP_BUDGET_S / 2))); do
   if curl -sf -o /dev/null --max-time 3 "$URL/health"; then
     UP=$((i*2)); say "STORE UP after ${UP}s"; break
+  fi
+  if [ "$(systemctl --user is-active "$UNIT" 2>/dev/null)" = "failed" ]; then
+    UNIT_FAILED=$((i*2)); break
   fi
   sleep 2
 done
@@ -126,7 +135,11 @@ if [ -n "$UP" ] && [ -n "$OLD_PID" ] && [ "$NEW_PID" = "$OLD_PID" ]; then
 fi
 say "  main pid ${OLD_PID:-none} -> ${NEW_PID:-unknown}"
 if [ -z "$UP" ]; then
-  say "STORE DID NOT RETURN within 300s"
+  if [ -n "$UNIT_FAILED" ]; then
+    say "STORE DID NOT RETURN: $UNIT entered failed state after ${UNIT_FAILED}s"
+  else
+    say "STORE DID NOT RETURN within ${UP_BUDGET_S}s"
+  fi
   say "  journalctl --user -u ${UNIT%.service} -n 40 --no-pager:"
   journalctl --user -u "${UNIT%.service}" -n 40 --no-pager >> "$R" 2>&1
   say "RESULT=failed"; exit 1

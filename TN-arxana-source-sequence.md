@@ -68,14 +68,20 @@ rebuild refuse, which is the intended behaviour.
   `:serving? true`.
 - The futon1b test suite was not run.
 
-## Open
+## Follow-up (same day)
 
-- The memory-projection build alone took 124 s. Add JVM start and replay, and a
-  restart uses a large part of the script's 300 s budget. If boot gets slower,
-  the script will report failure on a store that is still coming up.
-- Any other boot step that compares two reads of the store, or treats the
-  first read as current, has the same exposure to replay. That would include
-  a watermark, a count, or a checkpoint. The memory projection logged
-  `:source-moved? false` here, but it has its own retry rather than this wait.
-  Moving `await-log-replay!` to directly after `open-store`, before every boot
-  step, would cover all of them.
+Both open items from the first version of this note are now done:
+
+- `await-log-replay!` is called directly after `zm/open-store` in
+  `start-server!`, before the Arxana rebuild, the memory projection and the
+  sidecar catch-ups. Every boot step that reads the store now sees it after
+  replay, not only the Arxana rebuild.
+- `restart-futon1b-detached.sh` waits up to `FUTON1B_RESTART_UP_BUDGET_S`
+  (default 600 s, was a fixed 300 s) for `/health`. It stops early, with a
+  separate message, if systemd has put the unit into the `failed` state. A slow
+  healthy boot gets more time, and a crash loop is reported as soon as systemd
+  gives up instead of after the full wait.
+
+Neither change has been exercised by a real restart yet. The next restart
+should log `[startup] log replay complete` before `[memory-projection]`, and
+the receipt should report `STORE UP`.

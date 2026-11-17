@@ -1680,15 +1680,18 @@
                              write-log-path arxana-index-path]}]
   (gates/seed-mission-contract!)
   (reset! !node (or node (zm/open-store store-dir)))
+  ;; A freshly opened node replays its log tail in the background, so for the
+  ;; first seconds after open the store is still changing under every boot
+  ;; step below (Arxana rebuild, memory projection, sidecar checkpoints).
+  ;; Wait for replay to reach the submitted log head before any of them read
+  ;; it. See TN-arxana-source-sequence.md (outage 2026-11-17).
+  (await-log-replay! @!node)
   (reset! !arxana-index
           (when-let [path (or arxana-index-path
                               (when store-dir (str store-dir "/arxana-index.db")))]
             (let [idx (arxana-index/open-index path)]
-              ;; A freshly opened node replays its log tail in the background,
-              ;; so the Arxana source sequence advances for the first seconds
-              ;; after open and rebuild! (correctly) refuses a moving source.
-              ;; Wait for replay to reach the submitted log head first.
-              (await-log-replay! @!node)
+              ;; rebuild! refuses a moving source; await-log-replay! above
+              ;; is what makes the source still at this point.
               (arxana-index/rebuild! idx @!node)
               idx)))
   ;; Warrants describe the previous node's store, if any.
