@@ -1,5 +1,6 @@
 (ns test-arxana-edge-join
   (:require [futon1b-arxana :as arxana]
+            [futon1b-xt :as fxt]
             [xtdb.node :as xtn]))
 
 (def !results (atom []))
@@ -69,6 +70,19 @@
       (let [limited (arxana/edge-join node (assoc join-request :limit 1))]
         (check! "edge-join: limit uses a sentinel and reports truncation"
                 (and (= 1 (:row-count limited)) (:truncated? limited))))
+      ;; The bound must reach the query itself, not only the returned rows:
+      ;; a two-pattern join has three matches (turns a, b, c), so a query
+      ;; run with limit 1 must fetch at most the limit+1 sentinel.
+      (let [fetched (atom nil)
+            real fxt/timed-q]
+        (with-redefs [fxt/timed-q (fn [& args]
+                                    (let [rows (apply real args)]
+                                      (reset! fetched (count rows))
+                                      rows))]
+          (arxana/edge-join node {:patterns (subvec (:patterns join-request) 0 2)
+                                  :limit 1}))
+        (check! "edge-join: the limit bounds the XTQL query, not just the rows"
+                (= 2 @fetched)))
       (check! "edge-join: unknown role is a typed rejection"
               (= :edge-join-unknown-role
                  (reason #(arxana/edge-join
