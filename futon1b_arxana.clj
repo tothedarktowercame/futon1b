@@ -130,16 +130,43 @@
                                record-id))
           :record/data edn/read-string))
 
+(defn- parse-record-instant [value reason context]
+  (or (try
+        (when (and (string? value)
+                   (re-matches #"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z" value))
+          (Instant/parse value))
+        (catch java.time.format.DateTimeParseException _ nil))
+      (throw (gates/layered-error 4 reason (assoc context :category :invalid)))))
+
+(defn validate-valid-time
+  "Parse a query valid-time with the same fixed-width grammar as event-time.
+  Read times need not be past; the future restriction applies only to writes."
+  [value]
+  (parse-record-instant value :arxana-invalid-valid-time {:valid-time value}))
+
 (defn record-by-id
-  "Public reserved-namespace read. The table search is bounded by the fixed
-  Formal Arxana record-kind set; it never scans records within a table."
-  [node record-id]
-  (or (clusion-by-id node record-id)
-      (evidence-by-id node record-id)
-      (assessment-by-id node record-id)
-      (attempt-by-id node record-id)
-      (external-reference-by-id node record-id)
-      (mark-occurrence-by-id node record-id)))
+  "Reserved record read, optionally at valid-time (ISO milliseconds).
+  Searches only the fixed record-kind tables. No time means current reads."
+  ([node record-id]
+   (or (clusion-by-id node record-id)
+       (evidence-by-id node record-id)
+       (assessment-by-id node record-id)
+       (attempt-by-id node record-id)
+       (external-reference-by-id node record-id)
+       (mark-occurrence-by-id node record-id)))
+  ([node record-id valid-time]
+   (let [instant (validate-valid-time valid-time)]
+     (some (fn [table]
+             (some-> (fxt/q1 node
+                             (fxt/pq '[p-id p-at]
+                                     (list '->
+                                           (list 'from table {:bind '[xt/id record/data]
+                                                              :for-valid-time '(at p-at)})
+                                           '(where (= xt/id p-id)))
+                                     record-id instant))
+                     :record/data edn/read-string))
+           [:arxana_clusions :arxana_evidence :arxana_assessments
+            :arxana_attempts :arxana_external_refs :arxana_mark_occurrences]))))
 
 (defn- stored-record [node table record-id]
   (case table
@@ -784,15 +811,8 @@
   (if-not (contains? record :event-time)
     table
     (let [value (:event-time record)
-          instant (try
-                    (when (and (string? value)
-                               (re-matches #"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z" value))
-                      (Instant/parse value))
-                    (catch java.time.format.DateTimeParseException _ nil))]
-      (when-not instant
-        (throw (gates/layered-error 4 :arxana-invalid-event-time
-                                    {:category :invalid :record/id (:id record)
-                                     :event-time value})))
+          instant (parse-record-instant value :arxana-invalid-event-time
+                                        {:record/id (:id record) :event-time value})]
       (when (.isAfter ^Instant instant (Instant/now))
         (throw (gates/layered-error 4 :arxana-future-event-time
                                     {:category :invalid :record/id (:id record)

@@ -223,7 +223,7 @@
                        (= 1 (count (arxana/journal-entries node "artifact:C"))))
                   retry))))))
 
-(defn- event-time-tests [node]
+(defn- event-time-tests [base node]
   (let [record (fn [suffix] {:id (str "arxana:clusion:sha256:time-" suffix)
                              :type-revision [:workplan/item 1] :endpoints []
                              :asserted-content {:item/id (str "M-toy-" suffix)}})
@@ -246,6 +246,27 @@
                   result (arxana/conditional-command! node cmd)]]
       (check! (str label " event-time visible AS OF September")
               (= 1 (count (asof (:id r) "2026-09-01T00:00:00Z"))) result)
+      (let [query (fn [extra]
+                    (req "POST" (str base "/api/alpha/arxana/query")
+                         (merge {:query/type :record-by-id :record-id (:id r)} extra)
+                         {"x-arxana-principal" arxana-principal}))
+            september (query {:valid-time "2026-09-01T00:00:00.000Z"})
+            august (query {:valid-time "2026-08-01T00:00:00.000Z"})]
+        (check! (str label " HTTP as-of September returns record")
+                (= r (get-in september [:body :record])) september)
+        (check! (str label " HTTP as-of August returns missing")
+                (= :missing (get-in august [:body :status])) august)
+        (check! (str label " HTTP without time returns current record")
+                (= r (get-in (query {}) [:body :record])) nil)
+        (doseq [bad ["invalid" nil "2026-08-01T00:00:00Z"]]
+          (let [answer (query {:valid-time bad})]
+            (check! (str label " HTTP malformed time refused " (pr-str bad))
+                    (and (= 400 (:status answer))
+                         (= :arxana-invalid-valid-time (get-in answer [:body :error :reason]))) answer)))
+        (let [answer (query {:query/type :artifact-head :artifact-id "toy"
+                             :valid-time "2026-09-01T00:00:00.000Z"})]
+          (check! (str label " unsupported temporal query is not silently current")
+                  (= :arxana-valid-time-unsupported (get-in answer [:body :error :reason])) answer)))
       (check! (str label " event-time absent AS OF August")
               (empty? (asof (:id r) "2026-08-01T00:00:00Z")) result)
       (check! (str label " past event is current and indexed")
@@ -285,13 +306,15 @@
 (defn -main [& _]
   (gates/seed-mission-contract!)
   (with-open [node (xtn/start-node)]
-    (let [server (srv/start-server! {:node node :port 0})
+    (let [index-file (java.io.File/createTempFile "b2-index" ".db")
+          server (srv/start-server! {:node node :port 0 :arxana-index-path (str index-file)})
           base (str "http://127.0.0.1:" (.getPort (.getAddress server)))]
       (try
         (run-tests base node)
-        (event-time-tests node)
+        (event-time-tests base node)
         (finally
-          (srv/stop-server! server)))))
+          (srv/stop-server! server)
+          (.delete index-file)))))
   (let [results @!results
         failures (remove :ok? results)]
     (println (format "%n%d/%d PASS" (- (count results) (count failures)) (count results)))

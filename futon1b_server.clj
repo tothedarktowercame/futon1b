@@ -1099,6 +1099,11 @@
     (let [payload (parse-payload ex)
           principal (.getFirst (.getRequestHeaders ex) "x-arxana-principal")
           _ (arxana/authenticate! principal)]
+      (when (contains? payload :valid-time)
+        (arxana/validate-valid-time (:valid-time payload))
+        (when-not (= :record-by-id (:query/type payload))
+          (throw (gates/layered-error 4 :arxana-valid-time-unsupported
+                                      {:category :unsupported :query/type (:query/type payload)}))))
       (if-let [idx @!arxana-index]
         (respond! ex 200
                   (case (:query/type payload)
@@ -1120,7 +1125,9 @@
                                                               (:pattern-id payload)
                                                               (:window payload))
                     :record-by-id
-                    (if-let [record (arxana/record-by-id @!node (:record-id payload))]
+                    (if-let [record (if (contains? payload :valid-time)
+                                         (arxana/record-by-id @!node (:record-id payload) (:valid-time payload))
+                                         (arxana/record-by-id @!node (:record-id payload)))]
                       {:status :ok :record record}
                       {:status :missing :record-id (:record-id payload)})
                     :artifact-head
