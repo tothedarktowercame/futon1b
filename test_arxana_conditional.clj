@@ -17,7 +17,8 @@
             [futon1b-gates :as gates]
             [futon1b-hxindex :as hx]
             [futon1b-server :as srv]
-            [xtdb.node :as xtn])
+            [xtdb.node :as xtn]
+            [xtdb.api :as xt])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
             HttpResponse$BodyHandlers]))
@@ -222,6 +223,65 @@
                        (= 1 (count (arxana/journal-entries node "artifact:C"))))
                   retry))))))
 
+(defn- event-time-tests [node]
+  (let [record (fn [suffix] {:id (str "arxana:clusion:sha256:time-" suffix)
+                             :type-revision [:workplan/item 1] :endpoints []
+                             :asserted-content {:item/id (str "M-toy-" suffix)}})
+        envelope (fn [mid r batch?]
+                   {:protocol/version "arxana.v1" :message/id mid
+                    :operation (if batch? :records/append :clusion/assert)
+                    :body (if batch? {:records [{:operation :clusion/assert :record r}]}
+                              {:record r})})
+        asof (fn [id date]
+               (xt/q node [(str "SELECT _id FROM arxana_clusions FOR VALID_TIME AS OF TIMESTAMP '"
+                                date "' WHERE _id = ?") id]))
+        refusal (fn [cmd]
+                  (try (arxana/conditional-command! node cmd) nil
+                       (catch clojure.lang.ExceptionInfo e (ex-data e))))]
+    (doseq [batch? [false true]
+            :let [label (if batch? "batch" "single")
+                  r (assoc (record label) :event-time "2026-08-27T12:00:00.000Z")
+                  cmd (envelope (str "time-" label) r batch?)
+                  before (arxana/source-sequence node)
+                  result (arxana/conditional-command! node cmd)]]
+      (check! (str label " event-time visible AS OF September")
+              (= 1 (count (asof (:id r) "2026-09-01T00:00:00Z"))) result)
+      (check! (str label " event-time absent AS OF August")
+              (empty? (asof (:id r) "2026-08-01T00:00:00Z")) result)
+      (check! (str label " past event is current and indexed")
+              (and (= r (arxana/clusion-by-id node (:id r)))
+                   (= (inc before) (arxana/source-sequence node))) result)
+      (check! (str label " immutable conflict still refuses")
+              (= :arxana-immutable-record-conflict
+                 (get-in (refusal (envelope (str "conflict-" label)
+                                            (assoc r :asserted-content {:changed true}) batch?))
+                         [:error :reason])) nil)
+      (check! (str label " message replay still succeeds")
+              (:duplicate? (arxana/conditional-command! node cmd)) nil)
+      (let [undated (record (str label "-undated"))
+            before-write (java.time.Instant/now)]
+        (arxana/conditional-command! node (envelope (str "undated-" label) undated batch?))
+        (check! (str label " undated record starts at write time")
+                (and (= undated (arxana/clusion-by-id node (:id undated)))
+                     (empty? (asof (:id undated) (str before-write)))) nil))
+      (doseq [[kind value] [["future" "2999-01-01T00:00:00.000Z"]
+                            ["invalid" "not-an-instant"] ["invalid" nil]
+                            ["invalid" "2026-99-01T00:00:00.000Z"]]]
+        (let [bad (assoc (record (str label "-bad-" (hash value))) :event-time value)
+              mid (str "bad-" label "-" (hash value))
+              fresh (record (str label "-atomic-" (hash value)))
+              cmd (cond-> (envelope mid bad batch?)
+                    batch? (update-in [:body :records] #(into [{:operation :clusion/assert :record fresh}] %)))
+              before (arxana/source-sequence node)
+              error (refusal cmd)]
+          (check! (str label " refuses " kind " event-time " (pr-str value))
+                  (= (keyword (str "arxana-" kind "-event-time")) (get-in error [:error :reason])) error)
+          (check! (str label " refused time leaves no records/outcome/index change")
+                  (and (nil? (arxana/clusion-by-id node (:id bad)))
+                       (nil? (arxana/clusion-by-id node (:id fresh)))
+                       (nil? (arxana/outcome-by-message node mid))
+                       (= before (arxana/source-sequence node))) error))))))
+
 (defn -main [& _]
   (gates/seed-mission-contract!)
   (with-open [node (xtn/start-node)]
@@ -229,6 +289,7 @@
           base (str "http://127.0.0.1:" (.getPort (.getAddress server)))]
       (try
         (run-tests base node)
+        (event-time-tests node)
         (finally
           (srv/stop-server! server)))))
   (let [results @!results

@@ -10,7 +10,7 @@
    :endpoints [{:role :pattern :kind :external-ref :target {:ref/id endpoint}}
                {:role :turn :kind :external-ref :target {:ref/id (str "turn-" n)}}]
    :asserted-content {:window [] :proposal "p"}
-   :event-time (format "%08d" n)})
+   :event-time (format "2026-08-27T12:00:00.%03dZ" n)})
 (defn put! [node n endpoint]
   (arxana/conditional-command!
    node {:protocol/version "arxana.v1" :message/id (str "m-" n)

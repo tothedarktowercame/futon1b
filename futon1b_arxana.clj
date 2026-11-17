@@ -419,8 +419,8 @@
 
 (defn newest-evidence
   "The newest attestation on SUBJECT-ID, optionally restricted to KIND
-  (the attest/kind column; nil means any). Newest by valid time (the
-  append's system time), tie-broken by id."
+  (the attest/kind column; nil means any). Newest by valid time (record
+  event-time when supplied, otherwise ingestion time), tie-broken by id."
   ([node subject-id] (newest-evidence node subject-id nil))
   ([node subject-id kind]
    (let [where-clause (if (some? kind)
@@ -775,11 +775,36 @@
               (throw t))))
         response))))
 
+(defn- record-put-target
+  "An act's event-time is its XTDB valid-from, not its ingestion time.
+  Undated records retain the ordinary put-docs target. Future acts are refused
+  before any transaction, since current-time immutable/index reads must see
+  every published record. The journal and index events keep ingestion time."
+  [table record]
+  (if-not (contains? record :event-time)
+    table
+    (let [value (:event-time record)
+          instant (try
+                    (when (and (string? value)
+                               (re-matches #"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z" value))
+                      (Instant/parse value))
+                    (catch java.time.format.DateTimeParseException _ nil))]
+      (when-not instant
+        (throw (gates/layered-error 4 :arxana-invalid-event-time
+                                    {:category :invalid :record/id (:id record)
+                                     :event-time value})))
+      (when (.isAfter ^Instant instant (Instant/now))
+        (throw (gates/layered-error 4 :arxana-future-event-time
+                                    {:category :invalid :record/id (:id record)
+                                     :event-time value})))
+      {:into table :valid-from instant})))
+
 (defn- conditional-append-command! [node {:keys [message-id operation record
                                                   record-id table subject-id]}]
   (if-let [outcome (outcome-by-message node message-id)]
     (assoc (edn/read-string (:outcome/response outcome)) :duplicate? true)
-    (let [existing (stored-record node table record-id)
+    (let [put-target (record-put-target table record)
+          existing (stored-record node table record-id)
           _ (when (and existing (not= existing record))
               (throw (gates/layered-error 4 :arxana-immutable-record-conflict
                                           {:category :conflict :record/id record-id})))
@@ -818,7 +843,7 @@
                       [[:sql "ASSERT EXISTS (SELECT 1 FROM arxana_clusions WHERE _id = ?)"
                         [subject-id]]])
                     (when indexed? [counter-assert])
-                    [[:put-docs table doc]]
+                    [[:put-docs put-target doc]]
                     (when indexed?
                       [[:put-docs :arxana_index_events
                         {:xt/id next-counter :source/sequence next-counter
@@ -854,7 +879,8 @@
      (at-record
       i record-id
       (fn []
-        (let [existing (or (get seen [table record-id]) (stored-record node table record-id))
+        (let [put-target (record-put-target table record)
+              existing (or (get seen [table record-id]) (stored-record node table record-id))
               _ (when (and existing (not= existing record))
                   (throw (gates/layered-error 4 :arxana-immutable-record-conflict
                                               {:category :conflict})))
@@ -884,7 +910,7 @@
                       (concat [[:sql assertion [record-id record-id (canonical-record-data record)]]]
                               (when subject-id
                                 [[:sql "ASSERT EXISTS (SELECT 1 FROM arxana_clusions WHERE _id = ?)" [subject-id]]])
-                              (when (nil? existing) [[:put-docs table doc]])
+                              (when (nil? existing) [[:put-docs put-target doc]])
                               (when indexed?
                                 [[:put-docs :arxana_index_events
                                   {:xt/id n :source/sequence n :record/id record-id :record/table table}]]))))))))

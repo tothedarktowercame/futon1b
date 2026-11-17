@@ -24,7 +24,7 @@
               receipt-id (str "arxana:record:sha256:" (apply str (repeat 64 "3")))
               ref-id (str "arxana:record:sha256:" (apply str (repeat 64 "4")))
               att {:id att-id :subject-clusion-id (:id claim) :basis :model
-                   :coverage :complete :event-time "1"}
+                   :coverage :complete :event-time "2026-08-27T12:00:00.000Z"}
               receipt {:id receipt-id :subject/id (:id claim)
                        :dynamics {:id "馬/occurrence" :version 1}
                        :inputs {:pattern {:ref/id "pattern-1"}
