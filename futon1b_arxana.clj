@@ -1228,3 +1228,46 @@
       :revision/ingest (conditional-revision-command! node cmd)
       :records/append (conditional-batch-command! node cmd)
       (conditional-append-command! node cmd))))
+
+(defn records-by-ids
+  "Fixed 50-parameter filters only, chosen by the Packet 32 scratch benchmark.
+  Input cap 1000; one result per requested id, including typed missing entries."
+  [node {:keys [record-ids valid-time]}]
+  (when-not (and (vector? record-ids) (<= (count record-ids) 1000) (every? string? record-ids))
+    (throw (gates/layered-error 4 :arxana-invalid-record-ids {:category :invalid})))
+  (let [at (if valid-time (validate-valid-time valid-time) (Instant/now))
+        params (into '[p-at] (map #(symbol (str "p-id" %)) (range 50)))
+        predicate (cons 'or (map #(list '= 'xt/id %) (rest params)))
+        rows (mapcat (fn [chunk]
+                       (mapcat (fn [table]
+                                 (fxt/timed-q node
+                                              (apply fxt/pq params
+                                                     (list '-> (list 'from table {:bind '[xt/id record/data] :for-valid-time '(at p-at)})
+                                                           (list 'where predicate))
+                                                     at (take 50 (concat chunk (repeat (first chunk)))))))
+                               (vals record-kind-tables)))
+                     (partition-all 50 (distinct record-ids)))
+        records (into {} (map (fn [r] [(:xt/id r) (edn/read-string (:record/data r))])) rows)]
+    {:status :ok :truncated? false :valid-time (str at)
+     :results (mapv (fn [id] (if-let [r (get records id)] {:status :ok :record-id id :record r}
+                               {:status :missing :record-id id})) (distinct record-ids))}))
+
+(defn count-by-field
+  "Exact distinct record count; no result cap. Same coordinate and canonical
+  field equality as records-by-field, including same-valid-time authoritative join."
+  [node request]
+  (let [{:keys [type version kind at]} (query-coordinate request)
+        field (:field request)]
+    (when-not (and (= :clusion kind) (field-coordinate? field))
+      (throw (gates/layered-error 4 :arxana-invalid-field {:category :invalid})))
+    (let [r (fxt/q1 node
+                    (fxt/pq '[p-type p-version p-kind p-field p-value p-at]
+                            '(-> (unify
+                                  (from :arxana_clusions {:bind [{:xt/id rid} {:clusion/type p-type} {:clusion/type-version p-version}]
+                                                         :for-valid-time (at p-at)})
+                                  (from :arxana_clusion_fields {:bind [{:record/id rid} {:record/kind p-kind} {:field/name p-field} {:field/value p-value}]
+                                                               :for-valid-time (at p-at)}))
+                                 (aggregate rid)
+                                 (aggregate {:total (row-count)}))
+                            type version kind field (canonical-record-data (:value request)) at))]
+      {:status :ok :total (or (:total r) 0) :truncated? false :valid-time (str at)})))

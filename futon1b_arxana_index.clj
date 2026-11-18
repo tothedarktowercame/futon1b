@@ -1,10 +1,12 @@
 (ns futon1b-arxana-index
   "Rebuildable C3 role/subject sidecar with an O(1) sequence watermark."
   (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [futon1b-arxana :as arxana]
-            [futon1b-xt :as fxt])
+            [futon1b-xt :as fxt]
+            [futon1b-gates :as gates])
   (:import [java.sql Connection]))
 
 (def unqualified {:builder-fn rs/as-unqualified-maps})
@@ -265,3 +267,39 @@
                                           ds ["SELECT score FROM arxana_score WHERE pattern_id=? AND window=?"
                                               (str pattern-id) (pr-str window)] unqualified)))
                           0.0))})))
+
+(defn many-sets
+  "Fixed 100-slot SQLite IN statements, padded with nil. Totals are computed
+  before per-key row limits. No variable-length XTQL plans. Cap input at 1000."
+  [index node {:keys [query/type subject-ids endpoint-ids edge-type endpoint-role limit]
+               :or {limit 200}}]
+  (let [att? (= type :attestations-by-subjects)
+        ids (if att? subject-ids endpoint-ids)
+        _ (when-not (and (vector? ids) (<= (count ids) 1000) (every? string? ids)
+                         (integer? limit) (<= 0 limit 200)
+                         (or att? (and (vector? edge-type) (= 2 (count edge-type))
+                                       (keyword? (first edge-type)) (pos-int? (second edge-type))
+                                       (keyword? endpoint-role))))
+            (throw (gates/layered-error 4 :arxana-invalid-batch-read {:category :invalid})))
+        source (current-watermark node) cached (index-watermark index)]
+    (if (not= source cached) {:status :stale-index :source/watermark source :index/watermark cached}
+      (let [table (if att? "arxana_att" "arxana_edge")
+            key-col (if att? "subject_id" "endpoint_id") id-col (if att? "att_id" "edge_id")
+            sql (str "WITH ranked AS (SELECT " key-col " AS k," id-col " AS id,"
+                     "COUNT(*) OVER (PARTITION BY " key-col ") AS total,"
+                     "ROW_NUMBER() OVER (PARTITION BY " key-col " ORDER BY event_time DESC," id-col " DESC) AS rn FROM " table
+                     " WHERE " (when-not att? "edge_type=? AND endpoint_role=? AND ") key-col
+                     " IN (" (str/join "," (repeat 100 "?")) ")) SELECT k,id,total,rn FROM ranked WHERE rn<=? ORDER BY k,rn")
+            rows (mapcat (fn [chunk]
+                           (jdbc/execute! (:ds index)
+                                          (into [sql] (concat (when-not att? [(pr-str edge-type) (name endpoint-role)])
+                                                              (take 100 (concat chunk (repeat nil))) [(max 1 limit)])) unqualified))
+                         (partition-all 100 (distinct ids)))
+            grouped (group-by :k rows)
+            after (current-watermark node)]
+        (if (not= source after) {:status :stale-index :source/watermark after :index/watermark cached}
+          {:status :ok :watermark cached
+           :results (mapv (fn [id]
+                            (let [rs (get grouped id) total (or (:total (first rs)) 0)]
+                              {:id id :status :ok :total total :limit limit :truncated? (> total limit)
+                               (if att? :attestation-ids :edge-ids) (mapv :id (take limit rs))})) (distinct ids))})))))

@@ -1101,12 +1101,15 @@
           _ (arxana/authenticate! principal)]
       (when (contains? payload :valid-time)
         (arxana/validate-valid-time (:valid-time payload))
-        (when-not (#{:record-by-id :records-by-type :records-by-field :records-by-field-range :records-by-span-overlap :type-census} (:query/type payload))
+        (when-not (#{:record-by-id :records-by-type :records-by-field :records-by-field-range :records-by-span-overlap :type-census :records-by-ids :count-by-field} (:query/type payload))
           (throw (gates/layered-error 4 :arxana-valid-time-unsupported
                                       {:category :unsupported :query/type (:query/type payload)}))))
       (if-let [idx @!arxana-index]
         (respond! ex 200
                   (case (:query/type payload)
+                    (:attestations-by-subjects :role-reverse-many) (arxana-index/many-sets idx @!node payload)
+                    :records-by-ids (with-expensive-read! ex #(arxana/records-by-ids @!node payload))
+                    :count-by-field (with-expensive-read! ex #(arxana/count-by-field @!node payload))
                     :role-reverse (arxana-index/query-edges idx @!node payload)
                     (:records-by-type :records-by-field :records-by-field-range :records-by-span-overlap :type-census)
                     (with-expensive-read! ex #(arxana-index/catalogue-query idx @!node payload))

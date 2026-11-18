@@ -1030,3 +1030,33 @@ refers to the actual overlap set. Response shape matches field queries and
 additionally names `:interval`. This replaces client intersection of two capped
 candidate lists; it does not remove the need to inspect the final truncation
 flag. Historical reads require the separately authorized field backfill.
+
+### Arxana batched reads (Packet 32)
+
+These use `/api/alpha/arxana/query` and the existing principal authentication.
+No write or sidecar repair is performed by these operations.
+
+- `:attestations-by-subjects`: `:subject-ids` vector (at most 1000 strings),
+  `:limit` 0..200 (default 200). `:results` contains each distinct requested
+  `:id`, `:attestation-ids` newest first, `:total`, `:limit`, `:truncated?`.
+- `:role-reverse-many`: `:endpoint-ids` with the same bounds, `:edge-type`
+  `[keyword positive-integer]`, `:endpoint-role` keyword; same response with
+  `:edge-ids`. Limit 0 is a count-only response; nonempty sets remain marked
+  truncated. Both operations use fixed 100-slot SQLite statements with bound
+  parameters and a source/index watermark check. They are current-index reads,
+  not as-of reads; hydrate candidates at the desired valid time.
+- `:records-by-ids`: `:record-ids` vector (at most 1000 strings), optional
+  millisecond `:valid-time`. `:results` has each distinct requested
+  `:record-id`, `:status :ok` and `:record`, or `:status :missing`.
+  Fixed 50-id parameterized XTQL filters cover the six reserved tables at the
+  same valid time. Empty input returns empty results. The result is not capped
+  below the accepted input size. This is not a cross-table system-time snapshot.
+- `:count-by-field`: clusion `:type-revision`, `:field`, `:value`, optional
+  `:valid-time`, with the same field coordinates and canonical equality as
+  `:records-by-field`. Returns exact distinct `:total`, without the 200-row
+  result cap, and `:truncated? false`. It joins the authoritative clusion and
+  field rows at the requested valid time.
+
+Set batches return `:status :stale-index` if the sidecar is behind or the source
+moves during acquisition. A caller must inspect each result's truncation flag;
+missing keys are explicit zero-total sets. Invalid shapes are typed refusals.
