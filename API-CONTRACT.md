@@ -981,3 +981,24 @@ preserves valid-time intervals, and upgrades old field rows with kind/table/
 numeric columns. `backfill-clusion-fields!` delegates to it for compatibility.
 No authoritative record content or ID changes. No backfill runs automatically;
 old equality/range projections require this separately authorized upgrade.
+
+### Edge-join registry snapshot
+
+The closed edge-join vocabulary is now the merge of its original shapes and
+`data/arxana/edge-join-shapes.edn`. The latter is generated data: every futon3c
+registered clusion revision with at least two roles. futon1b loads EDN only and
+has no runtime dependency on futon3c. If an exported role set disagrees with a
+legacy entry, namespace loading fails with `:arxana/join-shape-conflict` naming
+the type. Unknown types remain refused; no arbitrary columns or XTQL are accepted.
+
+Regenerate from the futon3c checkout:
+
+```
+clojure -M -m futon3c.arxana.join-registry /path/to/futon1b/data/arxana/edge-join-shapes.edn
+```
+
+`futon3c.arxana.join-registry-test` compares that committed resource with the
+current registry. For review of paired worktrees, select the candidate resource
+with `-J-Dfuton1b.join-snapshot=/absolute/path/to/edge-join-shapes.edn`; without
+that override it uses the futon1b dependency's classpath resource. Refresh and
+review both repositories together when adding multi-role clusion revisions.

@@ -22,6 +22,7 @@
 ;; No sequencer, no CRDT: atomicity stays in the store (D7 A2, O-D3a).
 (ns futon1b-arxana
   (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.walk :as walk]
             [futon1b-gates :as gates]
@@ -302,7 +303,7 @@
                                (list 'limit 'p-limit))
                          type endpoint-id limit))))
 
-(def edge-join-shapes
+(def legacy-edge-join-shapes
   "Closed Circus clusion vocabulary admitted by `edge-join`.  The route never
   accepts column names or XTQL from its caller; a type revision selects its
   exact role set here."
@@ -318,6 +319,32 @@
    [:hou/focus-relation 1] #{:focus :item}
    [:needs 1] #{:needing :supplier}
    [:supersedes 1] #{:successor :predecessor}})
+
+(defn checked-join-shapes
+  "Merge the data-only registry export with legacy shapes. A disagreement is
+  a load-time contract error, never an implicit change to an existing route."
+  [snapshot]
+  (when-not (and (map? snapshot)
+                 (every? (fn [[[type revision :as coordinate] roles]]
+                           (and (vector? coordinate) (= 2 (count coordinate))
+                                (keyword? type) (pos-int? revision)
+                                (set? roles) (<= 2 (count roles)) (every? keyword? roles)))
+                         snapshot))
+    (throw (ex-info "invalid edge-join registry snapshot"
+                    {:error :arxana/invalid-join-snapshot})))
+  (doseq [[type roles] legacy-edge-join-shapes
+          :when (contains? snapshot type)]
+    (when-not (= roles (get snapshot type))
+      (throw (ex-info "edge-join role sets disagree"
+                      {:error :arxana/join-shape-conflict :type-revision type
+                       :legacy roles :registry (get snapshot type)}))))
+  (merge legacy-edge-join-shapes snapshot))
+
+(def edge-join-shapes
+  (checked-join-shapes
+   (edn/read-string (slurp (or (io/resource "data/arxana/edge-join-shapes.edn")
+                              (throw (ex-info "edge-join registry snapshot missing"
+                                              {:error :arxana/missing-join-snapshot})))))))
 
 (def ^:private edge-join-keys #{:query/type :patterns :where :limit})
 (def ^:private logic-var-pattern #"[A-Za-z][A-Za-z0-9_-]{0,63}")
