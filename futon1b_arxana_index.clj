@@ -224,7 +224,9 @@
       {:status :stale-index :source/watermark source :index/watermark cached}
       (case (:query/type request)
         :records-by-type (arxana/records-by-type node request)
-        :records-by-field (arxana/records-by-field node request)))))
+        :records-by-field (arxana/records-by-field node request)
+        :records-by-field-range (arxana/records-by-field-range node request)
+        :type-census (arxana/type-census node request)))))
 
 (defn assessments [{:keys [ds] :as index} node subject-id limit]
   (let [source (current-watermark node) cached (or (index-watermark index) 0)]

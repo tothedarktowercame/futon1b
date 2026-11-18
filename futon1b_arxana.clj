@@ -819,87 +819,171 @@
                                      :event-time value})))
       {:into table :valid-from instant})))
 
-(defn clusion-field-rows
-  "Uniform identity-content projection. Scalars preserve their EDN type;
-  vectors of scalars produce distinct element rows. Maps/nested values are
-  one canonical EDN value, not element-searchable. Empty vectors give no rows."
-  [record]
+(def record-kind-tables
+  "Closed reserved-record vocabulary; callers never supply table names."
+  {:clusion :arxana_clusions :external-reference :arxana_external_refs
+   :attestation :arxana_evidence :assessment :arxana_assessments
+   :attempt :arxana_attempts :mark-occurrence :arxana_mark_occurrences})
+
+(defn- record-fields [kind record]
+  (if (= kind :clusion)
+    (:asserted-content record)
+    ;; Top-level values remain searchable whole. Also expose one map level
+    ;; through lossless paths, e.g. [:method :check/id], not ambiguous dotted
+    ;; keywords. Deeper maps remain whole canonical EDN values.
+    (into (dissoc record :id :transport)
+          (for [[parent value] (dissoc record :id :transport)
+                :when (map? value) [child v] value]
+            [[parent child] v]))))
+
+(defn record-field-rows
+  "Uniform reserved-record projection in the historical arxana_clusion_fields
+  table. Clusions use asserted-content; other kinds use top-level fields (except
+  id/transport) plus one map level as two-element field paths. Scalar vectors
+  expand; maps/nested values are canonical EDN, not element-searchable.
+  Numeric elements additionally retain their numeric type in :field/number."
+  [kind record]
   (let [[type version] (:type-revision record)
         scalar? #(or (keyword? %) (string? %) (number? %) (boolean? %))]
     (vec
-     (for [[field value] (sort-by (comp pr-str key) (:asserted-content record))
-           element (distinct (if (and (vector? value) (every? scalar? value)) value [value]))
-           :let [encoded (canonical-record-data element)]]
-       {:xt/id (sha256-hex (canonical-record-data [(:id record) field element]))
-        :record/id (:id record) :clusion/type type :clusion/type-version version
-        :field/name field :field/value encoded}))))
+     (for [[field value] (sort-by (comp pr-str key) (record-fields kind record))
+           element (distinct (if (and (vector? value) (every? scalar? value)) value [value]))]
+       (cond-> {:xt/id (sha256-hex (canonical-record-data
+                                  (if (= kind :clusion) [(:id record) field element]
+                                      [kind (:id record) field element])))
+                :record/id (:id record) :record/kind kind :record/table (record-kind-tables kind)
+                :field/name field :field/value (canonical-record-data element)}
+         (= kind :clusion) (assoc :clusion/type type :clusion/type-version version)
+         (number? element) (assoc :field/number element))))))
+
+(defn clusion-field-rows [record] (record-field-rows :clusion record))
 
 (defn- field-put-ops [operation record target]
-  (when (= :clusion/assert operation)
-    (let [rows (clusion-field-rows record)
+  (when-let [table (:table (append-spec operation))]
+    (let [kind (some (fn [[kind t]] (when (= table t) kind)) record-kind-tables)
+          rows (record-field-rows kind record)
           target (if (map? target) (assoc target :into :arxana_clusion_fields)
                      :arxana_clusion_fields)]
       (when (seq rows) [(into [:put-docs target] rows)]))))
 
-(defn- query-coordinate [{:keys [type-revision limit valid-time]}]
-  (when-not (and (vector? type-revision) (= 2 (count type-revision))
-                 (keyword? (first type-revision))
-                 (pos-int? (second type-revision)))
-    (throw (gates/layered-error 4 :arxana-invalid-type-revision
-                                {:category :invalid :type-revision type-revision})))
+(defn- query-coordinate [{:keys [type-revision limit valid-time record-kind]
+                          :or {record-kind :clusion}}]
+  (when-not (contains? record-kind-tables record-kind)
+    (throw (gates/layered-error 4 :arxana-invalid-record-kind {:category :invalid :record-kind record-kind})))
+  (when (and (= record-kind :clusion)
+             (not (and (vector? type-revision) (= 2 (count type-revision))
+                       (keyword? (first type-revision)) (pos-int? (second type-revision)))))
+    (throw (gates/layered-error 4 :arxana-invalid-type-revision {:category :invalid :type-revision type-revision})))
+  (when (and (not= record-kind :clusion) type-revision)
+    (throw (gates/layered-error 4 :arxana-type-not-applicable {:category :invalid})))
   (when-not (or (nil? limit) (integer? limit))
     (throw (gates/layered-error 4 :arxana-invalid-limit {:category :invalid :limit limit})))
-  {:type (first type-revision) :version (second type-revision)
+  {:type (first type-revision) :version (second type-revision) :kind record-kind
    :limit (min 200 (max 1 (or limit 50)))
    :at (if valid-time (validate-valid-time valid-time) (Instant/now))})
 
-(defn- query-records [node request field?]
-  (let [{:keys [type version limit at]} (query-coordinate request)
-        _ (when (and field? (not (keyword? (:field request))))
+(defn- field-coordinate? [f]
+  (or (keyword? f) (and (vector? f) (= 2 (count f)) (every? keyword? f))))
+
+(defn- range-bounds [request]
+  (doseq [key [:lower :upper]]
+    (let [bound (get request key)]
+      (when-not (and (map? bound) (number? (:value bound))
+                     (boolean? (:inclusive? bound))
+                     (Double/isFinite (double (:value bound))))
+        (throw (gates/layered-error 4 :arxana-invalid-range
+                                    {:category :invalid :bound key :value bound})))))
+  (when (> (get-in request [:lower :value]) (get-in request [:upper :value]))
+    (throw (gates/layered-error 4 :arxana-invalid-range {:category :invalid :reason :reversed})))
+  request)
+
+(defn- query-records [node request mode]
+  (let [{:keys [type version limit at kind]} (query-coordinate request)
+        field? (not= mode :type)
+        range? (= mode :range)
+        _ (when (and field? (not (field-coordinate? (:field request))))
             (throw (gates/layered-error 4 :arxana-invalid-field {:category :invalid})))
+        _ (when range? (range-bounds request))
         source (source-sequence node)
-        base '(from :arxana_clusions
-                    {:bind [{:xt/id rid} {:record/data data}
-                            {:clusion/type p-type} {:clusion/type-version p-version}]
-                     :for-valid-time (at p-at)})
-        start (if field?
-                (list 'unify base
-                      '(from :arxana_clusion_fields
-                             {:bind [{:record/id rid} {:clusion/type p-type}
-                                     {:clusion/type-version p-version}
-                                     {:field/name p-field} {:field/value p-value}]
-                              :for-valid-time (at p-at)}))
-                base)
-        body (list '-> start '(return rid data) '(order-by rid) '(limit p-limit))
-        params (cond-> '[p-type p-version p-at p-limit] field? (into '[p-field p-value]))
-        args (cond-> [type version at (inc limit)]
-               field? (into [(:field request) (canonical-record-data (:value request))]))
+        typed? (= kind :clusion)
+        base (list 'from (record-kind-tables kind)
+                   {:bind (cond-> '[{:xt/id rid} {:record/data data}]
+                            typed? (into '[{:clusion/type p-type} {:clusion/type-version p-version}]))
+                    :for-valid-time '(at p-at)})
+        projection (list 'from :arxana_clusion_fields
+                         {:bind (cond-> '[{:record/id rid} {:record/kind p-kind} {:field/name p-field}]
+                                  range? (conj '{:field/number number})
+                                  (not range?) (conj '{:field/value p-value}))
+                          :for-valid-time '(at p-at)})
+        conditions (when range?
+                     [(list 'where
+                            (list (if (get-in request [:lower :inclusive?]) '>= '>) 'number 'p-lower)
+                            (list (if (get-in request [:upper :inclusive?]) '<= '<) 'number 'p-upper))])
+        start (if field? (apply list 'unify (concat [base projection] conditions)) base)
+        ;; A numeric vector may match several rows: deduplicate before limit.
+        body (list '-> start '(aggregate rid data) '(order-by rid) '(limit p-limit))
+        params (cond-> '[p-at p-limit]
+                 typed? (into '[p-type p-version])
+                 field? (into '[p-kind p-field])
+                 (= mode :equal) (conj 'p-value)
+                 range? (into '[p-lower p-upper]))
+        args (cond-> [at (inc limit)]
+               typed? (into [type version])
+               field? (into [kind (:field request)])
+               (= mode :equal) (conj (canonical-record-data (:value request)))
+               range? (into [(get-in request [:lower :value]) (get-in request [:upper :value])]))
         rows (fxt/timed-q node (apply fxt/pq params body args))
         after (source-sequence node)]
     (if (not= source after)
       {:status :stale-index :source/watermark after :index/watermark source}
       {:status :ok :records (mapv #(edn/read-string (:data %)) (take limit rows))
-       :limit limit :truncated? (> (count rows) limit) :watermark source
-       :valid-time (str at)})))
+       :limit limit :truncated? (> (count rows) limit) :watermark source :valid-time (str at)})))
 
-(defn records-by-type [node request] (query-records node request false))
-(defn records-by-field [node request] (query-records node request true))
+(defn records-by-type [node request]
+  (query-records node (assoc request :record-kind :clusion) :type))
+(defn records-by-field [node request] (query-records node request :equal))
+(defn records-by-field-range [node request] (query-records node request :range))
 
-(defn backfill-clusion-fields!
-  "Explicit maintenance, never called at boot. Rebuild missing field intervals
-  from authoritative clusions at current system time/all valid times. Repeating
-  a completed backfill performs no transaction. Does not touch external sources."
+(defn type-census
+  "XTQL counts at one valid/system time, bounded by type buckets, not records.
+  Non-clusion kinds with zero records have a zero bucket."
+  [node request]
+  (let [{:keys [limit at]} (query-coordinate (assoc request :record-kind :attestation :type-revision nil))
+        system-at (Instant/now)
+        rows (mapcat
+              (fn [[kind table]]
+                (let [clusion? (= kind :clusion)
+                      body (list '->
+                                 (list 'from table
+                                       {:bind (if clusion? '[clusion/type clusion/type-version] '[xt/id])
+                                        :for-valid-time '(at p-at) :for-system-time '(at p-system)})
+                                 (if clusion? '(aggregate clusion/type clusion/type-version {:n (row-count)})
+                                     '(aggregate {:n (row-count)}))
+                                 (if clusion? '(order-by clusion/type clusion/type-version) '(order-by n))
+                                 '(limit p-limit))
+                      buckets (fxt/timed-q node (fxt/pq '[p-at p-system p-limit] body at system-at (inc limit)))]
+                  (if clusion?
+                    (map (fn [r] {:record-kind kind :type-revision [(:clusion/type r) (:clusion/type-version r)]
+                                  :count (:n r)}) buckets)
+                    [{:record-kind kind :count (or (:n (first buckets)) 0)}])))
+              (sort-by key record-kind-tables))
+        ordered (sort-by (juxt :record-kind (comp pr-str :type-revision)) rows)]
+    {:status :ok :counts (vec (take limit ordered)) :limit limit :truncated? (> (count ordered) limit)
+     :valid-time (str at) :system-time (str system-at) :watermark (source-sequence node)}))
+
+(defn backfill-record-fields!
+  "Explicit maintenance across all reserved kinds and valid-time intervals.
+  Upgrades prior projection rows in place; no authoritative record is rewritten.
+  A repeated completed backfill executes no transaction."
   [node]
-  (let [records (fxt/timed-q node
-                           '(from :arxana_clusions
-                                  {:bind [record/data xt/valid-from xt/valid-to]
-                                   :for-valid-time :all-time}))
-        existing (set (fxt/timed-q node
+  (let [existing (set (fxt/timed-q node
                                   '(from :arxana_clusion_fields
-                                         {:bind [* xt/valid-from xt/valid-to]
-                                          :for-valid-time :all-time})))
-        desired (for [r records
-                      row (clusion-field-rows (edn/read-string (:record/data r)))]
+                                         {:bind [* xt/valid-from xt/valid-to] :for-valid-time :all-time})))
+        desired (for [[kind table] (sort-by key record-kind-tables)
+                      r (fxt/timed-q node (list 'from table
+                                               {:bind '[record/data xt/valid-from xt/valid-to]
+                                                :for-valid-time :all-time}))
+                      row (record-field-rows kind (edn/read-string (:record/data r)))]
                   (merge row (select-keys r [:xt/valid-from :xt/valid-to])))
         missing (remove existing desired)
         ops (mapv (fn [row]
@@ -910,6 +994,10 @@
                      (dissoc row :xt/valid-from :xt/valid-to)]) missing)]
     (when (seq ops) (xt/execute-tx node ops))
     {:status :ok :rows-written (count ops)}))
+
+(defn backfill-clusion-fields!
+  "Compatibility entry point; now backfills every reserved record kind."
+  [node] (backfill-record-fields! node))
 
 (defn- conditional-append-command! [node {:keys [message-id operation record
                                                   record-id table subject-id]}]

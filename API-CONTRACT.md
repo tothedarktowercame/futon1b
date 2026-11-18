@@ -934,3 +934,50 @@ The existing `:attestations` response now also includes `:total` and
 `:truncated?`. Existing IDs/order/limit/watermark are preserved (default 50,
 maximum 200, newest event-time and ID first). No cursor is added. Callers must
 refuse incomplete histories rather than treat a truncated list as complete.
+
+### Reserved-record fields, ranges and census
+
+`:records-by-field` now accepts `:record-kind`: `:clusion` (default),
+`:external-reference`, `:attestation`, `:assessment`, `:attempt`, or
+`:mark-occurrence`. Non-clusion requests omit `:type-revision`. Kinds select a
+closed server-owned table mapping. Each field row has `:record/kind` and
+`:record/table`. The physical table retains its packet-19 name
+`:arxana_clusion_fields`, but now covers all six reserved kinds.
+
+Clusions project asserted-content only. Other kinds project top-level fields
+except id/transport, retaining whole maps and exposing one map level as a
+lossless two-key field path. Example: `{:query/type :records-by-field
+:record-kind :attestation :field [:method :check/id] :value "check-X"}`.
+Deeper maps remain whole canonical EDN. This avoids ambiguous dotted-key
+renaming. Numeric scalar/vector elements additionally carry `:field/number`;
+that column is absent (reads nil) for other values. Numeric strings are not coerced.
+
+Range request example:
+
+```clojure
+{:query/type :records-by-field-range :type-revision [:span 1]
+ :field :start :lower {:value 0 :inclusive? true}
+ :upper {:value 25 :inclusive? false}
+ :valid-time "2026-09-01T00:00:00.000Z" :limit 50}
+```
+
+Both finite numeric bounds and both boolean inclusivity flags are required.
+Reversed bounds are refused. Duplicate matches are removed before limit+1;
+response shape and temporal handling match equality queries. Half-open span
+intersection [15,25) is start<25 AND end>15: intersect the two result sets only
+when both bounded responses are complete. No multi-field interval join is
+introduced in this packet.
+
+`:type-census` accepts valid-time and limit (default 50, clamp 1–200). It returns
+`:counts`: `{:record-kind :clusion :type-revision [type version] :count n}` for
+populated clusion revisions and `{:record-kind kind :count n}` for each other
+kind, including zero counts. Also returned: limit/truncated?, valid-time,
+system-time and watermark. Counts run in XTQL at a shared valid/system instant;
+the cap bounds output buckets. Watermark is the existing C3 sequence, not an
+all-table change counter; system-time identifies the census snapshot.
+
+`backfill-record-fields!` explicitly projects all six authoritative tables,
+preserves valid-time intervals, and upgrades old field rows with kind/table/
+numeric columns. `backfill-clusion-fields!` delegates to it for compatibility.
+No authoritative record content or ID changes. No backfill runs automatically;
+old equality/range projections require this separately authorized upgrade.
