@@ -48,7 +48,8 @@
       (let [file (File/createTempFile "catalogue-index" ".db")
             index (idx/open-index (.getPath file))]
         (try
-          (is (= :stale-index (:status (idx/catalogue-query index node (assoc q :query/type :records-by-type)))))
+          ;; A stale sidecar no longer refuses XTQL-backed catalogue reads.
+          (is (= :ok (:status (idx/catalogue-query index node (assoc q :query/type :records-by-type)))))
           (idx/rebuild! index node)
           (is (= :ok (:status (idx/catalogue-query index node (assoc fields :query/type :records-by-field)))))
           (doseq [n [3 4]]

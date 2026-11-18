@@ -216,18 +216,17 @@
                                  subject-id limit] unqualified))}))))
 
 (defn catalogue-query
-  "Refuse a stale sidecar consistently with existing bounded reads. Results
-  themselves come from XTQL, not from SQLite candidates."
-  [index node request]
-  (let [source (current-watermark node) cached (or (index-watermark index) 0)]
-    (if (not= source cached)
-      {:status :stale-index :source/watermark source :index/watermark cached}
-      (case (:query/type request)
-        :records-by-type (arxana/records-by-type node request)
-        :records-by-field (arxana/records-by-field node request)
-        :records-by-field-range (arxana/records-by-field-range node request)
-        :type-census (arxana/type-census node request)
-        :records-by-span-overlap (arxana/records-by-span-overlap node request)))))
+  "Catalogue reads come from XTQL over the authoritative tables, not from the
+  SQLite sidecar, so a lagging sidecar is not a reason to refuse them. (They
+  were gated on it until 2026-11-18; under live write load most catalogue views
+  came back :stale-index.) INDEX is kept in the signature for the route."
+  [_index node request]
+  (case (:query/type request)
+    :records-by-type (arxana/records-by-type node request)
+    :records-by-field (arxana/records-by-field node request)
+    :records-by-field-range (arxana/records-by-field-range node request)
+    :type-census (arxana/type-census node request)
+    :records-by-span-overlap (arxana/records-by-span-overlap node request)))
 
 (defn assessments [{:keys [ds] :as index} node subject-id limit]
   (let [source (current-watermark node) cached (or (index-watermark index) 0)]

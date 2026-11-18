@@ -961,10 +961,8 @@
                range? (into [(get-in request [:lower :value]) (get-in request [:upper :value])]))
         rows (fxt/timed-q node (apply fxt/pq params body args))
         after (source-sequence node)]
-    (if (not= source after)
-      {:status :stale-index :source/watermark after :index/watermark source}
-      {:status :ok :records (mapv #(edn/read-string (:data %)) (take limit rows))
-       :limit limit :truncated? (> (count rows) limit) :watermark source :valid-time (str at)})))
+    {:status :ok :watermark/after after :records (mapv #(edn/read-string (:data %)) (take limit rows))
+       :limit limit :truncated? (> (count rows) limit) :watermark source :valid-time (str at)}))
 
 (defn records-by-type [node request]
   (query-records node (assoc request :record-kind :clusion) :type))
@@ -1010,11 +1008,9 @@
                typed? (into [type version]))
         rows (fxt/timed-q node (apply fxt/pq params body args))
         after (source-sequence node)]
-    (if (not= source after)
-      {:status :stale-index :source/watermark after :index/watermark source}
-      {:status :ok :records (mapv #(edn/read-string (:data %)) (take limit rows))
+    {:status :ok :watermark/after after :records (mapv #(edn/read-string (:data %)) (take limit rows))
        :interval interval :limit limit :truncated? (> (count rows) limit)
-       :watermark source :valid-time (str at)})))
+       :watermark source :valid-time (str at)}))
 
 (defn type-census
   "XTQL counts at one valid/system time, bounded by type buckets, not records.
