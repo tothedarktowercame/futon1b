@@ -202,13 +202,29 @@
          :edge-ids (mapv :edge_id (jdbc/execute! ds (into [sql] (conj args limit)) unqualified))}))))
 
 (defn attestations [{:keys [ds] :as index} node subject-id limit]
+  (let [source (current-watermark node) cached (or (index-watermark index) 0)
+        limit (min 200 (max 1 limit))]
+    (if (not= source cached)
+      {:status :stale-index :source/watermark source :index/watermark cached}
+      (let [total (:n (first (jdbc/execute! ds
+                           ["SELECT COUNT(*) AS n FROM arxana_att WHERE subject_id=?" subject-id]
+                           unqualified)))]
+        {:status :ok :watermark cached :limit limit :total total :truncated? (> total limit)
+         :attestation-ids (mapv :att_id
+                               (jdbc/execute! ds
+                                ["SELECT att_id FROM arxana_att WHERE subject_id=? ORDER BY event_time DESC,att_id DESC LIMIT ?"
+                                 subject-id limit] unqualified))}))))
+
+(defn catalogue-query
+  "Refuse a stale sidecar consistently with existing bounded reads. Results
+  themselves come from XTQL, not from SQLite candidates."
+  [index node request]
   (let [source (current-watermark node) cached (or (index-watermark index) 0)]
     (if (not= source cached)
       {:status :stale-index :source/watermark source :index/watermark cached}
-      {:status :ok :watermark cached :limit (min 200 (max 1 limit))
-       :attestation-ids (mapv :att_id
-                              (jdbc/execute! ds ["SELECT att_id FROM arxana_att WHERE subject_id=? ORDER BY event_time DESC,att_id DESC LIMIT ?"
-                                                 subject-id (min 200 (max 1 limit))] unqualified))})))
+      (case (:query/type request)
+        :records-by-type (arxana/records-by-type node request)
+        :records-by-field (arxana/records-by-field node request)))))
 
 (defn assessments [{:keys [ds] :as index} node subject-id limit]
   (let [source (current-watermark node) cached (or (index-watermark index) 0)]

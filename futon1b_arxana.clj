@@ -819,6 +819,98 @@
                                      :event-time value})))
       {:into table :valid-from instant})))
 
+(defn clusion-field-rows
+  "Uniform identity-content projection. Scalars preserve their EDN type;
+  vectors of scalars produce distinct element rows. Maps/nested values are
+  one canonical EDN value, not element-searchable. Empty vectors give no rows."
+  [record]
+  (let [[type version] (:type-revision record)
+        scalar? #(or (keyword? %) (string? %) (number? %) (boolean? %))]
+    (vec
+     (for [[field value] (sort-by (comp pr-str key) (:asserted-content record))
+           element (distinct (if (and (vector? value) (every? scalar? value)) value [value]))
+           :let [encoded (canonical-record-data element)]]
+       {:xt/id (sha256-hex (canonical-record-data [(:id record) field element]))
+        :record/id (:id record) :clusion/type type :clusion/type-version version
+        :field/name field :field/value encoded}))))
+
+(defn- field-put-ops [operation record target]
+  (when (= :clusion/assert operation)
+    (let [rows (clusion-field-rows record)
+          target (if (map? target) (assoc target :into :arxana_clusion_fields)
+                     :arxana_clusion_fields)]
+      (when (seq rows) [(into [:put-docs target] rows)]))))
+
+(defn- query-coordinate [{:keys [type-revision limit valid-time]}]
+  (when-not (and (vector? type-revision) (= 2 (count type-revision))
+                 (keyword? (first type-revision))
+                 (pos-int? (second type-revision)))
+    (throw (gates/layered-error 4 :arxana-invalid-type-revision
+                                {:category :invalid :type-revision type-revision})))
+  (when-not (or (nil? limit) (integer? limit))
+    (throw (gates/layered-error 4 :arxana-invalid-limit {:category :invalid :limit limit})))
+  {:type (first type-revision) :version (second type-revision)
+   :limit (min 200 (max 1 (or limit 50)))
+   :at (if valid-time (validate-valid-time valid-time) (Instant/now))})
+
+(defn- query-records [node request field?]
+  (let [{:keys [type version limit at]} (query-coordinate request)
+        _ (when (and field? (not (keyword? (:field request))))
+            (throw (gates/layered-error 4 :arxana-invalid-field {:category :invalid})))
+        source (source-sequence node)
+        base '(from :arxana_clusions
+                    {:bind [{:xt/id rid} {:record/data data}
+                            {:clusion/type p-type} {:clusion/type-version p-version}]
+                     :for-valid-time (at p-at)})
+        start (if field?
+                (list 'unify base
+                      '(from :arxana_clusion_fields
+                             {:bind [{:record/id rid} {:clusion/type p-type}
+                                     {:clusion/type-version p-version}
+                                     {:field/name p-field} {:field/value p-value}]
+                              :for-valid-time (at p-at)}))
+                base)
+        body (list '-> start '(return rid data) '(order-by rid) '(limit p-limit))
+        params (cond-> '[p-type p-version p-at p-limit] field? (into '[p-field p-value]))
+        args (cond-> [type version at (inc limit)]
+               field? (into [(:field request) (canonical-record-data (:value request))]))
+        rows (fxt/timed-q node (apply fxt/pq params body args))
+        after (source-sequence node)]
+    (if (not= source after)
+      {:status :stale-index :source/watermark after :index/watermark source}
+      {:status :ok :records (mapv #(edn/read-string (:data %)) (take limit rows))
+       :limit limit :truncated? (> (count rows) limit) :watermark source
+       :valid-time (str at)})))
+
+(defn records-by-type [node request] (query-records node request false))
+(defn records-by-field [node request] (query-records node request true))
+
+(defn backfill-clusion-fields!
+  "Explicit maintenance, never called at boot. Rebuild missing field intervals
+  from authoritative clusions at current system time/all valid times. Repeating
+  a completed backfill performs no transaction. Does not touch external sources."
+  [node]
+  (let [records (fxt/timed-q node
+                           '(from :arxana_clusions
+                                  {:bind [record/data xt/valid-from xt/valid-to]
+                                   :for-valid-time :all-time}))
+        existing (set (fxt/timed-q node
+                                  '(from :arxana_clusion_fields
+                                         {:bind [* xt/valid-from xt/valid-to]
+                                          :for-valid-time :all-time})))
+        desired (for [r records
+                      row (clusion-field-rows (edn/read-string (:record/data r)))]
+                  (merge row (select-keys r [:xt/valid-from :xt/valid-to])))
+        missing (remove existing desired)
+        ops (mapv (fn [row]
+                    [:put-docs (cond-> {:into :arxana_clusion_fields
+                                        :valid-from (.toInstant ^java.time.ZonedDateTime (:xt/valid-from row))}
+                                 (:xt/valid-to row)
+                                 (assoc :valid-to (.toInstant ^java.time.ZonedDateTime (:xt/valid-to row))))
+                     (dissoc row :xt/valid-from :xt/valid-to)]) missing)]
+    (when (seq ops) (xt/execute-tx node ops))
+    {:status :ok :rows-written (count ops)}))
+
 (defn- conditional-append-command! [node {:keys [message-id operation record
                                                   record-id table subject-id]}]
   (if-let [outcome (outcome-by-message node message-id)]
@@ -864,6 +956,7 @@
                         [subject-id]]])
                     (when indexed? [counter-assert])
                     [[:put-docs put-target doc]]
+                    (field-put-ops operation record put-target)
                     (when indexed?
                       [[:put-docs :arxana_index_events
                         {:xt/id next-counter :source/sequence next-counter
@@ -930,7 +1023,9 @@
                       (concat [[:sql assertion [record-id record-id (canonical-record-data record)]]]
                               (when subject-id
                                 [[:sql "ASSERT EXISTS (SELECT 1 FROM arxana_clusions WHERE _id = ?)" [subject-id]]])
-                              (when (nil? existing) [[:put-docs put-target doc]])
+                              (when (nil? existing)
+                                (concat [[:put-docs put-target doc]]
+                                        (field-put-ops operation record put-target)))
                               (when indexed?
                                 [[:put-docs :arxana_index_events
                                   {:xt/id n :source/sequence n :record/id record-id :record/table table}]]))))))))

@@ -1101,13 +1101,15 @@
           _ (arxana/authenticate! principal)]
       (when (contains? payload :valid-time)
         (arxana/validate-valid-time (:valid-time payload))
-        (when-not (= :record-by-id (:query/type payload))
+        (when-not (#{:record-by-id :records-by-type :records-by-field} (:query/type payload))
           (throw (gates/layered-error 4 :arxana-valid-time-unsupported
                                       {:category :unsupported :query/type (:query/type payload)}))))
       (if-let [idx @!arxana-index]
         (respond! ex 200
                   (case (:query/type payload)
                     :role-reverse (arxana-index/query-edges idx @!node payload)
+                    (:records-by-type :records-by-field)
+                    (with-expensive-read! ex #(arxana-index/catalogue-query idx @!node payload))
                     :edge-join (with-expensive-read!
                                  ex #(arxana/edge-join @!node payload))
                     :attestations (arxana-index/attestations idx @!node

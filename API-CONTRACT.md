@@ -894,3 +894,43 @@ preserved in full returned records. There is no harness candidate index; adding
 a nested-map post-filter would expand the common scan projection (see
 `futon1b_evidence.clj` filter-cols cost note) and needs a separate bounded-query
 cost check. Do not rely on an unsupported query parameter to narrow results.
+
+### Reserved Arxana catalogue queries
+
+`POST /api/alpha/arxana/query` with `x-arxana-principal` accepts:
+
+- `{:query/type :records-by-type :type-revision [:design/choice 1]}`
+- `{:query/type :records-by-field :type-revision [:design/choice 1]
+    :field :applies-to :value :demo/example}`
+
+Both accept optional `:valid-time` (UTC ISO milliseconds, as for record-by-id)
+  and `:limit` (default 50, clamped 1–200). A type coordinate is a two-element
+  vector of keyword and positive integer; field names are keywords, never
+  submitted query fragments. Results are `{:status :ok :records [...] :limit n
+  :truncated? boolean :watermark sequence :valid-time instant}`, ordered by ID.
+  The XTQL query fetches at most limit+1. An empty type is an empty successful
+  result, not missing. A stale sidecar returns `:status :stale-index`; a source
+  sequence change during the XTQL read also refuses the result. This watermark
+  is not a pinned system-time snapshot or a pagination token.
+
+The field relation `:arxana_clusion_fields` is in **XTDB**, joined to
+`:arxana_clusions` at the same valid time. Clusion append transactions project
+all asserted-content keys uniformly. Scalar vectors match per distinct element;
+scalars match their canonical EDN value; maps and nested values match one whole
+canonical EDN value, not their elements. Empty scalar vectors have no field rows.
+Fields retain EDN type distinctions (for example, keyword versus string).
+
+Deployment has two steps: restarting enables these reads and projection for
+new appends; `futon1b-arxana/backfill-clusion-fields!` must then be explicitly
+authorized and run to project pre-existing records. It reads authoritative
+clusions across valid-time intervals, preserves those intervals, and writes only
+missing derived intervals; a repeated completed backfill performs no transaction.
+It is never invoked automatically at startup. **Before that backfill completes,
+field-query absence does not establish absence in historical asserted content.**
+Type queries do not require the new field relation. No external annotated objects
+are projected. No live backfill is part of this change.
+
+The existing `:attestations` response now also includes `:total` and
+`:truncated?`. Existing IDs/order/limit/watermark are preserved (default 50,
+maximum 200, newest event-time and ID first). No cursor is added. Callers must
+refuse incomplete histories rather than treat a truncated list as complete.
