@@ -1002,3 +1002,31 @@ current registry. For review of paired worktrees, select the candidate resource
 with `-J-Dfuton1b.join-snapshot=/absolute/path/to/edge-join-shapes.edn`; without
 that override it uses the futon1b dependency's classpath resource. Refresh and
 review both repositories together when adding multi-role clusion revisions.
+
+### Span overlap in one query
+
+```clojure
+{:query/type :records-by-span-overlap
+ :type-revision [:span 1] :start-field :start :end-field :end
+ :interval :half-open :start 15 :end 25
+ :valid-time "2026-09-01T00:00:00.000Z" :limit 50}
+```
+
+The optional `:record-kind` has the same closed vocabulary/default as field
+queries; non-clusions omit type-revision. Start/end fields accept the same
+keyword or two-key path coordinates. `:interval` defaults to `:half-open`,
+currently the only accepted convention. Query endpoints must be finite numbers
+with start < end; field coordinates must differ.
+
+One XTQL query joins both numeric field rows and the authoritative record at
+the same valid time. It requires stored-start < query-end, stored-end >
+query-start, and stored-start < stored-end. Missing fields, boundary-only
+contact, and zero/reversed stored spans are not returned. Fields should be
+scalar start/end values; multi-valued fields have existential join semantics,
+not a pairing of vector elements.
+
+Deduplication and limit+1 occur after the overlap predicate, so `:truncated?`
+refers to the actual overlap set. Response shape matches field queries and
+additionally names `:interval`. This replaces client intersection of two capped
+candidate lists; it does not remove the need to inspect the final truncation
+flag. Historical reads require the separately authorized field backfill.

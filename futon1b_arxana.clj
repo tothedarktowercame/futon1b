@@ -971,6 +971,51 @@
 (defn records-by-field [node request] (query-records node request :equal))
 (defn records-by-field-range [node request] (query-records node request :range))
 
+(defn records-by-span-overlap
+  "Intersect two scalar numeric field rows inside XTQL, then limit actual
+  overlaps. Request :interval defaults to :half-open (the only convention).
+  Query endpoints must be finite, start < end. Missing/empty stored spans
+  cannot overlap. Multi-valued fields are existential, not paired vectors."
+  [node request]
+  (let [{:keys [type version kind at limit]} (query-coordinate request)
+        {:keys [start end start-field end-field]} request
+        interval (get request :interval :half-open)
+        finite? #(and (number? %) (Double/isFinite (double %)))
+        _ (when-not (and (= interval :half-open) (finite? start) (finite? end)
+                         (< start end) (field-coordinate? start-field) (field-coordinate? end-field)
+                         (not= start-field end-field))
+            (throw (gates/layered-error 4 :arxana-invalid-span
+                                        {:category :invalid :interval interval})))
+        source (source-sequence node)
+        typed? (= kind :clusion)
+        base (list 'from (record-kind-tables kind)
+                   {:bind (cond-> '[{:xt/id rid} {:record/data data}]
+                            typed? (into '[{:clusion/type p-type} {:clusion/type-version p-version}]))
+                    :for-valid-time '(at p-at)})
+        body (list '->
+                   (list 'unify base
+                         '(from :arxana_clusion_fields
+                                {:bind [{:record/id rid} {:record/kind p-kind}
+                                        {:field/name p-start-field} {:field/number lo}]
+                                 :for-valid-time (at p-at)})
+                         '(from :arxana_clusion_fields
+                                {:bind [{:record/id rid} {:record/kind p-kind}
+                                        {:field/name p-end-field} {:field/number hi}]
+                                 :for-valid-time (at p-at)})
+                         '(where (< lo p-end) (> hi p-start) (< lo hi)))
+                   '(aggregate rid data) '(order-by rid) '(limit p-limit))
+        params (cond-> '[p-kind p-at p-start-field p-end-field p-start p-end p-limit]
+                 typed? (into '[p-type p-version]))
+        args (cond-> [kind at start-field end-field start end (inc limit)]
+               typed? (into [type version]))
+        rows (fxt/timed-q node (apply fxt/pq params body args))
+        after (source-sequence node)]
+    (if (not= source after)
+      {:status :stale-index :source/watermark after :index/watermark source}
+      {:status :ok :records (mapv #(edn/read-string (:data %)) (take limit rows))
+       :interval interval :limit limit :truncated? (> (count rows) limit)
+       :watermark source :valid-time (str at)})))
+
 (defn type-census
   "XTQL counts at one valid/system time, bounded by type buckets, not records.
   Non-clusion kinds with zero records have a zero bucket."

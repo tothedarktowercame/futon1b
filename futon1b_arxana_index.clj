@@ -226,7 +226,8 @@
         :records-by-type (arxana/records-by-type node request)
         :records-by-field (arxana/records-by-field node request)
         :records-by-field-range (arxana/records-by-field-range node request)
-        :type-census (arxana/type-census node request)))))
+        :type-census (arxana/type-census node request)
+        :records-by-span-overlap (arxana/records-by-span-overlap node request)))))
 
 (defn assessments [{:keys [ds] :as index} node subject-id limit]
   (let [source (current-watermark node) cached (or (index-watermark index) 0)]
